@@ -339,6 +339,32 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.filter_reference_inliers = declare_double("filter_reference_inliers", 300.0);
   settings.filter_innovation_gate = declare_double("filter_innovation_gate", 9.0);
 
+  // The MSCKF's own numbers, read only when `fusion_model` asks for it.
+  //
+  // What it changes is where the heading comes from. The other two models take
+  // it from the instrument's orientation and hand it to the solve, so the
+  // vision residual corrects position, velocity and the accelerometer bias and
+  // can never correct the one state that decides which way all three point.
+  // Here the gyro's rate drives the heading, its bias is a state, and the
+  // ground solve's own heading is the measurement that observes both.
+  settings.msckf_gyro_noise = declare_double("msckf_gyro_noise", 0.01);
+  settings.msckf_gyro_bias_walk = declare_double("msckf_gyro_bias_walk", 0.0005);
+  settings.msckf_vision_yaw_noise = declare_double("msckf_vision_yaw_noise", 0.02);
+  settings.msckf_initial_gyro_bias_variance =
+    declare_double("msckf_initial_gyro_bias_variance", 1.0e-4);
+  // Three degrees of freedom, so the chi-square gate moves with them: 11.3 is
+  // the 99th percentile for three where 9.0 was for two.
+  settings.msckf_innovation_gate = declare_double("msckf_innovation_gate", 11.3);
+  // Beyond this the innovation is not an outlier to be down-weighted, it is a
+  // different vehicle, and it is dropped rather than inflated.
+  settings.msckf_reject_beyond_m = declare_double("msckf_reject_beyond_m", 1.5);
+  // How far the instrument's reported heading is allowed to be wrong. Tight and
+  // this is the older behaviour with a filter wrapped round it; loose and the
+  // gyro and the ground solve carry the heading between fixes. 0 switches the
+  // measurement off, which leaves the gyro bias with nothing to observe it.
+  // EstimatorSettings carries the measured trade behind this default.
+  settings.msckf_heading_noise = declare_double("msckf_heading_noise", 0.1);
+
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.
   settings.camera_disagreement_weight = declare_double("camera_disagreement_weight", 1.0);

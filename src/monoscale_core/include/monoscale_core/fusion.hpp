@@ -201,6 +201,166 @@ private:
   std::optional<UpdateRecord> last_update_;
 };
 
+// The same idea as the displacement filter, finished.
+//
+// That one clones the anchor and lets vision measure the travel since it --
+// stochastic cloning, which is the heart of an MSCKF. What it does not do is
+// hold the heading. Yaw is taken from the IMU's own orientation and handed to
+// the solve, so the vision residual can correct position, velocity and the
+// accelerometer bias, and can never correct the one state that decides which
+// way all three point. The gyro's bias is not in the state at all, and a bias
+// nothing observes is a bias that grows.
+//
+// In simulation that costs nothing: CARLA's attitude is near exact. On an
+// instrument it is the whole game, and it also explains the symptoms -- a
+// filter whose innovations run eight times smaller than its own covariance
+// claims, and a process noise with a knife-edge optimum, is a filter balancing
+// two models it cannot reconcile because they never meet in one covariance.
+//
+// So the heading joins the state and the gyro drives it:
+//
+//     theta' = w - bias_gyro
+//     v'     = R(theta) (a - bias_accel)
+//     p'     = v
+//
+// and vision arrives as what it actually measures -- the pose of now relative
+// to the anchor, both the travel and the turn:
+//
+//     z = [ R(theta_a)' (p - p_a),  theta - theta_a ]
+//
+// One covariance, so that residual reaches the heading, both biases and the
+// velocity together. Roll and pitch stay outside: they matter here only
+// through the ground projection, they are weakly observable from a plane, and
+// the complementary filter that holds them is not what is failing.
+//
+// Note what this does not read. The heading is integrated from the gyro's
+// rate, never from the orientation the instrument reports, so the estimate no
+// longer inherits an AHRS that a simulator gets right and a MEMS part does
+// not.
+class PlanarMsckfFilter
+{
+public:
+  struct Settings
+  {
+    double acceleration_noise = 1.55;
+    double gyro_noise = 0.01;
+    double bias_walk = 0.01;
+    double gyro_bias_walk = 0.0005;
+    double vision_noise_m = 0.005;
+    double vision_yaw_noise = 0.02;
+    double vision_reference_inliers = 300.0;
+    double initial_velocity_variance = 25.0;
+    double initial_bias_variance = 1.0;
+    double initial_gyro_bias_variance = 1.0e-4;
+    // Three degrees of freedom now, so the chi-square gate moves with them:
+    // 11.3 is the 99th percentile for three where 9.0 was for two.
+    double innovation_gate = 11.3;
+    // A measurement that fails the check has its noise inflated rather than
+    // being dropped, for the reason the velocity filter records: an integral
+    // with nothing observing it walks away. Set this to 0 to drop instead,
+    // which is what a solve that is wrong by metres deserves.
+    double outlier_inflation = 25.0;
+    // Beyond this the innovation is not an outlier to be down-weighted, it is
+    // a different vehicle. Dropped outright whatever the inflation says.
+    double reject_beyond_m = 1.5;
+  };
+
+  struct UpdateRecord
+  {
+    Eigen::Vector3d innovation = Eigen::Vector3d::Zero();
+    double nis = 0.0;
+    bool accepted = false;
+    bool dropped = false;
+  };
+
+  PlanarMsckfFilter();
+  explicit PlanarMsckfFilter(const Settings & settings);
+
+  bool settled() const {return updates_ > 0;}
+  Eigen::Vector2d velocity() const {return state_.segment<2>(2);}
+  Eigen::Vector2d position() const {return state_.segment<2>(0);}
+  double yaw() const {return state_(4);}
+  Eigen::Vector2d bias() const {return state_.segment<2>(5);}
+  double gyro_bias() const {return state_(7);}
+  int updates() const {return updates_;}
+  int rejected() const {return rejected_;}
+  int dropped() const {return dropped_;}
+  const std::optional<UpdateRecord> & last_update() const {return last_update_;}
+
+  // Put the pose where the caller says it is. The estimator owns the warm-up,
+  // during which it deliberately holds the pose at the origin; without this
+  // the filter would integrate away from it and hand back the difference as
+  // travel the moment the first solve is accepted.
+  void set_pose(const Eigen::Vector2d & position, double yaw);
+
+  // Clone pose and heading as the anchor the next hop measures from.
+  void open_hop();
+
+  // Propagate on the instrument: body acceleration and yaw rate.
+  void predict(const Eigen::Vector2d & acceleration_body, double rate, double dt);
+
+  Eigen::Matrix3d measurement_covariance(
+    int inliers, double spread, double extra_variance, double yaw_sigma) const;
+
+  // Fold in the hop vision measured: how far, and how much it turned.
+  bool update(
+    const Eigen::Vector2d & displacement_body, double yaw_delta, int inliers,
+    double extra_variance = 0.0, double spread = 0.0, double yaw_sigma = 0.0);
+
+  // Standing still: the velocity is zero, the heading has not turned since the
+  // anchor, and between them the biases say why.
+  //
+  // The turn is the half that matters here. The accelerometer bias is
+  // observable from a velocity that will not stay at zero; the gyro's is only
+  // observable from a heading that will not, and a filter told nothing about
+  // its heading at rest learns that bias at whatever rate the vision updates
+  // happen to carry it -- measured, a quarter of the way there after three
+  // hundred of them.
+  void update_zero_velocity(double sigma = 0.01, double yaw_sigma = 0.002);
+
+  // What the instrument says the heading is, as a measurement rather than as
+  // truth.
+  //
+  // Without it the heading has no observable reference at all. The gyro gives
+  // a rate, and the ground solve gives an angle against a map this estimate
+  // wrote itself -- when the heading drifts, the map drifts with it and the
+  // residual sees nothing. What is left is the map's memory, a few seconds
+  // deep, and on that thin signal a systematic error in the ground solve's
+  // heading is indistinguishable from a gyro bias. Measured on a recording
+  // whose gyro has no bias at all, the filter learned one of -0.36 deg/s and
+  // paid for it with 1.36 degrees of heading error.
+  //
+  // So the orientation the instrument reports comes in with a variance. Tight,
+  // and this is the older behaviour with a filter wrapped round it; loose, and
+  // vision and the gyro carry the heading between fixes. Either way the bias
+  // becomes observable, which is what it was never allowed to be.
+  void update_heading(double measured_yaw, double sigma);
+
+  // The fused hop, in the frame the anchor was cloned in.
+  Eigen::Vector2d body_translation() const;
+  double hop_yaw() const;
+  double speed() const {return state_.segment<2>(2).norm();}
+
+private:
+  static constexpr int kSize = 11;
+  using State = Eigen::Matrix<double, kSize, 1>;
+  using Covariance = Eigen::Matrix<double, kSize, kSize>;
+
+  // Where the anchor's frame turns the world difference into a hop.
+  void observation(Eigen::Matrix<double, 3, kSize> & model, Eigen::Vector2d & predicted) const;
+  void apply(
+    const Eigen::Matrix<double, 3, kSize> & model, const Eigen::Vector3d & innovation,
+    const Eigen::Matrix3d & noise, const Eigen::Matrix3d & inverse);
+
+  Settings settings_;
+  State state_ = State::Zero();
+  Covariance covariance_ = Covariance::Zero();
+  int updates_ = 0;
+  int rejected_ = 0;
+  int dropped_ = 0;
+  std::optional<UpdateRecord> last_update_;
+};
+
 }  // namespace monoscale
 
 #endif  // MONOSCALE_CORE__FUSION_HPP_

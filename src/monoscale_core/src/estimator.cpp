@@ -58,7 +58,13 @@ double percentile_90(const Points2 & from, const Points2 & to)
 
 FusionModel fusion_model_from_name(const std::string & name)
 {
-  return name == "velocity" ? FusionModel::Velocity : FusionModel::Displacement;
+  if (name == "velocity") {
+    return FusionModel::Velocity;
+  }
+  if (name == "msckf") {
+    return FusionModel::Msckf;
+  }
+  return FusionModel::Displacement;
 }
 
 struct Estimator::Frame
@@ -132,6 +138,9 @@ struct Estimator::Solved
   std::optional<PlanarMotion> motion;
   bool anchored_from_map = false;
   double spread = 0.0;
+  // How well this camera pinned the heading down, when it was asked to solve
+  // for one. Infinite when it was not.
+  double yaw_sigma = std::numeric_limits<double>::infinity();
 };
 
 Estimator::Estimator(const EstimatorSettings & settings)
@@ -180,6 +189,20 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.vision_reference_inliers = settings.filter_reference_inliers;
     filter.innovation_gate = settings.filter_innovation_gate;
     displacement_filter_ = std::make_unique<PlanarDisplacementFilter>(filter);
+  }
+  if (settings.fusion_model == FusionModel::Msckf) {
+    PlanarMsckfFilter::Settings filter;
+    filter.acceleration_noise = settings.filter_acceleration_noise;
+    filter.bias_walk = settings.filter_bias_walk;
+    filter.vision_noise_m = settings.filter_vision_noise_m;
+    filter.vision_reference_inliers = settings.filter_reference_inliers;
+    filter.gyro_noise = settings.msckf_gyro_noise;
+    filter.gyro_bias_walk = settings.msckf_gyro_bias_walk;
+    filter.vision_yaw_noise = settings.msckf_vision_yaw_noise;
+    filter.initial_gyro_bias_variance = settings.msckf_initial_gyro_bias_variance;
+    filter.innovation_gate = settings.msckf_innovation_gate;
+    filter.reject_beyond_m = settings.msckf_reject_beyond_m;
+    msckf_filter_ = std::make_unique<PlanarMsckfFilter>(filter);
   }
   map_ready_ = !settings.require_map_before_translating;
 }
@@ -271,6 +294,9 @@ void Estimator::ingest_imu(const ImuSample & sample)
   const double yaw = std::atan2(
     2.0 * (q(3) * q(2) + q(0) * q(1)),
     1.0 - 2.0 * (q(1) * q(1) + q(2) * q(2)));
+  if (!imu_yaw_datum_.has_value()) {
+    imu_yaw_datum_ = yaw;
+  }
   imu_yaw_samples_.emplace_back(sample.stamp, yaw);
   while (imu_yaw_samples_.size() > 400) {
     imu_yaw_samples_.pop_front();
@@ -301,10 +327,19 @@ void Estimator::ingest_imu(const ImuSample & sample)
       acceleration.setZero();
     }
     velocity_filter_.predict(acceleration, step.dt);
-    if (displacement_filter_) {
+    if (displacement_filter_ || msckf_filter_) {
+      // The same acceleration seen from the body, for the filter that carries
+      // its own heading and must not be handed a vector already rotated by the
+      // instrument's idea of which way the vehicle points.
+      const double c = std::cos(yaw);
+      const double s = std::sin(yaw);
+      const Eigen::Vector2d body(
+        c * acceleration.x() + s * acceleration.y(),
+        -s * acceleration.x() + c * acceleration.y());
       imu_window_.push_back(
         AccelerationSample{
-          sample.stamp + settings_.imu_acceleration_offset_sec, acceleration, step.dt, yaw});
+          sample.stamp + settings_.imu_acceleration_offset_sec, acceleration, body,
+          sample.angular_velocity.z(), step.dt, yaw});
       while (imu_window_.size() > 8000) {
         imu_window_.pop_front();
       }
@@ -495,6 +530,39 @@ std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
   return attitude_->body_tilt();
 }
 
+// Propagate over exactly the interval a measurement spans, boundaries
+// included. Each buffered sample carries the step since the one before it, so
+// taking whole samples covers a window shifted early by up to one IMU period
+// -- 17% of a 100 ms hop at 60 Hz. The first step is clipped to where the
+// interval actually begins and a zero-order-hold tail closes it at the end.
+void Estimator::replay_inertial(
+  double from, double to,
+  const std::function<void(const AccelerationSample &, double)> & step) const
+{
+  const AccelerationSample * last = nullptr;
+  bool first = true;
+  for (const auto & sample : imu_window_) {
+    if (sample.stamp <= from || sample.stamp > to) {
+      continue;
+    }
+    double span = std::min(sample.dt, 0.1);
+    if (first) {
+      span = std::min(span, sample.stamp - from);
+      first = false;
+    }
+    if (span > 0.0) {
+      step(sample, span);
+    }
+    last = &sample;
+  }
+  if (last != nullptr) {
+    const double tail = to - last->stamp;
+    if (tail > 0.0 && tail <= 0.1) {
+      step(*last, tail);
+    }
+  }
+}
+
 void Estimator::remember_solve_pixels(Camera & camera)
 {
   const Eigen::Index count = camera.track_ids.size();
@@ -525,7 +593,7 @@ void Estimator::remember_solve_pixels(Camera & camera)
 }
 
 std::optional<Estimator::Solved> Estimator::solve_camera(
-  Camera & camera, std::optional<double> yaw_delta)
+  Camera & camera, std::optional<double> yaw_delta, std::optional<double> yaw_guess)
 {
   // Pixels at the last solve and now, for features that survived both.
   const Eigen::Index held = camera.solve_ids.size();
@@ -655,16 +723,19 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       camera.anchors.anchor_view(selected_ids, world, weights);
     }
 
+    // Where the solve is told to start looking. With the MSCKF that is the
+    // filter's own propagated heading rather than the instrument's, and the
+    // solve is asked to improve on it -- the improvement is the measurement.
+    const double handed = yaw_guess.has_value()
+      ? *yaw_guess : wrap_pi(pose_.yaw + *yaw_delta);
     std::optional<AnchorAlignment> aligned;
     {
       Stopwatch align(diagnostics_, "align");
       aligned = align_to_anchors(
-        body, world, weights, wrap_pi(pose_.yaw + *yaw_delta),
-        settings_.ground_ransac_threshold_m, settings_.ground_min_inliers,
-        heading_.enabled());
+        body, world, weights, handed, settings_.ground_ransac_threshold_m,
+        settings_.ground_min_inliers, heading_.enabled() || msckf_filter_ != nullptr);
     }
     if (aligned.has_value()) {
-      const double handed = wrap_pi(pose_.yaw + *yaw_delta);
       // Recorded, not applied. Both cameras see the same heading and each has
       // its own opinion of how far it is out; folding them in one at a time
       // gives the filter two updates against one prediction.
@@ -674,7 +745,12 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         heading_observations_.emplace_back(
           wrap_pi(aligned->yaw - handed), aligned->yaw_sigma);
       }
-      const Pose2 placed{aligned->translation.x(), aligned->translation.y(), handed};
+      // With the MSCKF the heading the ground settled on is what the filter is
+      // being told; without it the heading handed in stands, which is what
+      // every measurement before this assumed.
+      const double heading = msckf_filter_ ? aligned->yaw : handed;
+      solved.yaw_sigma = aligned->yaw_sigma;
+      const Pose2 placed{aligned->translation.x(), aligned->translation.y(), heading};
       PlanarMotion motion = relative_motion(pose_, placed);
       motion.inliers = static_cast<int>(aligned->inliers.count());
       motion.scale = 1.0;
@@ -846,10 +922,25 @@ void Estimator::process_pair()
   heading_.predict(std::max(dt, 0.0));
   heading_observations_.clear();
 
+  // The MSCKF propagates before it measures, which is the order an MSCKF runs
+  // in and the reason the heading it hands the solve is worth more than the
+  // instrument's: it has already carried the gyro across this interval with
+  // the bias it has learned taken out.
+  std::optional<double> yaw_guess;
+  if (msckf_filter_ && dt > 1e-4) {
+    msckf_filter_->open_hop();
+    replay_inertial(
+      previous_stamp, current_stamp,
+      [this](const AccelerationSample & sample, double step) {
+        msckf_filter_->predict(sample.body_acceleration, sample.rate, step);
+      });
+    yaw_guess = msckf_filter_->yaw();
+  }
+
   std::vector<std::optional<Solved>> solved(count);
   if (imu_available) {
     for (size_t i = 0; i < count; ++i) {
-      solved[i] = solve_camera(*cameras_[i], yaw_delta);
+      solved[i] = solve_camera(*cameras_[i], yaw_delta, yaw_guess);
     }
   } else {
     for (auto & camera : cameras_) {
@@ -950,34 +1041,85 @@ void Estimator::process_pair()
 
   const Pose2 previous_pose = pose_;
 
-  if (displacement_filter_ && motion.has_value() && dt > 1e-4) {
+  if (msckf_filter_ && motion.has_value() && dt > 1e-4) {
+    // The measurement is the hop as vision saw it, in the frame the anchor was
+    // cloned in: how far, and how much the heading turned. Both halves are the
+    // ground solve's own answer -- the turn is not the instrument's, which is
+    // the point of carrying the heading as a state.
+    Eigen::Vector2d hop(motion->x, motion->y);
+    double turn = motion->yaw;
+    double extra = motions.size() >= 2
+      ? std::pow(settings_.camera_disagreement_weight * disagreement, 2)
+      : settings_.single_camera_variance * dt * dt;
+    double spread = 0.0;
+    {
+      double weighted = 0.0;
+      double total = 0.0;
+      for (const auto & input : precision_inputs) {
+        weighted += input.spread * input.count;
+        total += input.count;
+      }
+      spread = total > 0.0 ? weighted / total : 0.0;
+    }
+    // Both cameras see the same heading, so their opinions of it combine the
+    // way two measurements of one quantity do.
+    double precision = 0.0;
+    for (const auto & entry : solved) {
+      if (entry.has_value() && entry->motion.has_value() &&
+        std::isfinite(entry->yaw_sigma) && entry->yaw_sigma > 0.0)
+      {
+        precision += 1.0 / (entry->yaw_sigma * entry->yaw_sigma);
+      }
+    }
+    const double yaw_sigma = precision > 0.0 ? std::sqrt(1.0 / precision) : 0.0;
+
+    if (standing) {
+      hop.setZero();
+      turn = 0.0;
+      extra = std::pow(settings_.zupt_velocity_sigma * dt, 2);
+      spread = 0.0;
+    }
+    if (!msckf_filter_->update(hop, turn, motion->inliers, extra, spread, yaw_sigma)) {
+      ++diagnostics_.filter_rejections;
+    }
+    if (standing) {
+      msckf_filter_->update_zero_velocity(settings_.zupt_velocity_sigma);
+    }
+    // And what the instrument says the heading is, weighed rather than
+    // believed. This is the reference that makes the gyro bias observable;
+    // without it a systematic error in the ground solve's heading is
+    // indistinguishable from one.
+    if (settings_.msckf_heading_noise > 0.0 && imu_yaw_datum_.has_value()) {
+      const auto reported = imu_yaw_at(current_stamp);
+      if (reported.has_value()) {
+        msckf_filter_->update_heading(
+          wrap_pi(*reported - *imu_yaw_datum_), settings_.msckf_heading_noise);
+      }
+    }
+    inertial_.correct_velocity(msckf_filter_->velocity());
+    diagnostics_.gyro_bias = msckf_filter_->gyro_bias();
+    diagnostics_.filter_dropped = msckf_filter_->dropped();
+    if (msckf_filter_->last_update().has_value()) {
+      diagnostics_.last_nis = msckf_filter_->last_update()->nis;
+    }
+    const Eigen::Vector2d fused = msckf_filter_->body_translation();
+    if (fused.norm() <= settings_.max_translation_per_frame_m) {
+      motion->x = fused.x();
+      motion->y = fused.y();
+      motion->yaw = msckf_filter_->hop_yaw();
+      motion->scale = 1.0;
+    }
+  } else if (displacement_filter_ && motion.has_value() && dt > 1e-4) {
     // Propagate over exactly the interval this measurement spans, boundaries
     // included. Each buffered sample carries the step since the one before it,
     // so taking whole samples covers a window shifted early by up to one IMU
     // period -- 17% of a 100 ms hop at 60 Hz.
     displacement_filter_->open_hop();
-    const AccelerationSample * last = nullptr;
-    bool first = true;
-    for (const auto & sample : imu_window_) {
-      if (sample.stamp <= previous_stamp || sample.stamp > current_stamp) {
-        continue;
-      }
-      double step = std::min(sample.dt, 0.1);
-      if (first) {
-        step = std::min(step, sample.stamp - previous_stamp);
-        first = false;
-      }
-      if (step > 0.0) {
+    replay_inertial(
+      previous_stamp, current_stamp,
+      [this](const AccelerationSample & sample, double step) {
         displacement_filter_->predict(sample.acceleration, step, sample.yaw);
-      }
-      last = &sample;
-    }
-    if (last != nullptr) {
-      const double tail = current_stamp - last->stamp;
-      if (tail > 0.0 && tail <= 0.1) {
-        displacement_filter_->predict(last->acceleration, tail, last->yaw);
-      }
-    }
+      });
 
     const double c = std::cos(previous_pose.yaw);
     const double s = std::sin(previous_pose.yaw);
@@ -1161,6 +1303,16 @@ void Estimator::process_pair()
       Stopwatch watch(diagnostics_, "map");
       integrate_points(solved, previous_pose, update);
     }
+  }
+
+  if (msckf_filter_) {
+    // Put the filter where the estimator ended up. On an accepted solve the
+    // two already agree -- the pose came out of the filter. On a rejected one
+    // the estimator coasted or held, and during the warm-up it is pinned at
+    // the origin on purpose; without this the filter would carry on
+    // integrating away from it and hand back the difference as travel the
+    // moment a solve is finally accepted.
+    msckf_filter_->set_pose(Eigen::Vector2d(pose_.x, pose_.y), pose_.yaw);
   }
 
   ++diagnostics_.frames_processed;

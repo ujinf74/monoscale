@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -38,6 +39,11 @@ enum class FusionModel
   // Fuses what the two instruments actually measure -- acceleration, and
   // metres between two image times -- and carries an accelerometer bias state.
   Displacement,
+  // The same, with the heading and the gyro's bias in the state as well, so
+  // the vision residual reaches the one quantity that decides which way the
+  // other three point. Propagates on the gyro's rate rather than on the
+  // orientation the instrument reports.
+  Msckf,
 };
 
 FusionModel fusion_model_from_name(const std::string & name);
@@ -176,6 +182,36 @@ struct EstimatorSettings
   double filter_reference_inliers = 300.0;
   double filter_innovation_gate = 9.0;
 
+  // The MSCKF's own numbers. The gate is larger because the measurement has
+  // three degrees of freedom rather than two, and the yaw noise is the floor
+  // under whatever the ground solve reports for its own heading.
+  double msckf_gyro_noise = 0.01;
+  double msckf_gyro_bias_walk = 0.0005;
+  double msckf_vision_yaw_noise = 0.02;
+  double msckf_initial_gyro_bias_variance = 1.0e-4;
+  double msckf_innovation_gate = 11.3;
+  double msckf_reject_beyond_m = 1.5;
+  // How far the instrument's reported heading is allowed to be wrong, in
+  // radians. Nothing else in the filter says where north is -- the anchors
+  // turn with the estimate, so they cannot argue with a heading that drifts --
+  // which makes this the term that pins the gyro bias down.
+  //
+  // It buys accuracy against a good instrument and costs it against a bad one,
+  // and the trade is monotone, so no value wins everywhere. Measured over one
+  // recording replayed with a gyro bias injected into it, ATE in metres:
+  //
+  //   bias deg/s  displacement   0.02    0.05     0.1     off
+  //          0.0        0.111   0.136   0.171   0.178   0.206
+  //          0.1        0.327   0.183   0.205   0.226   0.240
+  //          0.3        0.438   0.338   0.329   0.319   0.309
+  //          1.0        1.129   1.038   1.017   0.815   0.567
+  //
+  // 0.1 is the hedge that never loses badly at either end. Tighten it towards
+  // 0.02 for a rig whose AHRS is trusted, and set it to 0 -- which switches
+  // the measurement off entirely and leaves the heading to the gyro and the
+  // ground solve -- for one whose AHRS is not.
+  double msckf_heading_noise = 0.1;
+
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.
   double camera_disagreement_weight = 1.0;
@@ -253,6 +289,12 @@ struct Diagnostics
   int64_t map_aligned_frames = 0;
   int64_t zupt_holds = 0;
   int64_t obstacles_unavailable = 0;
+  // What the MSCKF learned and what it thought of the last measurement. The
+  // gyro bias is the state the older filters had no place for, so its value is
+  // the whole claim; the NIS says whether the covariance is honest.
+  double gyro_bias = 0.0;
+  double last_nis = 0.0;
+  int64_t filter_dropped = 0;
   double worst_rejected = 0.0;
   double worst_allowance = 0.0;
   double camera_disagreement = 0.0;
@@ -301,7 +343,8 @@ private:
   void try_process_pairs();
   bool ready_to_solve() const;
   void process_pair();
-  std::optional<Solved> solve_camera(Camera & camera, std::optional<double> yaw_delta);
+  std::optional<Solved> solve_camera(
+    Camera & camera, std::optional<double> yaw_delta, std::optional<double> yaw_guess);
   void remember_solve_pixels(Camera & camera);
   std::optional<Eigen::Matrix3d> body_tilt() const;
   std::optional<double> imu_yaw_at(double stamp) const;
@@ -336,12 +379,27 @@ private:
   struct AccelerationSample
   {
     double stamp;
+    // World frame, gravity removed: what the displacement filter propagates on.
     Eigen::Vector2d acceleration;
+    // The same acceleration in the body frame, and the yaw rate beside it:
+    // what the MSCKF propagates on, because it carries the heading itself and
+    // must not be handed a vector already rotated by somebody else's.
+    Eigen::Vector2d body_acceleration;
+    double rate;
     double dt;
     double yaw;
   };
   std::deque<AccelerationSample> imu_window_;
+
+  // Walk the buffered IMU samples covering an interval, boundaries included.
+  void replay_inertial(
+    double from, double to,
+    const std::function<void(const AccelerationSample &, double)> & step) const;
   std::optional<double> imu_stamp_;
+  // The instrument's heading when the run started. The filter works in the
+  // estimator's frame, which begins at zero, so the reported heading only
+  // means anything as a difference from where it began.
+  std::optional<double> imu_yaw_datum_;
 
   std::unique_ptr<AttitudeFilter> attitude_;
   HeadingBiasFilter heading_;
@@ -349,6 +407,7 @@ private:
   PlanarInertialPropagator inertial_;
   PlanarVelocityFilter velocity_filter_;
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;
+  std::unique_ptr<PlanarMsckfFilter> msckf_filter_;
 
   std::vector<Update> pending_updates_;
   Diagnostics diagnostics_;

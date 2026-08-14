@@ -421,6 +421,12 @@ int main(int argc, char ** argv)
     stages += buffer;
   }
   std::printf("단계별 ms/solve: %s\n", stages.c_str());
+  if (diagnostics.last_nis != 0.0 || diagnostics.gyro_bias != 0.0) {
+    std::printf(
+      "필터: 자이로바이어스=%+.5f rad/s  마지막 NIS=%.3f  게이트기각=%ld  버림=%ld\n",
+      diagnostics.gyro_bias, diagnostics.last_nis, diagnostics.filter_rejections,
+      diagnostics.filter_dropped);
+  }
 
   if (!tum_directory.empty() && !rows.empty()) {
     std::ofstream estimate_file(tum_directory + "/estimate.tum");
