@@ -64,6 +64,9 @@ FusionModel fusion_model_from_name(const std::string & name)
   if (name == "msckf") {
     return FusionModel::Msckf;
   }
+  if (name == "msckf6") {
+    return FusionModel::Msckf6;
+  }
   return FusionModel::Displacement;
 }
 
@@ -212,6 +215,23 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.heading_adaptive_window = settings.msckf_heading_adaptive_window;
     msckf_filter_ = std::make_unique<PlanarMsckfFilter>(filter);
   }
+  if (settings.fusion_model == FusionModel::Msckf6) {
+    SpatialMsckfFilter::Settings filter;
+    filter.acceleration_noise = settings.filter_acceleration_noise;
+    filter.bias_walk = settings.filter_bias_walk;
+    filter.vision_noise_m = settings.filter_vision_noise_m;
+    filter.vision_reference_inliers = settings.filter_reference_inliers;
+    filter.gyro_noise = settings.msckf_gyro_noise;
+    filter.gyro_bias_walk = settings.msckf_gyro_bias_walk;
+    filter.vision_yaw_noise = settings.msckf_vision_yaw_noise;
+    filter.initial_gyro_bias_variance = settings.msckf_initial_gyro_bias_variance;
+    filter.reject_beyond_m = settings.msckf_reject_beyond_m;
+    filter.gravity_tolerance = settings.spatial_gravity_tolerance;
+    filter.gravity_noise = settings.spatial_gravity_noise;
+    filter.height_noise_m = settings.spatial_height_noise_m;
+    filter.innovation_gate = settings.spatial_innovation_gate;
+    spatial_filter_ = std::make_unique<SpatialMsckfFilter>(filter);
+  }
   map_ready_ = !settings.require_map_before_translating;
 }
 
@@ -335,7 +355,7 @@ void Estimator::ingest_imu(const ImuSample & sample)
       acceleration.setZero();
     }
     velocity_filter_.predict(acceleration, step.dt);
-    if (displacement_filter_ || msckf_filter_) {
+    if (displacement_filter_ || msckf_filter_ || spatial_filter_) {
       // The same acceleration seen from the body, for the filter that carries
       // its own heading and must not be handed a vector already rotated by the
       // instrument's idea of which way the vehicle points.
@@ -347,7 +367,8 @@ void Estimator::ingest_imu(const ImuSample & sample)
       imu_window_.push_back(
         AccelerationSample{
           sample.stamp + settings_.imu_acceleration_offset_sec, acceleration, body,
-          sample.angular_velocity.z(), step.dt, yaw});
+          sample.angular_velocity.z(), sample.linear_acceleration, sample.angular_velocity,
+          step.dt, yaw});
       while (imu_window_.size() > 8000) {
         imu_window_.pop_front();
       }
@@ -532,6 +553,13 @@ bool Estimator::ready_to_solve() const
 
 std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
 {
+  // The six degree of freedom filter carries roll and pitch as states, so it
+  // answers this itself and the separate attitude filter is not asked. That is
+  // the whole point of the container: one covariance rather than two estimators
+  // that cannot tell each other how sure they are.
+  if (spatial_filter_) {
+    return spatial_filter_->body_tilt();
+  }
   if (!attitude_ || !attitude_->started()) {
     return std::nullopt;
   }
@@ -742,7 +770,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       const Eigen::Vector3d & mount = camera.model.translation_base_from_camera;
       aligned = align_to_anchors(
         body, world, weights, handed, settings_.ground_ransac_threshold_m,
-        settings_.ground_min_inliers, heading_.enabled() || msckf_filter_ != nullptr,
+        settings_.ground_min_inliers,
+        heading_.enabled() || msckf_filter_ != nullptr || spatial_filter_ != nullptr,
         Eigen::Vector2d(mount.x(), mount.y()), settings_.radial_min_range_m);
     }
     if (aligned.has_value()) {
@@ -762,7 +791,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       // With the MSCKF the heading the ground settled on is what the filter is
       // being told; without it the heading handed in stands, which is what
       // every measurement before this assumed.
-      const double heading = msckf_filter_ ? aligned->yaw : handed;
+      const double heading =
+        (msckf_filter_ || spatial_filter_) ? aligned->yaw : handed;
       solved.yaw_sigma = aligned->yaw_sigma;
       const Pose2 placed{aligned->translation.x(), aligned->translation.y(), heading};
       PlanarMotion motion = relative_motion(pose_, placed);
@@ -950,6 +980,19 @@ void Estimator::process_pair()
       });
     yaw_guess = msckf_filter_->yaw();
   }
+  if (spatial_filter_ && dt > 1e-4) {
+    spatial_filter_->open_hop();
+    replay_inertial(
+      previous_stamp, current_stamp,
+      [this](const AccelerationSample & sample, double step) {
+        spatial_filter_->predict(sample.specific_force, sample.angular_velocity, step);
+        // Levelled on every sample it can be, which is most of them: the
+        // gate inside decides, and a vehicle doing anything interesting fails
+        // it exactly when believing the accelerometer would be wrong.
+        spatial_filter_->update_gravity(sample.specific_force);
+      });
+    yaw_guess = spatial_filter_->yaw();
+  }
 
   std::vector<std::optional<Solved>> solved(count);
   if (imu_available) {
@@ -1135,6 +1178,73 @@ void Estimator::process_pair()
       motion->x = fused.x();
       motion->y = fused.y();
       motion->yaw = msckf_filter_->hop_yaw();
+      motion->scale = 1.0;
+    }
+  } else if (spatial_filter_ && motion.has_value() && dt > 1e-4) {
+    // The same measurement the planar MSCKF is given. What differs is what
+    // receives it: a hop into a filter that also knows which way the vehicle is
+    // leaning, and can therefore be told that it did not climb.
+    Eigen::Vector2d hop(motion->x, motion->y);
+    double turn = motion->yaw;
+    double extra = motions.size() >= 2
+      ? std::pow(settings_.camera_disagreement_weight * disagreement, 2)
+      : settings_.single_camera_variance * dt * dt;
+    double spread = 0.0;
+    {
+      double weighted = 0.0;
+      double total = 0.0;
+      for (const auto & input : precision_inputs) {
+        weighted += input.spread * input.count;
+        total += input.count;
+      }
+      spread = total > 0.0 ? weighted / total : 0.0;
+    }
+    double precision = 0.0;
+    for (const auto & entry : solved) {
+      if (entry.has_value() && entry->motion.has_value() &&
+        std::isfinite(entry->yaw_sigma) && entry->yaw_sigma > 0.0)
+      {
+        precision += 1.0 / (entry->yaw_sigma * entry->yaw_sigma);
+      }
+    }
+    const double yaw_sigma = precision > 0.0 ? std::sqrt(1.0 / precision) : 0.0;
+
+    if (standing) {
+      hop.setZero();
+      turn = 0.0;
+      extra = std::pow(settings_.zupt_velocity_sigma * dt, 2);
+      spread = 0.0;
+    }
+    if (!spatial_filter_->update(hop, turn, motion->inliers, extra, spread, yaw_sigma)) {
+      ++diagnostics_.filter_rejections;
+    }
+    // Separately, and ungated: the vehicle did not climb over this hop.
+    spatial_filter_->update_height();
+    if (standing) {
+      spatial_filter_->update_zero_velocity(settings_.zupt_velocity_sigma);
+    }
+    if (settings_.msckf_heading_noise > 0.0 && imu_yaw_datum_.has_value()) {
+      const auto reported = imu_yaw_at(current_stamp);
+      if (reported.has_value()) {
+        spatial_filter_->update_heading(
+          wrap_pi(*reported - *imu_yaw_datum_), settings_.msckf_heading_noise);
+      }
+    }
+    inertial_.correct_velocity(spatial_filter_->velocity().head<2>());
+    diagnostics_.gyro_bias = spatial_filter_->gyro_bias().z();
+    diagnostics_.filter_dropped = spatial_filter_->dropped();
+    diagnostics_.roll = spatial_filter_->roll();
+    diagnostics_.pitch = spatial_filter_->pitch();
+    diagnostics_.height = spatial_filter_->position().z();
+    diagnostics_.levelled = spatial_filter_->levelled();
+    if (spatial_filter_->last_update().has_value()) {
+      diagnostics_.last_nis = spatial_filter_->last_update()->nis;
+    }
+    const Eigen::Vector2d fused = spatial_filter_->body_translation();
+    if (fused.norm() <= settings_.max_translation_per_frame_m) {
+      motion->x = fused.x();
+      motion->y = fused.y();
+      motion->yaw = spatial_filter_->hop_yaw();
       motion->scale = 1.0;
     }
   } else if (displacement_filter_ && motion.has_value() && dt > 1e-4) {
@@ -1341,6 +1451,9 @@ void Estimator::process_pair()
     // integrating away from it and hand back the difference as travel the
     // moment a solve is finally accepted.
     msckf_filter_->set_pose(Eigen::Vector2d(pose_.x, pose_.y), pose_.yaw);
+  }
+  if (spatial_filter_) {
+    spatial_filter_->set_pose(Eigen::Vector2d(pose_.x, pose_.y), pose_.yaw);
   }
 
   ++diagnostics_.frames_processed;

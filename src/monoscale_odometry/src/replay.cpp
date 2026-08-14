@@ -429,6 +429,12 @@ int main(int argc, char ** argv)
       "마운팅pitch[%zu]: 기울기=%+.5f n=%ld\n",
       i, diagnostics.radial_linear[i], diagnostics.radial_samples[i]);
   }
+  if (diagnostics.levelled > 0) {
+    std::printf(
+      "자세: roll=%+.3fdeg pitch=%+.3fdeg 높이=%+.3fm 수평보정=%ld\n",
+      diagnostics.roll * 180.0 / M_PI, diagnostics.pitch * 180.0 / M_PI,
+      diagnostics.height, diagnostics.levelled);
+  }
   if (diagnostics.last_nis != 0.0 || diagnostics.gyro_bias != 0.0) {
     std::printf(
       "필터: 자이로바이어스=%+.5f rad/s  헤딩끌림=%+.5f rad/hop  마지막 NIS=%.3f  "

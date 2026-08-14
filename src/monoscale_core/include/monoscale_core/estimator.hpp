@@ -28,6 +28,7 @@
 #include "monoscale_core/fusion.hpp"
 #include "monoscale_core/geometry.hpp"
 #include "monoscale_core/inertial.hpp"
+#include "monoscale_core/strapdown.hpp"
 
 namespace monoscale
 {
@@ -44,6 +45,12 @@ enum class FusionModel
   // other three point. Propagates on the gyro's rate rather than on the
   // orientation the instrument reports.
   Msckf,
+  // The same again with the road taken off the page: position, velocity and a
+  // full attitude, so the roll and pitch the ground projection needs come out
+  // of the filter's own covariance rather than from a filter standing beside it
+  // with none. This is the container the camera-ground parameters go in; it
+  // does not hold them yet.
+  Msckf6,
 };
 
 FusionModel fusion_model_from_name(const std::string & name);
@@ -132,6 +139,24 @@ struct EstimatorSettings
   // stops short of it.
   double obstacle_height_margin = 0.7;
   int obstacle_slip_patience = 30;
+
+  // What the six degree of freedom filter is told about the two things only it
+  // can carry: how much a levelling against gravity is worth, and how far the
+  // vehicle may climb over one hop. The second is a hop-length number and not a
+  // drive-length one, so a graded road is left alone.
+  double spatial_gravity_noise = 2.0;
+  // How much acceleration the vehicle may be under and still be levelled, on
+  // the world-frame residual rather than on the reading's magnitude. Its own
+  // parameter and not attitude_gravity_tolerance: the two gate different
+  // quantities and only look alike.
+  double spatial_gravity_tolerance = 0.15;
+  double spatial_height_noise_m = 0.01;
+  // The same three degrees of freedom the planar filter's hop has, and the same
+  // gate. The vehicle staying on the road is not one of them: it is an
+  // assumption rather than a measurement, it gets its own update, and gating
+  // the two together threw away 57% of the vision the assumption was strained
+  // against.
+  double spatial_innovation_gate = 11.3;
 
   // The nearest ground the mounting-pitch lean is read from. It is not the
   // band the solve uses -- those points still vote for the pose -- because the
@@ -318,6 +343,13 @@ struct Diagnostics
   // the reported heading is pulling the estimate away from the ground.
   double heading_drift = 0.0;
   int64_t filter_dropped = 0;
+  // What only the six degree of freedom filter has to report: how it thinks the
+  // vehicle is leaning, how high it thinks it is, and how many of the
+  // accelerometer's samples it was willing to level against.
+  double roll = 0.0;
+  double pitch = 0.0;
+  double height = 0.0;
+  int64_t levelled = 0;
   double worst_rejected = 0.0;
   double worst_allowance = 0.0;
   double camera_disagreement = 0.0;
@@ -409,6 +441,11 @@ private:
     // must not be handed a vector already rotated by somebody else's.
     Eigen::Vector2d body_acceleration;
     double rate;
+    // What the part actually reported, gravity and all. The six degree of
+    // freedom filter puts gravity back itself, because where gravity points is
+    // one of the things it is estimating.
+    Eigen::Vector3d specific_force;
+    Eigen::Vector3d angular_velocity;
     double dt;
     double yaw;
   };
@@ -431,6 +468,7 @@ private:
   PlanarVelocityFilter velocity_filter_;
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;
   std::unique_ptr<PlanarMsckfFilter> msckf_filter_;
+  std::unique_ptr<SpatialMsckfFilter> spatial_filter_;
 
   std::vector<Update> pending_updates_;
   Diagnostics diagnostics_;

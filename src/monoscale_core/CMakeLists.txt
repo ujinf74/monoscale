@@ -20,6 +20,7 @@ add_library(monoscale_core SHARED
   src/geometry.cpp
   src/anchors.cpp
   src/fusion.cpp
+  src/strapdown.cpp
   src/inertial.cpp
   src/attitude.cpp
   src/estimator.cpp
@@ -51,6 +52,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_anchors monoscale_core)
   ament_add_gtest(test_fusion test/test_fusion.cpp)
   target_link_libraries(test_fusion monoscale_core)
+  ament_add_gtest(test_strapdown test/test_strapdown.cpp)
+  target_link_libraries(test_strapdown monoscale_core)
   ament_add_gtest(test_inertial test/test_inertial.cpp)
   target_link_libraries(test_inertial monoscale_core)
   ament_add_gtest(test_estimator test/test_estimator.cpp)

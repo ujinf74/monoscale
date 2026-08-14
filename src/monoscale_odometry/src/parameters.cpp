@@ -368,6 +368,12 @@ Configuration declare_and_read(rclcpp::Node & node)
   // ground band: the near ground still votes for the pose, it just cannot carry
   // a regression it is the noisiest part of.
   settings.radial_min_range_m = declare_double("radial_min_range_m", 1.5);
+  // The six degree of freedom filter's own two numbers, and its gate.
+  settings.spatial_gravity_noise = declare_double("spatial_gravity_noise", 2.0);
+  settings.spatial_gravity_tolerance =
+    declare_double("spatial_gravity_tolerance", 0.15);
+  settings.spatial_height_noise_m = declare_double("spatial_height_noise_m", 0.01);
+  settings.spatial_innovation_gate = declare_double("spatial_innovation_gate", 11.3);
   // Rather than choosing that trade once, watch the ground disagree with the
   // reported heading and loosen it by however one-sided the disagreement is.
   // Off by default and off is what the measurement says: it only slides
