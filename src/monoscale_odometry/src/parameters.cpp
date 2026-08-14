@@ -373,7 +373,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.spatial_gravity_tolerance =
     declare_double("spatial_gravity_tolerance", 0.15);
   settings.spatial_height_noise_m = declare_double("spatial_height_noise_m", 0.01);
-  settings.spatial_scale_variance = declare_double("spatial_scale_variance", 4.0e-2);
+  settings.spatial_scale_variance = declare_double("spatial_scale_variance", 0.0);
   settings.spatial_innovation_gate = declare_double("spatial_innovation_gate", 11.3);
   // Rather than choosing that trade once, watch the ground disagree with the
   // reported heading and loosen it by however one-sided the disagreement is.

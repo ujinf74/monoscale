@@ -106,26 +106,26 @@ public:
     // constant, so an error in the camera's height is an error in that
     // constant, and it multiplies every hop vision reports.
     //
-    // Twenty per cent, and that is not a claim that a calibrated rig is twenty
-    // per cent out. It is the freedom the state needs to move at all inside a
-    // drive: the scale is weakly observable -- the only thing arguing with
-    // vision about how far the vehicle went is an instrument that never
-    // measured distance, only how the speed was changing -- so a prior set to
-    // what the calibration is worth leaves it standing still. ATE in metres,
-    // over a drive replayed with the ground scale deliberately wrong:
+    // Off by default, and the measurement is why.
     //
-    //   prior sigma   calibrated   +5% out   -5% out
-    //         (off)       0.1971    1.1250    0.4616
-    //            2%       0.1951    1.1230    0.4606
-    //            5%       0.1946    1.0625    0.4592
-    //           10%       0.1942    1.1133    0.4358
-    //           20%       0.1971    0.8958    0.2751
+    // The state works when the error is large. Replayed with the ground scale
+    // deliberately wrong by five and ten per cent, it recovers three fifths to
+    // four fifths of it in either direction, and takes ATE from 1.125 m to
+    // 0.896 and from 0.462 to 0.275. That is real and it is what a prior of
+    // twenty per cent buys.
     //
-    // The calibrated column does not move, so the freedom is free where it is
-    // not needed, and it is worth a fifth to two fifths of the error where it
-    // is. The walk is per root second and is meant to be nearly nothing: what
-    // this tracks changes with load and suspension, over minutes not hops.
-    double initial_scale_variance = 4.0e-2;
+    // It does not work on what a calibrated rig actually has left. Three drives
+    // of the same rig on the same day, whose residual scale runs near one per
+    // cent, taught it 0.992, 1.022 and 0.993 -- the same rig, in opposite
+    // directions. It is fitting noise at that level, and it costs: ATE against
+    // the state switched off, 0.345 against 0.355, 0.393 against 0.411, 0.197
+    // against 0.197.
+    //
+    // So the default is zero, which is the state held at one, and the freedom
+    // is there for a rig believed to be badly out rather than slightly. What
+    // would change this is a drive long enough for the estimate to converge --
+    // over 27 metres it is still moving when the recording ends.
+    double initial_scale_variance = 0.0;
     double scale_walk = 1.0e-5;
   };
 

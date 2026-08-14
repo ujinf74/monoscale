@@ -151,10 +151,10 @@ struct EstimatorSettings
   // quantities and only look alike.
   double spatial_gravity_tolerance = 0.15;
   double spatial_height_noise_m = 0.01;
-  // How far the ground projection's scale is allowed to move. Not what the
-  // calibration is worth -- SpatialMsckfFilter::Settings carries the measured
-  // reason it has to be looser than that.
-  double spatial_scale_variance = 4.0e-2;
+  // How far the ground projection's scale is allowed to move. Zero holds it at
+  // one; SpatialMsckfFilter::Settings carries what it costs and buys, measured
+  // on three drives and on the same drives with the scale injected wrong.
+  double spatial_scale_variance = 0.0;
   // The same three degrees of freedom the planar filter's hop has, and the same
   // gate. The vehicle staying on the road is not one of them: it is an
   // assumption rather than a measurement, it gets its own update, and gating

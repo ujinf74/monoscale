@@ -255,8 +255,9 @@ void drive_scaled(SpatialMsckfFilter & filter, int hops, double reported, double
 TEST(Strapdown, TheGroundScaleIsLearnedFromWhatTheAccelerometerSaysInstead)
 {
   SpatialMsckfFilter::Settings settings;
-  // What a rig's calibration is worth knowing to, loosened to what a test can
-  // drive home in hundreds of hops rather than thousands.
+  // Switched on, which the default is not: on a calibrated rig this costs more
+  // than it finds. What is being pinned here is that the mechanism works when
+  // the error is large enough to be worth finding.
   settings.initial_scale_variance = 0.04;
   SpatialMsckfFilter filter(settings);
 
