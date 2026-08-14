@@ -1,8 +1,8 @@
 # monoscale_core
 
 The estimation itself, with no ROS in it: ground projection, the anchor map,
-the filters and the state machine that drives them. `monoscale_odometry_cpp`
-and `monoscale_occupancy_grid_map_cpp` are thin wrappers over this, which is
+the filters and the state machine that drives them. `monoscale_odometry`
+and `monoscale_occupancy_grid_map` are thin wrappers over this, which is
 what lets the same code be tested without a graph and later be called directly
 by the tracker in one process.
 
@@ -13,9 +13,11 @@ the parameter files still means what it meant, and the comments that record
 what each one cost when it was wrong were carried across rather than
 summarised.
 
-The Python it was ported from is still being developed elsewhere, so the port
-names the exact state it was taken from. These are the git blob hashes of the
-sources in this repository at the time:
+The Python it was ported from is still being developed elsewhere, and it is no
+longer in the tree here -- once the C++ was held to it and passed, carrying two
+implementations of the same thing was the liability rather than the safety net.
+It is still in the history, and the port names the exact state it was taken
+from. These are the git blob hashes:
 
 | source | blob |
 | --- | --- |
@@ -56,8 +58,9 @@ zero the mapper is told there are none rather than being handed a null.
 ## Held to the Python it replaces
 
 `monoscale_replay` reads a bag directly and drives this library in recorded
-order, which is what `monoscale_evaluation/offline_replay.py` does for the
-Python. On `approach_hd60_tracks_w1280`, with the same parameter file:
+order, which is what the Python's `offline_replay.py` did for it. On
+`approach_hd60_tracks_w1280`, with the same parameter file, before the Python
+was removed:
 
 | | Python | C++ |
 | --- | ---: | ---: |

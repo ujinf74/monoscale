@@ -27,7 +27,6 @@ setup(
         'console_scripts': [
             'odometry_evaluator = monoscale_evaluation.odometry_evaluator:main',
             'grid_evaluator = monoscale_evaluation.grid_evaluator:main',
-            'offline_replay = monoscale_evaluation.offline_replay:main',
         ],
     },
 )

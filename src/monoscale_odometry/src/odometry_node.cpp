@@ -34,7 +34,7 @@
 #include <tf2_ros/transform_listener.h>
 
 #include "monoscale_core/estimator.hpp"
-#include "monoscale_odometry_cpp/parameters.hpp"
+#include "monoscale_odometry/parameters.hpp"
 
 namespace monoscale_ros
 {

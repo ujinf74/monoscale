@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(monoscale_odometry_cpp)
+project(monoscale_odometry)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -43,13 +43,13 @@ ament_target_dependencies(monoscale_odometry
 target_compile_options(monoscale_odometry PRIVATE -O3)
 
 install(TARGETS monoscale_parameters
-  EXPORT export_monoscale_odometry_cpp
+  EXPORT export_monoscale_odometry
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(TARGETS monoscale_replay monoscale_odometry DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch config rviz DESTINATION share/${PROJECT_NAME})
 
-ament_export_targets(export_monoscale_odometry_cpp HAS_LIBRARY_TARGET)
+ament_export_targets(export_monoscale_odometry HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp monoscale_core)
 
 ament_package()

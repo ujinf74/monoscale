@@ -1,28 +1,30 @@
 <?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>monoscale_odometry</name>
   <version>0.1.0</version>
-  <description>Metric visual-inertial odometry from any number of monocular ground-facing cameras.</description>
-  <maintainer email="ujin@tukorea.ac.kr">Ujin Kwon</maintainer>
+  <description>
+    The ROS side of the estimator: subscriptions, QoS, parameters and
+    publishers over monoscale_core, plus an offline replay that drives the same
+    library straight from a bag so a configuration can be scored without a
+    graph.
+  </description>
+  <maintainer email="ujin@tukorea.ac.kr">ujinf74</maintainer>
   <license>Apache-2.0</license>
-  <url type="repository">https://github.com/ujinf74/monoscale</url>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-opencv</exec_depend>
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
-
-  <test_depend>ament_pytest</test_depend>
-  <test_depend>python3-pytest</test_depend>
-  <test_depend>python3-yaml</test_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>monoscale_core</depend>
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>rosbag2_cpp</depend>
+  <depend>rosbag2_storage</depend>
+  <depend>rclcpp_components</depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

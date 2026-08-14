@@ -6,13 +6,18 @@
 N대까지 쓸 수 있다. 사전 기록 지도를 쓰지 않고(mapless), 학습 모델도 쓰지
 않는다.
 
+차량에 올라가는 것은 전부 C++이다. 이 스택은 Python 추정기로 개발됐고, 그
+Python은 궤적이 일치하는 것을 확인한 뒤 이력에만 남기고 트리에서 걷어냈다.
+어느 시점을 옮긴 것인지와 무엇을 남기지 않았는지는
+[`src/monoscale_core/README.md`](src/monoscale_core/README.md)에 있다.
+
 ## 패키지
 
 | 패키지 | 하는 일 |
 | --- | --- |
+| `monoscale_core` | 추정 그 자체. ROS를 모른다 — 그래서 그래프 없이 시험되고, 나중에 추종기와 한 프로세스로 묶일 수 있다. |
 | `monoscale_tracker` | C++ KLT 전단. 이미지에서 특징 궤적만 뽑아 발행한다. |
-| `monoscale_fast` | 위 추종기가 쓰는 FAST 검출 커널(CUDA, CPU 대체 있음). |
-| `monoscale_odometry` | 궤적과 IMU를 융합해 자세와 지면점을 낸다. |
+| `monoscale_odometry` | 위를 감싸는 노드. bag을 직접 재생해 채점하는 `monoscale_replay`도 여기 있다. |
 | `monoscale_occupancy_grid_map` | 지면점을 격자에 누적한다. |
 | `monoscale_evaluation` | 참값 대비 채점. 차량에는 올리지 않는다. |
 | `monoscale_carla` | CARLA 전용: 카메라 조립, 참값 탭, 주행 스크립트. |
@@ -29,18 +34,22 @@ N대까지 쓸 수 있다. 사전 기록 지도를 쓰지 않고(mapless), 학�
 `/perception/ground_points`는 map 프레임의 PointCloud2다. 점마다 `label`
 (지면 0, 장애물 1)과 그 점을 본 카메라 위치(`origin_x`, `origin_y`)를 싣기
 때문에, 격자 노드는 외부 파라미터도 TF도 필요 없다. 격자를 다시 손봐도
-오도메트리를 다시 돌릴 필요가 없다는 뜻이기도 하다.
+오도메트리를 다시 돌릴 필요가 없다는 뜻이기도 하다. 실제로 매핑 주기를 어떻게
+두든 궤적은 비트 단위로 같다 — 지도는 자세 루프의 일부가 아니라 부산물이다.
 
 ## 빌드와 실행
 
 ```bash
 source /opt/ros/humble/setup.bash
-export PATH=/usr/local/cuda/bin:$PATH      # CUDA 커널을 쓸 때만
 colcon build --base-paths src --symlink-install
 source install/setup.bash
 
 ros2 launch monoscale_odometry odometry.launch.py
 ```
+
+CUDA는 필요 없다. `monoscale_tracker`의 광류에 GPU 경로가 있지만
+(`use_cuda`), cudaoptflow가 있는 OpenCV를 만났을 때만 빌드되고 기본값은
+꺼져 있다.
 
 ## 카메라 대수
 
@@ -62,5 +71,21 @@ front_image_topic: /sensing/camera/front/image_raw
 ## 테스트
 
 ```bash
-python3 -m pytest src/*/test -q
+colcon test --packages-select monoscale_core
+colcon test-result --all
 ```
+
+기하, 앵커맵, 필터, 관성, 자세, 격자, 그리고 합성 주행 위의 추정기 전체까지
+96개다. 채점 패키지의 Python 테스트는 `python3 -m pytest src/monoscale_evaluation/test`.
+
+## 기록된 주행에 대고 채점하기
+
+```bash
+ros2 run monoscale_odometry monoscale_replay <bag> \
+  --params src/monoscale_odometry/config/vision_fisheye.param.yaml \
+  --set track_topic_prefix:=/vision/tracks
+```
+
+bag을 직접 읽어 라이브러리를 녹화 순서대로 돌린다. 시계도 난수도 읽지 않으므로
+같은 bag은 데스크톱에서든 Orin에서든 같은 궤적을 낸다 — 회귀가 보이는 것은
+그 때문이다.

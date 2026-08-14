@@ -1,4 +1,4 @@
-#include "monoscale_odometry_cpp/parameters.hpp"
+#include "monoscale_odometry/parameters.hpp"
 
 #include <map>
 

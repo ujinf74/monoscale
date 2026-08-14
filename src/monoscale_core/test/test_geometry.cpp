@@ -331,3 +331,64 @@ TEST(Geometry, TwistRoundTripsThroughAnArc)
   EXPECT_NEAR(walked.y, direct.y, 1e-12);
   EXPECT_NEAR(walked.yaw, direct.yaw, 1e-12);
 }
+
+// Rescaling a hop has to follow the arc the vehicle is actually on.
+//
+// Two places stretch a measured motion to a different interval: the pair,
+// whose two cameras are stamped a little apart, and the coast that carries the
+// pose across a rejected solve. Both used to multiply the translation and be
+// done with it, which is right only while the wheel is centred.
+// From src/monoscale_odometry/test/test_twist.py.
+
+TEST(Geometry, AStraightHopIsJustStretched)
+{
+  const PlanarMotion straight{0.4, 0.0, 0.0, 100, 1.0};
+
+  const PlanarMotion doubled = monoscale::rescale_motion(straight, 2.0);
+
+  EXPECT_NEAR(doubled.x, 0.8, 1e-12);
+  EXPECT_NEAR(doubled.y, 0.0, 1e-12);
+  EXPECT_NEAR(doubled.yaw, 0.0, 1e-12);
+}
+
+TEST(Geometry, TheStraightLineAnswerIsWrongByAMeasurableAmount)
+{
+  // And by how much, so the reason for the change is on the record. A tenth of
+  // a second at 4 m/s through a 16 deg/s turn, carried across twice its own
+  // length: stretching the straight line puts the vehicle 11 mm off sideways.
+  // The pair's two cameras are only a few milliseconds apart and see a
+  // fraction of that, but a coast across a rejected solve spans exactly this
+  // sort of interval, and there are tens of them in a drive.
+  const double speed = 4.0;
+  const double rate = 16.0 * M_PI / 180.0;
+  const double interval = 0.1;
+  const PlanarMotion hop = monoscale::motion_from_twist(speed, 0.0, rate, interval);
+
+  const PlanarMotion stretched{hop.x * 2.0, hop.y * 2.0, hop.yaw * 2.0, 0, 1.0};
+  const PlanarMotion arc = monoscale::rescale_motion(hop, 2.0);
+
+  EXPECT_NEAR(std::abs(arc.y - stretched.y), 0.0112, 1e-3);
+  // Forward it barely matters: the arc and the chord are the same length to
+  // within a part in a thousand at this angle.
+  EXPECT_LT(std::abs(arc.x - stretched.x), 1e-3);
+}
+
+TEST(Geometry, RescalingToNothingLeavesNothing)
+{
+  const PlanarMotion motion{0.3, 0.1, 0.2, 7, 1.0};
+
+  const PlanarMotion still = monoscale::rescale_motion(motion, 0.0);
+
+  EXPECT_NEAR(still.x, 0.0, 1e-12);
+  EXPECT_NEAR(still.y, 0.0, 1e-12);
+  EXPECT_NEAR(still.yaw, 0.0, 1e-12);
+}
+
+TEST(Geometry, TheInlierCountSurvivesTheRescale)
+{
+  // It is the weight the fusion uses, and it is not a property of time.
+  const PlanarMotion motion{0.3, 0.1, 0.2, 137, 0.5};
+
+  EXPECT_EQ(monoscale::rescale_motion(motion, 1.7).inliers, 137);
+  EXPECT_DOUBLE_EQ(monoscale::rescale_motion(motion, 1.7).scale, 0.5);
+}

@@ -30,7 +30,7 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 
 #include "monoscale_core/estimator.hpp"
-#include "monoscale_odometry_cpp/parameters.hpp"
+#include "monoscale_odometry/parameters.hpp"
 
 namespace
 {

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(monoscale_occupancy_grid_map_cpp)
+project(monoscale_occupancy_grid_map)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -20,6 +20,6 @@ ament_target_dependencies(monoscale_occupancy_grid_map
 target_compile_options(monoscale_occupancy_grid_map PRIVATE -O3)
 
 install(TARGETS monoscale_occupancy_grid_map DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME} OPTIONAL)
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()
