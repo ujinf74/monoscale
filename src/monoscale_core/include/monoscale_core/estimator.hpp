@@ -68,6 +68,18 @@ struct CameraSettings
   // How much further than the truth this camera measures the ground to have
   // moved, as a factor to divide out. Not an extrinsic.
   double range_scale = 1.0;
+  // Learn how far this camera's mounting pitch is out, from the lean the
+  // alignment residual leaves along each point's own bearing.
+  //
+  // Off by default and per camera, because the observable is not there for
+  // every camera. Measured over mounting errors of -1 to +1 degree, the rear
+  // camera's lean runs monotone at 0.0056 per degree and through zero where the
+  // mounting is right; the front camera's says nothing, because its ground band
+  // starts at 0.6 m and the near ground -- weighted by precision, and the first
+  // thing optical flow loses -- dominates the alignment those residuals are
+  // measured about. Excluding it from the regression is not enough; it would
+  // have to leave the solve, and the band it uses was chosen on drift.
+  bool learn_mounting_pitch = false;
   // Root mean square of how far the filter's own hop ends up from the one
   // vision handed it. Near zero means the filter is reproducing the
   // measurement and any error is upstream of it.
@@ -205,6 +217,30 @@ struct EstimatorSettings
   // the two together threw away 57% of the vision the assumption was strained
   // against.
   double spatial_innovation_gate = 11.3;
+
+  // What a mounting pitch error is worth knowing to before the drive starts,
+  // and how much of the lean is that error rather than the road. The gain is
+  // measured: 0.0056 of lean per degree, which is 0.321 per radian.
+  double mounting_pitch_variance = 3.0e-4;
+  double mounting_pitch_gain = 0.321;
+  double mounting_pitch_noise = 0.002;
+  // How fast a mounting can drift, per root second. Without it the estimate
+  // converges on the first few hundred solves -- taken while the anchor map is
+  // still filling -- and never reconsiders.
+  double mounting_pitch_walk = 1.0e-4;
+  // Whether what is learned is fed back into the ground projection.
+  //
+  // Off, and measured. The anchor map is built from whatever projection was in
+  // force when each sighting went into it, so changing the projection mid-drive
+  // leaves the current view registering against a history that disagrees with
+  // it. Closing the loop that way was unstable: over a mounting deliberately
+  // turned by -0.5 degrees the two drives learned +0.53 and -0.40, opposite
+  // signs from the same error, and ATE went from 0.18 m to 1.54 on a rig whose
+  // mounting was right to begin with.
+  //
+  // Open, the estimate is a calibration finding rather than a correction --
+  // which is most of what online calibration is for, minus the online part.
+  bool mounting_pitch_apply = false;
 
   // The nearest ground the mounting-pitch lean is read from. It is not the
   // band the solve uses -- those points still vote for the pose -- because the
@@ -396,6 +432,8 @@ struct Diagnostics
   // accelerometer's samples it was willing to level against.
   double roll = 0.0;
   double pitch = 0.0;
+  // What each camera has learned about its own mounting pitch, in degrees.
+  std::vector<double> mounting_pitch;
   double height = 0.0;
   int64_t levelled = 0;
   // How much further than the truth vision is measuring the ground to have
@@ -458,6 +496,7 @@ private:
   std::optional<Solved> solve_camera(
     Camera & camera, std::optional<double> yaw_delta, std::optional<double> yaw_guess);
   void remember_solve_pixels(Camera & camera);
+  void learn_mounting_pitch(Camera & camera, double lean);
   std::optional<Eigen::Matrix3d> body_tilt() const;
   std::optional<double> imu_yaw_at(double stamp) const;
   bool imu_still_arriving(double stamp) const;

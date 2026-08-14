@@ -155,6 +155,11 @@ Configuration declare_and_read(rclcpp::Node & node)
     // moved, as a factor to divide out. Not an extrinsic: the camera is where
     // the kit says it is, and this is measured downstream of that.
     camera.range_scale = node.declare_parameter<double>("ground_range_scale_" + name, 1.0);
+    // Whether this camera's mounting pitch is learned from the lean its
+    // alignment residual leaves. Off unless the observable is there for it --
+    // CameraSettings carries which cameras that was measured to be.
+    camera.learn_mounting_pitch =
+      node.declare_parameter<bool>(name + ".learn_mounting_pitch", false);
 
     camera.k = matrix_of(k);
     camera.distortion = coefficients_of(d);
@@ -368,6 +373,13 @@ Configuration declare_and_read(rclcpp::Node & node)
   // ground band: the near ground still votes for the pose, it just cannot carry
   // a regression it is the noisiest part of.
   settings.radial_min_range_m = declare_double("radial_min_range_m", 1.5);
+  // What a mounting pitch error is worth knowing to, how much lean a radian of
+  // it produces, and how much of the lean is the road rather than the mounting.
+  settings.mounting_pitch_variance = declare_double("mounting_pitch_variance", 3.0e-4);
+  settings.mounting_pitch_gain = declare_double("mounting_pitch_gain", 0.321);
+  settings.mounting_pitch_noise = declare_double("mounting_pitch_noise", 0.002);
+  settings.mounting_pitch_walk = declare_double("mounting_pitch_walk", 1.0e-4);
+  settings.mounting_pitch_apply = declare_bool("mounting_pitch_apply", false);
   // The six degree of freedom filter's own two numbers, and its gate.
   settings.spatial_gravity_noise = declare_double("spatial_gravity_noise", 2.0);
   settings.spatial_tilt_gyro_noise =

@@ -127,6 +127,18 @@ struct Estimator::Camera
   double radial_linear_sum = 0.0;
   int64_t radial_samples = 0;
 
+  // How far this camera's mounting pitch is believed to be out, in radians, and
+  // how sure of that. A scalar filter and not a state on the pose filter: the
+  // lean is what is left after a rigid alignment has already solved the pose
+  // out, so it is not a function of any pose state and nothing would be gained
+  // by carrying it beside them.
+  double mounting_pitch = 0.0;
+  double mounting_variance = 0.0;
+  // The frame the calibration was last brought to, so a mounting correction can
+  // be folded back into it without asking the caller for the size again.
+  int frame_width = 0;
+  int frame_height = 0;
+
   // Per feature, the ground projection and camera position from when it was
   // first seen, so each earns its own baseline over as many frames as it
   // survives rather than sharing one keyframe. Sorted by identity.
@@ -184,6 +196,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
 
   for (const auto & camera : settings.cameras) {
     cameras_.push_back(std::make_unique<Camera>(camera, anchor_settings));
+    cameras_.back()->mounting_variance = settings.mounting_pitch_variance;
   }
 
   if (settings.attitude_from_imu) {
@@ -297,6 +310,8 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
   Camera & camera = *cameras_[index];
   // The front end sends pixels in its own downscaled frame, so the intrinsics
   // have to be brought to that frame before anything is projected.
+  camera.frame_width = incoming.width;
+  camera.frame_height = incoming.height;
   camera.model = frame_model(camera, incoming.width, incoming.height);
 
   Frame frame;
@@ -617,6 +632,40 @@ void Estimator::replay_inertial(
   }
 }
 
+// The lean the alignment left, turned into a mounting pitch.
+//
+// One scalar measurement of one scalar state, so the whole filter is three
+// lines. What it is worth is the measured gain -- 0.0056 of lean per degree --
+// against a noise that is mostly the road rather than the instrument: a real
+// grade tilts the ground under the camera exactly the way a mounting error
+// does, and nothing here can tell them apart within one solve.
+void Estimator::learn_mounting_pitch(Camera & camera, double lean)
+{
+  if (!camera.settings.learn_mounting_pitch || settings_.mounting_pitch_gain == 0.0) {
+    return;
+  }
+  const double noise = settings_.mounting_pitch_noise * settings_.mounting_pitch_noise;
+  const double gain = settings_.mounting_pitch_gain;
+  const double innovation = lean - gain * camera.mounting_pitch;
+  const double block = gain * gain * camera.mounting_variance + noise;
+  if (!(block > 0.0)) {
+    return;
+  }
+  const double k = camera.mounting_variance * gain / block;
+  camera.mounting_pitch += k * innovation;
+  camera.mounting_variance = std::max((1.0 - k * gain) * camera.mounting_variance, 0.0) +
+    settings_.mounting_pitch_walk * settings_.mounting_pitch_walk;
+  if (!settings_.mounting_pitch_apply) {
+    return;
+  }
+  camera.calibration.rotation_base_from_camera =
+    Eigen::AngleAxisd(-camera.mounting_pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() *
+    camera.settings.rotation_base_from_camera;
+  if (camera.frame_width > 0 && camera.frame_height > 0) {
+    camera.model = frame_model(camera, camera.frame_width, camera.frame_height);
+  }
+}
+
 void Estimator::remember_solve_pixels(Camera & camera)
 {
   const Eigen::Index count = camera.track_ids.size();
@@ -796,6 +845,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       if (aligned->radial_reference > 0.0) {
         camera.radial_linear_sum += aligned->radial_linear;
         ++camera.radial_samples;
+        learn_mounting_pitch(camera, aligned->radial_linear);
       }
       // Recorded, not applied. Both cameras see the same heading and each has
       // its own opinion of how far it is out; folding them in one at a time
@@ -1048,9 +1098,11 @@ void Estimator::process_pair()
   // solve holds a reference and does not know which one it was handed.
   diagnostics_.radial_linear.assign(count, 0.0);
   diagnostics_.radial_samples.assign(count, 0);
+  diagnostics_.mounting_pitch.assign(count, 0.0);
   for (size_t i = 0; i < count; ++i) {
     const Camera & camera = *cameras_[i];
     diagnostics_.radial_samples[i] = camera.radial_samples;
+    diagnostics_.mounting_pitch[i] = camera.mounting_pitch * 180.0 / M_PI;
     if (camera.radial_samples > 0) {
       const double n = static_cast<double>(camera.radial_samples);
       diagnostics_.radial_linear[i] = camera.radial_linear_sum / n;
