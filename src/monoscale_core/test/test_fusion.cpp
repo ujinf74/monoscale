@@ -416,3 +416,37 @@ TEST(Fusion, MsckfCovarianceStaysSymmetricAndFinite)
   EXPECT_TRUE(std::isfinite(filter.gyro_bias()));
   EXPECT_TRUE(std::isfinite(filter.yaw()));
 }
+
+TEST(Fusion, MsckfAdaptiveHeadingLoosensOnAOneSidedVisionResidual)
+{
+  // Two filters given the same drive, one of which is allowed to count the
+  // ground's disagreement against the instrument.
+  monoscale::PlanarMsckfFilter::Settings adaptive;
+  adaptive.heading_adaptive_gain = 100.0;
+  adaptive.heading_adaptive_window = 20.0;
+  monoscale::PlanarMsckfFilter fixed;
+  monoscale::PlanarMsckfFilter loosened(adaptive);
+
+  // Vision says the vehicle turned by a hundredth of a radian each hop and the
+  // instrument says it did not turn at all. One of them is wrong the whole way
+  // down, which is exactly the case the gain exists for.
+  for (int hop = 0; hop < 200; ++hop) {
+    for (auto * filter : {&fixed, &loosened}) {
+      filter->open_hop();
+      for (int i = 0; i < 5; ++i) {
+        filter->predict(Eigen::Vector2d::Zero(), 0.0, 0.01);
+      }
+      filter->update(Eigen::Vector2d(0.1, 0.0), 0.01, 400);
+      filter->update_heading(0.0, 0.1);
+    }
+  }
+
+  // The residual is one-sided, so it survives the average.
+  EXPECT_GT(std::abs(loosened.heading_drift()), 1.0e-4);
+  // And the filter that reads it ends up further from the heading the
+  // instrument insisted on, because it stopped believing it as hard.
+  EXPECT_GT(std::abs(loosened.yaw()), std::abs(fixed.yaw()));
+  // The residual is watched either way -- it is a diagnostic before it is a
+  // mechanism. What the gain changes is only what is done about it.
+  EXPECT_NEAR(fixed.heading_drift(), loosened.heading_drift(), 1.0e-3);
+}

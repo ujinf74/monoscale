@@ -202,6 +202,8 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.initial_gyro_bias_variance = settings.msckf_initial_gyro_bias_variance;
     filter.innovation_gate = settings.msckf_innovation_gate;
     filter.reject_beyond_m = settings.msckf_reject_beyond_m;
+    filter.heading_adaptive_gain = settings.msckf_heading_adaptive_gain;
+    filter.heading_adaptive_window = settings.msckf_heading_adaptive_window;
     msckf_filter_ = std::make_unique<PlanarMsckfFilter>(filter);
   }
   map_ready_ = !settings.require_map_before_translating;
@@ -1098,6 +1100,7 @@ void Estimator::process_pair()
     }
     inertial_.correct_velocity(msckf_filter_->velocity());
     diagnostics_.gyro_bias = msckf_filter_->gyro_bias();
+    diagnostics_.heading_drift = msckf_filter_->heading_drift();
     diagnostics_.filter_dropped = msckf_filter_->dropped();
     if (msckf_filter_->last_update().has_value()) {
       diagnostics_.last_nis = msckf_filter_->last_update()->nis;

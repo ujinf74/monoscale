@@ -487,6 +487,12 @@ bool PlanarMsckfFilter::update(
   last_update_ = record;
   apply(model, innovation, noise, inverse);
   ++updates_;
+  // Only what the gate let through: an outlier says nothing about where the
+  // heading is being dragged, and averaging it in would let one bad hop stand
+  // in for an instrument.
+  if (accepted && settings_.heading_adaptive_window > 0.0) {
+    yaw_residual_ += (innovation(2) - yaw_residual_) / settings_.heading_adaptive_window;
+  }
   return accepted;
 }
 
@@ -522,10 +528,22 @@ void PlanarMsckfFilter::update_heading(double measured_yaw, double sigma)
   if (!(sigma > 0.0) || !std::isfinite(sigma)) {
     return;
   }
+  // What vision has been saying about this heading, once there have been
+  // enough hops for the average to mean anything. Measured against vision's
+  // own yaw noise, so a residual the ground solve could have produced on its
+  // own costs the instrument nothing.
+  double trusted = sigma;
+  if (settings_.heading_adaptive_gain > 0.0 &&
+    settings_.vision_yaw_noise > 0.0 &&
+    static_cast<double>(updates_) > settings_.heading_adaptive_window)
+  {
+    const double excess = std::abs(yaw_residual_) / settings_.vision_yaw_noise;
+    trusted = sigma * (1.0 + settings_.heading_adaptive_gain * excess);
+  }
   Eigen::Matrix<double, 1, kSize> model = Eigen::Matrix<double, 1, kSize>::Zero();
   model(0, kT) = 1.0;
   const double innovation = wrap(measured_yaw - state_(kT));
-  const double block = (model * covariance_ * model.transpose())(0, 0) + sigma * sigma;
+  const double block = (model * covariance_ * model.transpose())(0, 0) + trusted * trusted;
   if (!(block > 0.0)) {
     return;
   }
@@ -535,7 +553,7 @@ void PlanarMsckfFilter::update_heading(double measured_yaw, double sigma)
   state_(kTA) = wrap(state_(kTA));
   const Covariance spread = Covariance::Identity() - gain * model;
   covariance_ = spread * covariance_ * spread.transpose() +
-    gain * (sigma * sigma) * gain.transpose();
+    gain * (trusted * trusted) * gain.transpose();
   covariance_ = 0.5 * (covariance_ + covariance_.transpose()).eval();
 }
 

@@ -263,6 +263,35 @@ public:
     // Beyond this the innovation is not an outlier to be down-weighted, it is
     // a different vehicle. Dropped outright whatever the inflation says.
     double reject_beyond_m = 1.5;
+
+    // How hard a heading the instrument is imposing counts against trusting
+    // it. 0 switches this off, which is the default.
+    //
+    // The residual on the reported heading is not the signal to watch. A part
+    // whose rate is biased reports an orientation that is that rate
+    // integrated, so the filter's heading and the instrument's walk away
+    // together and the two agree the whole way down. What notices is the
+    // ground: vision's share of the hop measurement keeps saying the turn was
+    // smaller than the heading claims, and it keeps saying it with the same
+    // sign. Averaged over a window that one-sidedness is the instrument's
+    // error, and it is what the reported heading's variance grows on.
+    //
+    // Measured, it does not work, and the reason is worth keeping. The
+    // residual is not monotone in the bias at all: over the injected sweep it
+    // read +0.00064 rad/hop with no bias, -0.00015 at 0.3 deg/s and -0.00226
+    // at 1.0. At a heading variance loose enough to matter the filter is soft
+    // enough that vision wins locally, so the error goes into the trajectory
+    // instead of into a standing residual, and there is nothing left to read.
+    //
+    // What the gain does instead is slide between the two fixed settings.
+    // Clean and 1.0 deg/s, ATE in metres: 0.178/0.815 at 0, 0.186/0.803 at 30,
+    // 0.195/0.754 at 100, 0.200/0.672 at 300, 0.203/0.616 at 1000 -- towards
+    // the measurement being off, 0.206/0.567, and never reaching it. A fixed
+    // variance costing the same at the clean end beats every one of those at
+    // the biased end. Left here because it is the obvious thing to reach for
+    // and this is the record that it was reached for and measured.
+    double heading_adaptive_gain = 0.0;
+    double heading_adaptive_window = 50.0;
   };
 
   struct UpdateRecord
@@ -285,6 +314,9 @@ public:
   int updates() const {return updates_;}
   int rejected() const {return rejected_;}
   int dropped() const {return dropped_;}
+  // The one-sided part of vision's yaw residual: how far the reported heading
+  // is dragging the estimate from what the ground says, in radians per hop.
+  double heading_drift() const {return yaw_residual_;}
   const std::optional<UpdateRecord> & last_update() const {return last_update_;}
 
   // Put the pose where the caller says it is. The estimator owns the warm-up,
@@ -358,6 +390,7 @@ private:
   int updates_ = 0;
   int rejected_ = 0;
   int dropped_ = 0;
+  double yaw_residual_ = 0.0;
   std::optional<UpdateRecord> last_update_;
 };
 

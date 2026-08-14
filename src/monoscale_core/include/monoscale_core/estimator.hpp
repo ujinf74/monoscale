@@ -211,6 +211,12 @@ struct EstimatorSettings
   // the measurement off entirely and leaves the heading to the gyro and the
   // ground solve -- for one whose AHRS is not.
   double msckf_heading_noise = 0.1;
+  // Or let the drive decide which of those it is: the gain is how hard a
+  // one-sided vision yaw residual counts against the reported heading, and 0
+  // switches the whole mechanism off. Off is the measured answer as well as
+  // the default -- PlanarMsckfFilter::Settings carries the numbers and why.
+  double msckf_heading_adaptive_gain = 0.0;
+  double msckf_heading_adaptive_window = 50.0;
 
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.
@@ -294,6 +300,9 @@ struct Diagnostics
   // the whole claim; the NIS says whether the covariance is honest.
   double gyro_bias = 0.0;
   double last_nis = 0.0;
+  // The one-sided part of vision's yaw residual, in radians per hop: how far
+  // the reported heading is pulling the estimate away from the ground.
+  double heading_drift = 0.0;
   int64_t filter_dropped = 0;
   double worst_rejected = 0.0;
   double worst_allowance = 0.0;

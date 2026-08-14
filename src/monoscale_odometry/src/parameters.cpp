@@ -364,6 +364,14 @@ Configuration declare_and_read(rclcpp::Node & node)
   // measurement off, which leaves the gyro bias with nothing to observe it.
   // EstimatorSettings carries the measured trade behind this default.
   settings.msckf_heading_noise = declare_double("msckf_heading_noise", 0.1);
+  // Rather than choosing that trade once, watch the ground disagree with the
+  // reported heading and loosen it by however one-sided the disagreement is.
+  // Off by default and off is what the measurement says: it only slides
+  // between the fixed settings, and worse than choosing one of them does.
+  settings.msckf_heading_adaptive_gain =
+    declare_double("msckf_heading_adaptive_gain", 0.0);
+  settings.msckf_heading_adaptive_window =
+    declare_double("msckf_heading_adaptive_window", 50.0);
 
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.
