@@ -43,6 +43,23 @@ public:
   {
     double acceleration_noise = 1.55;
     double gyro_noise = 0.01;
+    // What the gyro is worth on roll and pitch, separately from the heading,
+    // and it has to be far smaller. The heading wants to be responsive: it is
+    // measured every hop by the ground and every solve by the instrument. Roll
+    // and pitch are measured only by gravity, through a gate that rejects
+    // whenever the vehicle is doing anything, and what they are used for is the
+    // ground projection -- where one degree moves every range in the frame by
+    // two and a half to five per cent.
+    //
+    // So an attitude that jitters is a set of ranges that jitter, and that goes
+    // straight into the hop vision reports. Measured: at the heading's own
+    // 0.01, the six degree of freedom filter's relative error ran 4.4, 3.3 and
+    // 4.4 per cent against the planar filters' 2.0, 2.2 and 2.3, and handing
+    // the projection the separate attitude filter's answer instead brought it
+    // back to 2.1, 2.3 and 2.3. The separate filter is not better; it is
+    // stiffer -- a sixty second trim against this one's effective two and a
+    // half. This is that time constant, expressed where it belongs.
+    double tilt_gyro_noise = 4.4e-4;
     double bias_walk = 0.01;
     double gyro_bias_walk = 0.0005;
     double vision_noise_m = 0.005;

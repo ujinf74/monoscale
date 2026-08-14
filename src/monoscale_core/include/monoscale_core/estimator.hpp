@@ -68,6 +68,11 @@ struct CameraSettings
   // How much further than the truth this camera measures the ground to have
   // moved, as a factor to divide out. Not an extrinsic.
   double range_scale = 1.0;
+  // Root mean square of how far the filter's own hop ends up from the one
+  // vision handed it. Near zero means the filter is reproducing the
+  // measurement and any error is upstream of it.
+  double hop_residual = 0.0;
+  double hop_taken = 0.0;
   // Calibration, as CameraInfo would report it, at the resolution it describes.
   Eigen::Matrix3d k = Eigen::Matrix3d::Identity();
   Eigen::VectorXd distortion;
@@ -145,6 +150,10 @@ struct EstimatorSettings
   // vehicle may climb over one hop. The second is a hop-length number and not a
   // drive-length one, so a graded road is left alone.
   double spatial_gravity_noise = 2.0;
+  // What the gyro is worth on roll and pitch, apart from the heading. See
+  // SpatialMsckfFilter::Settings: this is the stiffness the ground projection
+  // needs, and it is not the stiffness the heading needs.
+  double spatial_tilt_gyro_noise = 4.4e-4;
   // How much acceleration the vehicle may be under and still be levelled, on
   // the world-frame residual rather than on the reading's magnitude. Its own
   // parameter and not attitude_gravity_tolerance: the two gate different
@@ -155,6 +164,41 @@ struct EstimatorSettings
   // one; SpatialMsckfFilter::Settings carries what it costs and buys, measured
   // on three drives and on the same drives with the scale injected wrong.
   double spatial_scale_variance = 0.0;
+  // The six degree of freedom filter's own priors on the accelerometer bias and
+  // on how level the vehicle starts. Both differ from what the planar filters
+  // carry, and SpatialMsckfFilter::Settings says why.
+  double spatial_bias_variance = 0.01;
+  double spatial_tilt_variance = 7.6e-3;
+  // How often the attitude is levelled against gravity: on every instrument
+  // sample, or once for the whole interval a hop spans.
+  bool spatial_level_every_sample = true;
+  // Screen the instrument the way the planar path's propagator does before
+  // handing it to the six degree of freedom filter: hold the last believable
+  // reading through an impulse, and integrate nothing sideways until vision has
+  // supplied the constant the integral is missing.
+  // Whether the six degree of freedom filter's own roll and pitch are what the
+  // ground projection is given. Off, the separate attitude filter answers, as
+  // it does for every other path, and off is measured.
+  //
+  // Closing that loop was the point of carrying an attitude at all, and it does
+  // not work yet. One degree of tilt moves every range in the frame by two and
+  // a half to five per cent, so an attitude that jitters is a set of ranges
+  // that jitter, and that lands in the hop vision reports before any filter
+  // sees it. Relative error over three drives: 4.4, 3.3 and 4.4 per cent with
+  // the filter's own tilt, against 2.1, 2.3 and 2.3 with the trim's -- and the
+  // planar filters' own 2.0, 2.2 and 2.3.
+  //
+  // The separate filter is not more accurate. It is stiffer: a sixty second
+  // trim against this one's effective two and a half, and what the projection
+  // needs is stiffness while what the filter needs is response. Tuning did not
+  // reconcile them -- the tilt's process noise was taken to zero and the
+  // relative error stayed at 3.3 to 5.4 per cent, because what moves the tilt
+  // is the levelling measurement rather than the propagation. So the projection
+  // is given the trim and the filter keeps its state, until something smooths
+  // the one without slowing the other.
+  bool spatial_tilt_to_projection = false;
+  bool spatial_screen_impulses = true;
+  bool spatial_wait_for_vision = true;
   // The same three degrees of freedom the planar filter's hop has, and the same
   // gate. The vehicle staying on the road is not one of them: it is an
   // assumption rather than a measurement, it gets its own update, and gating
@@ -358,6 +402,11 @@ struct Diagnostics
   // moved, as the six degree of freedom filter has it. 1 is the ground
   // projection's scale being right.
   double range_scale = 1.0;
+  // Root mean square of how far the filter's own hop ends up from the one
+  // vision handed it. Near zero means the filter is reproducing the
+  // measurement and any error is upstream of it.
+  double hop_residual = 0.0;
+  double hop_taken = 0.0;
   double worst_rejected = 0.0;
   double worst_allowance = 0.0;
   double camera_disagreement = 0.0;
@@ -454,6 +503,10 @@ private:
     // one of the things it is estimating.
     Eigen::Vector3d specific_force;
     Eigen::Vector3d angular_velocity;
+    // Whether that reading was believable, or is the last one that was. The
+    // simulator reports suspension contacts as hundreds of m/s2, and a single
+    // 17 ms step of one leaves the velocity wrong for many frames.
+    bool force_screened = false;
     double dt;
     double yaw;
   };
@@ -477,6 +530,11 @@ private:
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;
   std::unique_ptr<PlanarMsckfFilter> msckf_filter_;
   std::unique_ptr<SpatialMsckfFilter> spatial_filter_;
+  // The last accelerometer reading believable enough to propagate on.
+  std::optional<Eigen::Vector3d> last_specific_force_;
+  double hop_residual_squared_ = 0.0;
+  double hop_taken_squared_ = 0.0;
+  int64_t hop_residual_count_ = 0;
 
   std::vector<Update> pending_updates_;
   Diagnostics diagnostics_;

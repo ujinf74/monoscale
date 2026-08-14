@@ -228,9 +228,12 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.reject_beyond_m = settings.msckf_reject_beyond_m;
     filter.gravity_tolerance = settings.spatial_gravity_tolerance;
     filter.gravity_noise = settings.spatial_gravity_noise;
+    filter.tilt_gyro_noise = settings.spatial_tilt_gyro_noise;
     filter.height_noise_m = settings.spatial_height_noise_m;
     filter.innovation_gate = settings.spatial_innovation_gate;
     filter.initial_scale_variance = settings.spatial_scale_variance;
+    filter.initial_bias_variance = settings.spatial_bias_variance;
+    filter.initial_tilt_variance = settings.spatial_tilt_variance;
     spatial_filter_ = std::make_unique<SpatialMsckfFilter>(filter);
   }
   map_ready_ = !settings.require_map_before_translating;
@@ -365,10 +368,24 @@ void Estimator::ingest_imu(const ImuSample & sample)
       const Eigen::Vector2d body(
         c * acceleration.x() + s * acceleration.y(),
         -s * acceleration.x() + c * acceleration.y());
+      // The same screen the propagator applies, kept in the body frame so the
+      // filter that owns its own attitude is not handed a vector somebody
+      // else's attitude decided about. Gravity is along z on a road vehicle, so
+      // what is left in x and y is what the vehicle is doing.
+      Eigen::Vector3d force = sample.linear_acceleration;
+      bool screened = false;
+      if (settings_.inertial_max_acceleration_mps2 > 0.0 &&
+        force.head<2>().norm() > settings_.inertial_max_acceleration_mps2)
+      {
+        screened = true;
+        force = last_specific_force_.value_or(Eigen::Vector3d(0.0, 0.0, 9.80665));
+      } else {
+        last_specific_force_ = force;
+      }
       imu_window_.push_back(
         AccelerationSample{
           sample.stamp + settings_.imu_acceleration_offset_sec, acceleration, body,
-          sample.angular_velocity.z(), sample.linear_acceleration, sample.angular_velocity,
+          sample.angular_velocity.z(), force, sample.angular_velocity, screened,
           step.dt, yaw});
       while (imu_window_.size() > 8000) {
         imu_window_.pop_front();
@@ -558,7 +575,7 @@ std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
   // answers this itself and the separate attitude filter is not asked. That is
   // the whole point of the container: one covariance rather than two estimators
   // that cannot tell each other how sure they are.
-  if (spatial_filter_) {
+  if (spatial_filter_ && settings_.spatial_tilt_to_projection) {
     return spatial_filter_->body_tilt();
   }
   if (!attitude_ || !attitude_->started()) {
@@ -983,15 +1000,36 @@ void Estimator::process_pair()
   }
   if (spatial_filter_ && dt > 1e-4) {
     spatial_filter_->open_hop();
+    std::optional<Eigen::Vector3d> levelling;
     replay_inertial(
       previous_stamp, current_stamp,
-      [this](const AccelerationSample & sample, double step) {
-        spatial_filter_->predict(sample.specific_force, sample.angular_velocity, step);
-        // Levelled on every sample it can be, which is most of them: the
-        // gate inside decides, and a vehicle doing anything interesting fails
-        // it exactly when believing the accelerometer would be wrong.
-        spatial_filter_->update_gravity(sample.specific_force);
+      [this, &levelling](const AccelerationSample & sample, double step) {
+        Eigen::Vector3d force = sample.specific_force;
+        if (settings_.spatial_screen_impulses && sample.force_screened) {
+          // Held rather than believed. See AccelerationSample.
+        } else if (!settings_.spatial_screen_impulses) {
+          force = sample.specific_force;
+        }
+        // Nothing sideways until vision has supplied the integral's constant.
+        // The planar propagator withholds the spawn and drop transient for the
+        // same reason, and a filter that integrates it starts the drive with a
+        // velocity nobody asked for.
+        if (settings_.spatial_wait_for_vision && !spatial_filter_->settled()) {
+          force.head<2>().setZero();
+        }
+        spatial_filter_->predict(force, sample.angular_velocity, step);
+        // The gate inside decides whether the reading is gravity at all, and a
+        // vehicle doing anything interesting fails it exactly when believing
+        // the accelerometer would be wrong.
+        if (settings_.spatial_level_every_sample) {
+          spatial_filter_->update_gravity(sample.specific_force);
+        } else {
+          levelling = sample.specific_force;
+        }
       });
+    if (levelling.has_value()) {
+      spatial_filter_->update_gravity(*levelling);
+    }
     yaw_guess = spatial_filter_->yaw();
   }
 
@@ -1219,6 +1257,12 @@ void Estimator::process_pair()
     if (!spatial_filter_->update(hop, turn, motion->inliers, extra, spread, yaw_sigma)) {
       ++diagnostics_.filter_rejections;
     }
+    {
+      // Straight after the hop and before anything else touches the state:
+      // whether the filter took the measurement it was given.
+      const Eigen::Vector2d taken = spatial_filter_->body_translation();
+      hop_taken_squared_ += (taken - hop).squaredNorm();
+    }
     // Separately, and ungated: the vehicle did not climb over this hop.
     spatial_filter_->update_height();
     if (standing) {
@@ -1239,6 +1283,15 @@ void Estimator::process_pair()
     diagnostics_.height = spatial_filter_->position().z();
     diagnostics_.levelled = spatial_filter_->levelled();
     diagnostics_.range_scale = spatial_filter_->range_scale();
+    {
+      const Eigen::Vector2d after = spatial_filter_->body_translation();
+      hop_residual_squared_ += (after - hop).squaredNorm();
+      ++hop_residual_count_;
+      diagnostics_.hop_residual =
+        std::sqrt(hop_residual_squared_ / static_cast<double>(hop_residual_count_));
+      diagnostics_.hop_taken =
+        std::sqrt(hop_taken_squared_ / static_cast<double>(hop_residual_count_));
+    }
     if (spatial_filter_->last_update().has_value()) {
       diagnostics_.last_nis = spatial_filter_->last_update()->nis;
     }

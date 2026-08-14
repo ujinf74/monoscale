@@ -434,6 +434,7 @@ int main(int argc, char ** argv)
       "자세: roll=%+.3fdeg pitch=%+.3fdeg 높이=%+.3fm 수평보정=%ld 지면스케일=%.5f\n",
       diagnostics.roll * 180.0 / M_PI, diagnostics.pitch * 180.0 / M_PI,
       diagnostics.height, diagnostics.levelled, diagnostics.range_scale);
+    std::printf("hop 잔차: 갱신직후=%.4f 최종=%.4f m\n", diagnostics.hop_taken, diagnostics.hop_residual);
   }
   if (diagnostics.last_nis != 0.0 || diagnostics.gyro_bias != 0.0) {
     std::printf(

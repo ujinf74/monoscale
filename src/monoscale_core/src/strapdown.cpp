@@ -180,7 +180,17 @@ void SpatialMsckfFilter::predict(
   covariance_.block<3, 3>(kP, kV) += eye * (spectral * dt * dt / 2.0);
   covariance_.block<3, 3>(kV, kP) += eye * (spectral * dt * dt / 2.0);
   covariance_.block<3, 3>(kV, kV) += eye * (spectral * dt);
-  covariance_.block<3, 3>(kTh, kTh) += eye * (settings_.gyro_noise * settings_.gyro_noise * dt);
+  // Roll and pitch on their own budget, and the heading on its own: they are
+  // measured by different things and used for different things.
+  Eigen::Vector3d attitude_walk(
+    settings_.tilt_gyro_noise * settings_.tilt_gyro_noise,
+    settings_.tilt_gyro_noise * settings_.tilt_gyro_noise,
+    settings_.gyro_noise * settings_.gyro_noise);
+  // Those are body axes and the split is about the world's vertical, so the
+  // budget is carried into the body the vehicle is actually in.
+  const Eigen::Matrix3d body_walk =
+    rotation.transpose() * attitude_walk.asDiagonal() * rotation;
+  covariance_.block<3, 3>(kTh, kTh) += body_walk * dt;
   covariance_.block<3, 3>(kBA, kBA) += eye * (settings_.bias_walk * settings_.bias_walk * dt);
   covariance_.block<3, 3>(kBG, kBG) +=
     eye * (settings_.gyro_bias_walk * settings_.gyro_bias_walk * dt);
@@ -370,7 +380,22 @@ bool SpatialMsckfFilter::update_gravity(const Eigen::Vector3d & acceleration_bod
   if (!invertible) {
     return false;
   }
-  const Eigen::Matrix<double, kSize, 3> gain = covariance_ * model.transpose() * inverse;
+  Eigen::Matrix<double, kSize, 3> gain = covariance_ * model.transpose() * inverse;
+  // Gravity cannot see the heading. Turning about it leaves every accelerometer
+  // reading exactly where it was, so that direction is not in the measurement
+  // at all, and whatever the gain puts there came from a cross term rather than
+  // from the instrument. Left in, it is a heading correction made out of
+  // nothing, applied on every sample -- sixteen hundred times over a recording
+  // -- and it showed up as hops scattering sideways at twice the rate the
+  // planar filter's do.
+  //
+  // So the attitude's share of the correction is projected off that direction,
+  // which in the body frame is where the reading itself points. Everything else
+  // the levelling implies -- the velocity a tilt error was integrating into,
+  // the bias it was hiding in -- is real and is left alone.
+  const Eigen::Vector3d unobservable = expected.normalized();
+  gain.block<3, 3>(kTh, 0) -=
+    unobservable * (unobservable.transpose() * gain.block<3, 3>(kTh, 0));
   correct(gain * innovation);
   const Covariance spread = Covariance::Identity() - gain * model;
   covariance_ = spread * covariance_ * spread.transpose() + gain * noise * gain.transpose();

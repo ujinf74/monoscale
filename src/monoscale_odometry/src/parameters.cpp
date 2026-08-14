@@ -370,10 +370,20 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.radial_min_range_m = declare_double("radial_min_range_m", 1.5);
   // The six degree of freedom filter's own two numbers, and its gate.
   settings.spatial_gravity_noise = declare_double("spatial_gravity_noise", 2.0);
+  settings.spatial_tilt_gyro_noise =
+    declare_double("spatial_tilt_gyro_noise", 4.4e-4);
   settings.spatial_gravity_tolerance =
     declare_double("spatial_gravity_tolerance", 0.15);
   settings.spatial_height_noise_m = declare_double("spatial_height_noise_m", 0.01);
   settings.spatial_scale_variance = declare_double("spatial_scale_variance", 0.0);
+  settings.spatial_bias_variance = declare_double("spatial_bias_variance", 0.01);
+  settings.spatial_tilt_variance = declare_double("spatial_tilt_variance", 7.6e-3);
+  settings.spatial_level_every_sample =
+    declare_bool("spatial_level_every_sample", true);
+  settings.spatial_tilt_to_projection =
+    declare_bool("spatial_tilt_to_projection", false);
+  settings.spatial_screen_impulses = declare_bool("spatial_screen_impulses", true);
+  settings.spatial_wait_for_vision = declare_bool("spatial_wait_for_vision", true);
   settings.spatial_innovation_gate = declare_double("spatial_innovation_gate", 11.3);
   // Rather than choosing that trade once, watch the ground disagree with the
   // reported heading and loosen it by however one-sided the disagreement is.
