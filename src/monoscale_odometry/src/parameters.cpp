@@ -364,6 +364,10 @@ Configuration declare_and_read(rclcpp::Node & node)
   // measurement off, which leaves the gyro bias with nothing to observe it.
   // EstimatorSettings carries the measured trade behind this default.
   settings.msckf_heading_noise = declare_double("msckf_heading_noise", 0.1);
+  // Read the mounting-pitch lean from beyond this range only. Not the solve's
+  // ground band: the near ground still votes for the pose, it just cannot carry
+  // a regression it is the noisiest part of.
+  settings.radial_min_range_m = declare_double("radial_min_range_m", 1.5);
   // Rather than choosing that trade once, watch the ground disagree with the
   // reported heading and loosen it by however one-sided the disagreement is.
   // Off by default and off is what the measurement says: it only slides

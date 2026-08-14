@@ -416,3 +416,98 @@ TEST(Anchors, EqualWeightsStillAverageEqually)
 
   EXPECT_NEAR(anchors.position_of(1)->x(), 10.2, 1e-9);
 }
+
+// A mounting pitch that is wrong, and the one residual that notices.
+
+namespace
+{
+
+// Ground points a camera at the origin would see, spread across its field.
+monoscale::Points2 ground_fan()
+{
+  const int bearings = 9;
+  const int rings = 8;
+  monoscale::Points2 points(bearings * rings, 2);
+  Eigen::Index at = 0;
+  for (int b = 0; b < bearings; ++b) {
+    const double angle = (-40.0 + 10.0 * b) * M_PI / 180.0;
+    for (int r = 0; r < rings; ++r) {
+      const double range = 2.0 + 2.0 * r;
+      points(at, 0) = range * std::cos(angle);
+      points(at, 1) = range * std::sin(angle);
+      ++at;
+    }
+  }
+  return points;
+}
+
+// The same ground as a camera whose mounting pitch is out by `error` radians
+// would place it: dr = -e(h + r*r/h), which is what turns a tilt into a range
+// error that depends on where in the field the point is.
+monoscale::Points2 tilted(const monoscale::Points2 & truth, double error, double height)
+{
+  monoscale::Points2 out(truth.rows(), 2);
+  for (Eigen::Index i = 0; i < truth.rows(); ++i) {
+    const double range = std::hypot(truth(i, 0), truth(i, 1));
+    const double moved = range - error * (height + range * range / height);
+    out(i, 0) = truth(i, 0) * moved / range;
+    out(i, 1) = truth(i, 1) * moved / range;
+  }
+  return out;
+}
+
+double leaning(const monoscale::Points2 & body, const monoscale::Points2 & world)
+{
+  const auto fit = monoscale::align_to_anchors(
+    body, world, monoscale::Weights(), 0.0, 5.0, 8, false);
+  return fit.has_value() ? fit->radial_linear : 0.0;
+}
+
+}  // namespace
+
+TEST(Anchors, ATiltedMountingLeansTheResidualAlongItsOwnBearing)
+{
+  const monoscale::Points2 truth = ground_fan();
+
+  // A camera mounted where it is believed to be leaves nothing to lean on.
+  EXPECT_NEAR(leaning(truth, truth), 0.0, 1e-9);
+
+  // One that looks too far down, and one that does not look down far enough.
+  const double down = leaning(tilted(truth, 0.01, 1.0), truth);
+  const double up = leaning(tilted(truth, -0.01, 1.0), truth);
+
+  EXPECT_GT(std::abs(down), 1e-3);
+  EXPECT_LT(down * up, 0.0);
+}
+
+TEST(Anchors, TheLeanGrowsWithTheMountingError)
+{
+  const monoscale::Points2 truth = ground_fan();
+  const double small = leaning(tilted(truth, 0.005, 1.0), truth);
+  const double large = leaning(tilted(truth, 0.02, 1.0), truth);
+
+  // Monotone in the error is the whole claim: a number that moves without
+  // saying which way is not a measurement of anything.
+  EXPECT_GT(std::abs(large), std::abs(small));
+  EXPECT_GT(large * small, 0.0);
+}
+
+TEST(Anchors, AHeightThatIsWrongDoesNotShowInTheLean)
+{
+  // Every range scaled by the same factor, which is what believing the wrong
+  // camera height does. The map is built from that same projection, so a rigid
+  // fit is satisfied and this residual has nothing to report -- the reason the
+  // height has to be observed against the accelerometer instead.
+  const monoscale::Points2 truth = ground_fan();
+  monoscale::Points2 scaled(truth.rows(), 2);
+  for (Eigen::Index i = 0; i < truth.rows(); ++i) {
+    scaled(i, 0) = truth(i, 0) * 1.02;
+    scaled(i, 1) = truth(i, 1) * 1.02;
+  }
+
+  const double tilt = std::abs(leaning(tilted(truth, 0.01, 1.0), truth));
+  const double height = std::abs(leaning(scaled, scaled));
+
+  EXPECT_NEAR(height, 0.0, 1e-9);
+  EXPECT_GT(tilt, 1e-3);
+}

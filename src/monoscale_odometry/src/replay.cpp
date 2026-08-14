@@ -421,6 +421,14 @@ int main(int argc, char ** argv)
     stages += buffer;
   }
   std::printf("단계별 ms/solve: %s\n", stages.c_str());
+  for (size_t i = 0; i < diagnostics.radial_samples.size(); ++i) {
+    if (diagnostics.radial_samples[i] == 0) {
+      continue;
+    }
+    std::printf(
+      "마운팅pitch[%zu]: 기울기=%+.5f n=%ld\n",
+      i, diagnostics.radial_linear[i], diagnostics.radial_samples[i]);
+  }
   if (diagnostics.last_nis != 0.0 || diagnostics.gyro_bias != 0.0) {
     std::printf(
       "필터: 자이로바이어스=%+.5f rad/s  헤딩끌림=%+.5f rad/hop  마지막 NIS=%.3f  "

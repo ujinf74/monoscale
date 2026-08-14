@@ -243,7 +243,8 @@ std::optional<double> GroundAnchorMap::weight_of(int64_t identity) const
 
 std::optional<AnchorAlignment> align_to_anchors(
   const Points2 & body_points, const Points2 & world_points, const Weights & weights_in,
-  double yaw, double threshold, int min_inliers, bool refine_yaw)
+  double yaw, double threshold, int min_inliers, bool refine_yaw,
+  const Eigen::Vector2d & origin, double radial_min_range)
 {
   const Eigen::Index count = body_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || world_points.rows() != count) {
@@ -393,6 +394,16 @@ std::optional<AnchorAlignment> align_to_anchors(
   result.inliers.resize(count);
   Eigen::Index kept = 0;
   double squared = 0.0;
+  // The radial residuals, held until the reference range is known: normalising
+  // by it is what keeps the two-term fit from spanning r to r^4.
+  std::vector<double> ranges;
+  std::vector<double> radial;
+  std::vector<double> radial_weight;
+  double range_total = 0.0;
+  double range_weight = 0.0;
+  ranges.reserve(static_cast<size_t>(count));
+  radial.reserve(static_cast<size_t>(count));
+  radial_weight.reserve(static_cast<size_t>(count));
   for (Eigen::Index i = 0; i < count; ++i) {
     const double rx = world_points(i, 0) - (c * body_points(i, 0) - s * body_points(i, 1)) -
       centre.x();
@@ -401,10 +412,29 @@ std::optional<AnchorAlignment> align_to_anchors(
     const double residual_squared = rx * rx + ry * ry;
     const bool inside = residual_squared <= threshold_squared;
     result.inliers(i) = inside;
-    if (inside) {
-      ++kept;
-      squared += residual_squared;
+    if (!inside) {
+      continue;
     }
+    ++kept;
+    squared += residual_squared;
+
+    // The residual is in the world frame and the bearing is in the body's, so
+    // one of them has to be carried across. Turning the residual back is the
+    // cheaper way round: the rotation is the same for every point.
+    const double bx = body_points(i, 0) - origin.x();
+    const double by = body_points(i, 1) - origin.y();
+    const double range = std::hypot(bx, by);
+    if (!(range > 1e-6) || range < radial_min_range) {
+      continue;
+    }
+    const double body_rx = c * rx + s * ry;
+    const double body_ry = -s * rx + c * ry;
+    const double w = weight_of(i);
+    ranges.push_back(range);
+    radial.push_back((bx * body_rx + by * body_ry) / range);
+    radial_weight.push_back(w);
+    range_total += w * range;
+    range_weight += w;
   }
   if (kept < min_inliers) {
     return std::nullopt;
@@ -413,6 +443,26 @@ std::optional<AnchorAlignment> align_to_anchors(
   result.spread = std::sqrt(squared / static_cast<double>(kept));
   result.yaw = yaw;
   result.yaw_sigma = applied;
+
+  // Weighted least squares of the radial residual on the normalised range and
+  // its square, with no constant term: a projection that is wrong about where
+  // the ground is is wrong by an amount that goes to zero underneath the lens,
+  // so an offset there would be fitting something else.
+  const double reference = range_weight > 0.0 ? range_total / range_weight : 0.0;
+  if (reference > 1e-6 && ranges.size() >= 3) {
+    double s11 = 0.0;
+    double b1 = 0.0;
+    for (size_t i = 0; i < ranges.size(); ++i) {
+      const double x = ranges[i] / reference;
+      const double w = radial_weight[i];
+      s11 += w * x * x;
+      b1 += w * x * radial[i];
+    }
+    if (s11 > 1e-12) {
+      result.radial_linear = b1 / s11;
+      result.radial_reference = reference;
+    }
+  }
   return result;
 }
 

@@ -131,6 +131,34 @@ struct AnchorAlignment
   // One standard deviation of that heading, or infinity when the fit was not
   // asked to solve for it.
   double yaw_sigma = std::numeric_limits<double>::infinity();
+
+  // How the inlying residuals lean along their own bearing from the camera,
+  // regressed against range and normalised by `radial_reference`. `spread` is
+  // these same residuals squared into one number, which is what the fit needs;
+  // this is the part that squaring destroys.
+  //
+  // It measures the mounting pitch, and only that. Measured by replaying one
+  // drive with the mounting deliberately turned, it runs -0.0035, -0.0014,
+  // -0.0008, +0.0003, +0.0017, +0.0025, +0.0043 over pitch errors of -1 to +1
+  // degree: monotone, and about 0.004 per degree.
+  //
+  // The camera's height does not appear here, and cannot. A height believed to
+  // be h(1+d) puts every ground point at r(1+d), and the anchors are built from
+  // that same projection, so the whole map is scaled with it and a rigid fit is
+  // satisfied. The trajectory is wrong -- a 2% error took ATE from 0.111 m to
+  // 0.336 -- and this residual never moves. Height is observable against the
+  // accelerometer or not at all.
+  //
+  // What lets pitch through where height cannot is that its error depends on
+  // range: dr = -e(h + r*r/h) against d*r. An anchor is averaged over the
+  // frames its feature survived and the feature crosses the field, so each
+  // sighting carried a different range error into that average and they do not
+  // cancel. A quadratic term was fitted for as well, orthogonalised against
+  // this one; over the range the ground band actually spans there is no support
+  // left for it and it came back noise, so the linear term carries the whole
+  // signal.
+  double radial_linear = 0.0;
+  double radial_reference = 0.0;
 };
 
 // Translation that places the current ground view onto its world anchors.
@@ -152,9 +180,23 @@ struct AnchorAlignment
 // precision was no better on any drive, because the gyro's error is a bias
 // rather than noise. Cancelling a bias means estimating it, which is a state,
 // which is the caller's business.
+// `origin` is where the camera sits in the frame `body_points` are given in.
+// The range that separates a height error from a tilt one is measured from the
+// lens, not from the axle, and on this vehicle those are three metres apart.
+// Leaving it at zero costs nothing but `radial_linear`.
+//
+// `radial_min_range` drops the nearest ground from that regression and from
+// nothing else -- those points still vote for the pose. They have to go because
+// a pixel there is worth five millimetres and optical flow loses them first, and
+// weighting by precision hands them the fit. Measured on the front camera, whose
+// ground band starts at 0.6 m: the lean over mounting errors of -0.5, 0 and +0.5
+// degrees ran -0.0003, +0.0007, -0.0005 with them in, which says nothing, and
+// -0.0040, -0.0008, +0.0010 with the first 1.5 m left out.
 std::optional<AnchorAlignment> align_to_anchors(
   const Points2 & body_points, const Points2 & world_points, const Weights & weights,
-  double yaw, double threshold, int min_inliers, bool refine_yaw);
+  double yaw, double threshold, int min_inliers, bool refine_yaw,
+  const Eigen::Vector2d & origin = Eigen::Vector2d::Zero(),
+  double radial_min_range = 0.0);
 
 struct CameraTranslation
 {

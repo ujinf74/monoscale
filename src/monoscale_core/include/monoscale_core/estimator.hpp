@@ -133,6 +133,12 @@ struct EstimatorSettings
   double obstacle_height_margin = 0.7;
   int obstacle_slip_patience = 30;
 
+  // The nearest ground the mounting-pitch lean is read from. It is not the
+  // band the solve uses -- those points still vote for the pose -- because the
+  // near ground is where flow is worst and precision weighting would hand it
+  // the regression. AnchorAlignment carries what leaving it at zero costs.
+  double radial_min_range_m = 1.5;
+
   int max_ground_anchors = 4000;
   int anchor_max_age_frames = 120;
   double anchor_update_gain = 0.0;
@@ -295,6 +301,14 @@ struct Diagnostics
   int64_t map_aligned_frames = 0;
   int64_t zupt_holds = 0;
   int64_t obstacles_unavailable = 0;
+  // How each camera's ground projection leans, averaged over the solves it
+  // answered. This is the mounting pitch and nothing else -- AnchorAlignment
+  // carries why the height cannot appear here. Per camera because they are
+  // mounted at different heights and opposite pitches, and a mean across them
+  // would cancel the very thing being measured.
+  std::vector<double> radial_linear;
+  std::vector<int64_t> radial_samples;
+
   // What the MSCKF learned and what it thought of the last measurement. The
   // gyro bias is the state the older filters had no place for, so its value is
   // the whole claim; the NIS says whether the covariance is honest.

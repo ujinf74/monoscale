@@ -118,6 +118,12 @@ struct Estimator::Camera
 
   GroundAnchorMap anchors;
 
+  // How this camera's ground projection has been leaning, summed over the
+  // solves the map answered. Kept here rather than in the diagnostics because
+  // the solve does not know which camera it is.
+  double radial_linear_sum = 0.0;
+  int64_t radial_samples = 0;
+
   // Per feature, the ground projection and camera position from when it was
   // first seen, so each earns its own baseline over as many frames as it
   // survives rather than sharing one keyframe. Sorted by identity.
@@ -733,11 +739,17 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     std::optional<AnchorAlignment> aligned;
     {
       Stopwatch align(diagnostics_, "align");
+      const Eigen::Vector3d & mount = camera.model.translation_base_from_camera;
       aligned = align_to_anchors(
         body, world, weights, handed, settings_.ground_ransac_threshold_m,
-        settings_.ground_min_inliers, heading_.enabled() || msckf_filter_ != nullptr);
+        settings_.ground_min_inliers, heading_.enabled() || msckf_filter_ != nullptr,
+        Eigen::Vector2d(mount.x(), mount.y()), settings_.radial_min_range_m);
     }
     if (aligned.has_value()) {
+      if (aligned->radial_reference > 0.0) {
+        camera.radial_linear_sum += aligned->radial_linear;
+        ++camera.radial_samples;
+      }
       // Recorded, not applied. Both cameras see the same heading and each has
       // its own opinion of how far it is out; folding them in one at a time
       // gives the filter two updates against one prediction.
@@ -947,6 +959,19 @@ void Estimator::process_pair()
   } else {
     for (auto & camera : cameras_) {
       remember_solve_pixels(*camera);
+    }
+  }
+
+  // Carried out to the diagnostics here, where the cameras are indexed: the
+  // solve holds a reference and does not know which one it was handed.
+  diagnostics_.radial_linear.assign(count, 0.0);
+  diagnostics_.radial_samples.assign(count, 0);
+  for (size_t i = 0; i < count; ++i) {
+    const Camera & camera = *cameras_[i];
+    diagnostics_.radial_samples[i] = camera.radial_samples;
+    if (camera.radial_samples > 0) {
+      const double n = static_cast<double>(camera.radial_samples);
+      diagnostics_.radial_linear[i] = camera.radial_linear_sum / n;
     }
   }
 
