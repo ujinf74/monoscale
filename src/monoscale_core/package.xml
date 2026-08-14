@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>monoscale_core</name>
+  <version>0.1.0</version>
+  <description>
+    The estimation itself, with no ROS in it: ground projection, the anchor map,
+    the filters and the state machine that drives them. The nodes are thin
+    wrappers over this, which is what lets the same code be tested without a
+    graph and later be called directly by the tracker in one process.
+  </description>
+  <maintainer email="ujin@tukorea.ac.kr">ujinf74</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>eigen</depend>
+  <depend>OpenCV</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -29,7 +29,6 @@
 #include <string>
 #include <vector>
 
-#include <cv_bridge/cv_bridge.h>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -38,8 +37,62 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/cudaoptflow.hpp>
+#include <opencv2/cudawarping.hpp>
+#endif
+
 namespace
 {
+
+// An Image as a single channel Mat, without cv_bridge.
+//
+// cv_bridge links against the OpenCV the ROS distribution was built with, and
+// this node may be pointed at another one that has the CUDA modules. Two
+// OpenCVs in one process is an ABI gamble; the conversion it was doing for us
+// is this.
+bool to_gray(const sensor_msgs::msg::Image & message, cv::Mat & gray)
+{
+  const std::string & encoding = message.encoding;
+  int channels = 0;
+  int code = -1;
+  if (encoding == "mono8" || encoding == "8UC1") {
+    channels = 1;
+  } else if (encoding == "bgr8" || encoding == "8UC3") {
+    channels = 3;
+    code = cv::COLOR_BGR2GRAY;
+  } else if (encoding == "rgb8") {
+    channels = 3;
+    code = cv::COLOR_RGB2GRAY;
+  } else if (encoding == "bgra8" || encoding == "8UC4") {
+    channels = 4;
+    code = cv::COLOR_BGRA2GRAY;
+  } else if (encoding == "rgba8") {
+    channels = 4;
+    code = cv::COLOR_RGBA2GRAY;
+  } else {
+    return false;
+  }
+
+  const int rows = static_cast<int>(message.height);
+  const int columns = static_cast<int>(message.width);
+  if (rows <= 0 || columns <= 0 ||
+    message.data.size() < static_cast<size_t>(rows) * message.step)
+  {
+    return false;
+  }
+  // A view over the caller's buffer, honouring the row stride.
+  const cv::Mat view(
+    rows, columns, CV_8UC(channels), const_cast<uint8_t *>(message.data.data()),
+    message.step);
+  if (channels == 1) {
+    view.copyTo(gray);
+  } else {
+    cv::cvtColor(view, gray, code);
+  }
+  return true;
+}
 
 struct TrackState
 {
@@ -63,6 +116,13 @@ struct TrackState
   // How many features this camera is currently trying to hold. Owned by the
   // one thread that runs this camera's callback, so it needs no guard.
   int target = 0;
+
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+  // The same two things the CPU path keeps, on the device. The pyramid is held
+  // rather than rebuilt for the same reason: two flow calls a frame would
+  // otherwise build four pyramids where two are needed.
+  std::vector<cv::cuda::GpuMat> previous_device_pyramid;
+#endif
 };
 
 // What the flow did on one hop. Only the report reads it, but the survivors'
@@ -169,6 +229,61 @@ public:
     grid_columns_ = declare_parameter<int>("detection_grid_columns", 4);
     grid_rows_ = declare_parameter<int>("detection_grid_rows", 3);
     warm_start_ = declare_parameter<bool>("lk_warm_start", true);
+    // Run the optical flow on the GPU.
+    //
+    // This is the one stage in the whole stack where a GPU has a case to make.
+    // Measured on an Orin Nano at 25 W, a 640 px frame with 1600 features costs
+    // 42-43 ms, of which the two flow calls are 35-38; the 30 Hz budget is
+    // 33.3. Everything else -- detection, the trim, the publish -- is under
+    // 5 ms together, and the estimator downstream is under 3.
+    //
+    // Off by default, and it stays off until it has been measured on the board
+    // it is meant to help. The CPU path is what every recorded number came
+    // from, and a GPU path that is merely plausible is worth less than a CPU
+    // path that is known.
+    use_cuda_ = declare_parameter<bool>("use_cuda", false);
+    // How many iterations the GPU flow runs per pyramid level.
+    //
+    // The CPU stops at whichever comes first, thirty iterations or a step under
+    // 0.01 px. OpenCV's CUDA kernel has no epsilon and always runs the count,
+    // so on an ambiguous patch it keeps walking after the CPU would have
+    // stopped. Before the gates, the GPU's mean hop reads 18.5 px against the
+    // CPU's 8.6 on the same frames, which is what that looks like.
+    //
+    // Which makes lowering it look obvious, and it is a trap. Position RMSE
+    // over the same two drives, tracks recorded from each arm and replayed
+    // through the same estimator:
+    //
+    //                    CPU      GPU 10    GPU 30
+    //   clean60_release  0.0989   0.0773    0.1106
+    //   fish8            0.0618   0.1750    0.0593
+    //
+    // Ten iterations is a 22% win on one drive and a 2.8x loss on the other.
+    // Thirty -- OpenCV's default, and the count the CPU would reach if its
+    // epsilon never fired -- sits in the same band as the CPU on both. So the
+    // default stays where it is, and the drop to ten stays here as a warning
+    // rather than as a setting anyone should reach for.
+    cuda_iterations_ = declare_parameter<int>("lk_cuda_iterations", 30);
+    if (use_cuda_) {
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+      if (cv::cuda::getCudaEnabledDeviceCount() > 0) {
+        cuda_active_ = true;
+        forward_flow_ = cv::cuda::SparsePyrLKOpticalFlow::create(
+          cv::Size(window_, window_), levels_, cuda_iterations_, true);
+        backward_flow_ = cv::cuda::SparsePyrLKOpticalFlow::create(
+          cv::Size(window_, window_), levels_, cuda_iterations_, false);
+        RCLCPP_INFO(
+          get_logger(), "optical flow on the GPU: %s",
+          cv::cuda::DeviceInfo(0).name());
+      } else {
+        RCLCPP_WARN(get_logger(), "use_cuda asked for, but no CUDA device; staying on the CPU");
+      }
+#else
+      RCLCPP_WARN(
+        get_logger(),
+        "use_cuda asked for, but this OpenCV has no cudaoptflow; staying on the CPU");
+#endif
+    }
     // Fraction of the image, measured from the top, to leave out of feature
     // detection. The estimator keeps only what projects onto the ground
     // between ground_min_distance_m and ground_max_distance_m, so anything
@@ -287,11 +402,10 @@ private:
     };
     StageTimes stage;
     cv::Mat gray;
-    try {
-      gray = cv_bridge::toCvCopy(message, "mono8")->image;
-    } catch (const cv_bridge::Exception & error) {
+    if (!to_gray(message, gray)) {
       RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 5000, "cv_bridge: %s", error.what());
+        get_logger(), *get_clock(), 5000, "unsupported image encoding: %s",
+        message.encoding.c_str());
       return;
     }
     if (processing_width_ > 0 && gray.cols > processing_width_) {
@@ -303,11 +417,22 @@ private:
         0, 0, cv::INTER_AREA);
     }
 
+    TrackState & state = states_[name];
     std::vector<cv::Mat> pyramid;
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+    // Only declared where the type is complete: without cudaoptflow, OpenCV
+    // forward declares GpuMat and nothing can be held in a vector of them.
+    std::vector<cv::cuda::GpuMat> device_pyramid;
+    if (cuda_active_) {
+      build_device_pyramid(gray, device_pyramid);
+    } else {
+      cv::buildOpticalFlowPyramid(gray, pyramid, cv::Size(window_, window_), levels_);
+    }
+#else
     cv::buildOpticalFlowPyramid(gray, pyramid, cv::Size(window_, window_), levels_);
+#endif
     stage.prep = lap();
 
-    TrackState & state = states_[name];
     std::vector<cv::Point2f> previous_points;
     std::vector<cv::Point2f> current_points;
     std::vector<cv::Point2f> velocities;
@@ -328,9 +453,17 @@ private:
       ? std::clamp(elapsed / state.interval, 0.25, 4.0)
       : 1.0;
 
-    if (!state.previous_pyramid.empty() && !state.points.empty() &&
-      state.previous_gray.size() == gray.size())
-    {
+    const bool have_previous = !state.points.empty() &&
+      state.previous_gray.size() == gray.size();
+    if (cuda_active_) {
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+      if (have_previous && !state.previous_device_pyramid.empty()) {
+        follow_cuda(
+          state, gray, device_pyramid, previous_points, current_points, velocities,
+          identities, stats, reach);
+      }
+#endif
+    } else if (have_previous && !state.previous_pyramid.empty()) {
       follow(
         state, gray, pyramid, previous_points, current_points, velocities,
         identities, stats, reach);
@@ -374,7 +507,13 @@ private:
     detect(state, gray);
     stage.detect = lap();
     state.previous_gray = gray;
-    state.previous_pyramid = pyramid;
+    if (cuda_active_) {
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+      state.previous_device_pyramid = device_pyramid;
+#endif
+    } else {
+      state.previous_pyramid = pyramid;
+    }
 
     // Features detected on this frame go out too, standing still: previous
     // position equal to current, because they have not moved yet. The image
@@ -614,6 +753,130 @@ private:
     stats.drifted = drifted;
   }
 
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+  void build_device_pyramid(
+    const cv::Mat & gray, std::vector<cv::cuda::GpuMat> & pyramid) const
+  {
+    // The same ladder the flow builds for itself, kept so that two calls a
+    // frame do not build four pyramids where two are needed.
+    pyramid.resize(static_cast<size_t>(levels_) + 1);
+    pyramid[0].upload(gray);
+    for (int level = 1; level <= levels_; ++level) {
+      cv::cuda::pyrDown(
+        pyramid[static_cast<size_t>(level - 1)], pyramid[static_cast<size_t>(level)]);
+    }
+  }
+
+  // The GPU twin of follow(). Every gate below is the one above it, applied to
+  // the same quantities: OpenCV's CUDA kernel reports the patch error as the
+  // mean absolute intensity difference over the window, which is what the CPU
+  // reports and what `lk_error_threshold` was measured against.
+  //
+  // The two do not agree to the bit and cannot: the pyramids are built
+  // differently -- cv::buildOpticalFlowPyramid pads each level by the window
+  // where cuda::pyrDown does not -- and the flow itself iterates in floats
+  // where the CPU uses fixed point. What has to hold is that they track the
+  // same features to within a fraction of a pixel, which is what the
+  // comparison in tools measures.
+  void follow_cuda(
+    TrackState & state, const cv::Mat & gray,
+    const std::vector<cv::cuda::GpuMat> & pyramid,
+    std::vector<cv::Point2f> & previous_points,
+    std::vector<cv::Point2f> & current_points,
+    std::vector<cv::Point2f> & velocities,
+    std::vector<int64_t> & identities, FollowStats & stats, double reach)
+  {
+    const size_t count = state.points.size();
+    cv::Mat source(1, static_cast<int>(count), CV_32FC2);
+    for (size_t i = 0; i < count; ++i) {
+      source.at<cv::Point2f>(0, static_cast<int>(i)) = state.points[i];
+    }
+
+    // Start each search where the feature was heading, the same warm start the
+    // CPU path uses: the near ground sweeps fastest and carries most of the
+    // metric information, so those are the points that fall into a wrong local
+    // minimum without a guess.
+    cv::Mat guess = source.clone();
+    const bool warm = warm_start_ && state.velocities.size() == count;
+    if (warm) {
+      for (size_t i = 0; i < count; ++i) {
+        guess.at<cv::Point2f>(0, static_cast<int>(i)) =
+          state.points[i] + state.velocities[i] * static_cast<float>(reach);
+      }
+    }
+
+    cv::cuda::GpuMat device_source;
+    cv::cuda::GpuMat device_forward;
+    cv::cuda::GpuMat device_status;
+    cv::cuda::GpuMat device_error;
+    device_source.upload(source);
+    device_forward.upload(guess);
+    (warm ? forward_flow_ : backward_flow_)
+    ->calc(
+      state.previous_device_pyramid, pyramid, device_source, device_forward,
+      device_status, device_error);
+
+    cv::cuda::GpuMat device_backward;
+    cv::cuda::GpuMat device_backward_status;
+    backward_flow_->calc(
+      pyramid, state.previous_device_pyramid, device_forward, device_backward,
+      device_backward_status);
+
+    cv::Mat forward;
+    cv::Mat backward;
+    cv::Mat status;
+    cv::Mat backward_status;
+    cv::Mat error;
+    device_forward.download(forward);
+    device_backward.download(backward);
+    device_status.download(status);
+    device_backward_status.download(backward_status);
+    if (!device_error.empty()) {
+      device_error.download(error);
+    }
+
+    double raw = 0.0;
+    size_t raw_count = 0;
+    size_t lost = 0;
+    size_t noisy = 0;
+    size_t drifted = 0;
+
+    for (size_t i = 0; i < count; ++i) {
+      const int at = static_cast<int>(i);
+      const cv::Point2f moved = forward.at<cv::Point2f>(0, at);
+      const uchar kept = status.at<uchar>(0, at);
+      if (kept) {
+        raw += std::hypot(moved.x - state.points[i].x, moved.y - state.points[i].y);
+        ++raw_count;
+      }
+      if (!kept || !backward_status.at<uchar>(0, at)) {
+        ++lost;
+        continue;
+      }
+      if (!error.empty() && error.at<float>(0, at) > error_threshold_) {
+        ++noisy;
+        continue;
+      }
+      const cv::Point2f drift = backward.at<cv::Point2f>(0, at) - state.points[i];
+      if (std::hypot(drift.x, drift.y) > backward_threshold_) {
+        ++drifted;
+        continue;
+      }
+      if (moved.x < 0 || moved.y < 0 || moved.x >= gray.cols || moved.y >= gray.rows) {
+        continue;
+      }
+      previous_points.push_back(state.points[i]);
+      current_points.push_back(moved);
+      velocities.push_back(moved - state.points[i]);
+      identities.push_back(state.identities[i]);
+    }
+    stats.raw = raw_count > 0 ? raw / static_cast<double>(raw_count) : 0.0;
+    stats.lost = lost;
+    stats.noisy = noisy;
+    stats.drifted = drifted;
+  }
+#endif
+
   // The same quota, applied to what survives rather than to what is added.
   //
   // Detection alone only bounds a cell that is being filled. Nothing bounds
@@ -793,6 +1056,15 @@ private:
   double error_threshold_;
   double refill_ratio_;
   bool warm_start_;
+  bool use_cuda_ = false;
+  int cuda_iterations_ = 30;
+  // Whether the GPU path is actually in use, which needs the parameter, an
+  // OpenCV that has cudaoptflow, and a device to run on.
+  bool cuda_active_ = false;
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+  cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> forward_flow_;
+  cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> backward_flow_;
+#endif
   double skip_top_;
   // How many frames each camera actually handed this node, and how many
   // tracked sets went back out. Counted here because a bag recorder running
