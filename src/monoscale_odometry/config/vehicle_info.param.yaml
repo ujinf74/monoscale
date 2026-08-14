@@ -1,0 +1,26 @@
+/**:
+  ros__parameters:
+    # Measured from vehicle.toyota.prius in CARLA, which is the car the stack
+    # actually drives. The real IONIQ figures that used to be here described a
+    # vehicle that does not exist in this simulator.
+    #
+    #   wheel base   2.8192   between front and rear wheel centres
+    #   wheel tread  1.6285   between left and right wheel centres
+    #   overhangs    from the bounding box, front 0.8388, rear 0.8555
+    #   height       1.4866   bounding box centre plus extent
+    #   left/right   0.1891   half width minus half tread
+    center_pcl_shift: 1.04 # The shift of the point cloud center from the vehicle center along the longitudinal axis.
+    wheel_radius: 0.37 # From the CARLA wheel physics.
+    wheel_width: 0.2 # Not exposed by CARLA; kept as a reasonable value.
+    wheel_base: 2.8192
+    wheel_tread: 1.6285
+    front_overhang: 0.8388
+    rear_overhang: 0.8555
+    left_overhang: 0.1891
+    right_overhang: 0.1891
+    vehicle_height: 1.4866
+    # CARLA's prius physics allows 70 degrees of wheel steer, which would let a
+    # planner produce turns no road car could follow. Left at a realistic limit
+    # deliberately; raise it only if the planner is meant to exploit the
+    # simulator's steering rather than a real vehicle's.
+    max_steer_angle: 0.5236 # [rad]

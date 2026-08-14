@@ -1,0 +1,30 @@
+# The repository is the stack: six packages, their configs and launch files,
+# and nothing else. Everything that produced the stack rather than being it --
+# working notes, the measurement harness, the simulator scaffolding, and
+# anything a build or a run writes -- stays on disk and out of the history.
+
+# Build and run outputs.
+build/
+install/
+log/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Working notes. Written to think with, not to ship.
+docs/
+
+# The measurement harness: benchmarks, parameter sweeps, scoring runs and
+# everything they leave behind. Correctness is covered by the packages' own
+# tests; these exist to answer questions that are already answered.
+tools/
+
+# Simulator scaffolding: the CARLA bridge, the recording scripts and the
+# sensor mappings. The CARLA-side nodes that the stack itself needs are in
+# src/monoscale_carla; this is the rig that drives them.
+sim/
+
+# Recordings and grids.
+*.db3
+*.npz
+*.bag

@@ -1,0 +1,25 @@
+/**:
+  ros__parameters:
+    # Where the labelled points come from and where the grid goes.
+    ground_points_topic: /perception/ground_points
+    occupancy_topic: /perception/occupancy_grid_map
+    map_frame: map
+
+    # 60 x 60 m at 10 cm, centred on where the run started. A parking
+    # manoeuvre stays well inside it.
+    map_resolution: 0.1
+    map_width: 600
+    map_height: 600
+    map_origin_x: -30.0
+    map_origin_y: -30.0
+
+    # Evidence per observation, and the probabilities a cell has to reach
+    # before it is called one thing or the other.
+    free_log_odds_update: 0.45
+    occupied_log_odds_update: 0.9
+    occupied_probability_threshold: 0.65
+    free_probability_threshold: 0.35
+
+    obstacle_inflation_radius_m: 0.25
+    free_ray_stride: 4
+    occupancy_publish_rate_hz: 5.0

@@ -1,0 +1,305 @@
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+    # The low resolution tap from sensor_mapping_vio.yaml. The 1920x1080 pair
+    # on /sensing/camera/{front,rear}/image_raw is the same lens at the same
+    # pose, but rclpy cannot ingest two 8.3 MB frames per cycle.
+    front_image_topic: /sensing/camera/front/vio/image_raw
+    rear_image_topic: /sensing/camera/rear/vio/image_raw
+    front_camera_info_topic: /sensing/camera/front/vio/camera_info
+    rear_camera_info_topic: /sensing/camera/rear/vio/camera_info
+    # CARLA derives a valid pinhole CameraInfo from the blueprint FOV, unlike
+    # the Isaac cameras whose CameraInfo was all zeros.
+    use_camera_info: true
+    imu_topic: /sensing/imu/imu_data
+    use_imu_yaw: true
+    # 100 Hz IMU against the same simulation clock as the images.
+    imu_max_age_sec: 0.02
+
+    odometry_topic: /localization/kinematic_state
+    pose_topic: /current_pose
+    map_frame: map
+    base_frame: base_link
+    # Both cameras tick on the same 20 Hz schedule, an exact multiple of the
+    # 0.01 s simulation step, so a pair is at worst one step apart.
+    sync_tolerance_sec: 0.02
+    # Never publish guessed metric odometry when the calibration is invalid.
+    allow_fov_fallback: false
+
+    # Fallback intrinsics, used only until the first CameraInfo arrives. CARLA
+    # reports fx = width / (2 tan(fov/2)) = 200.4484 for fov 134.669081 at 960
+    # px, and cx, cy at the exact image centre.
+    #
+    # The lens went to a 140 degree diagonal on 08-08 because the field edge,
+    # not any gate, was what cut the pavement off the bottom of the occupancy
+    # grid: the two 93.7 degree cameras between them ever held 73.7% of the
+    # cells the truth reference could see. fx fell from 450 with it, which is
+    # the whole cost -- the centre of the frame, where the ground solve reads,
+    # resolves 44% less angle than it did. The cameras are spawned at 960x540
+    # rather than the Isaac 1920x1080: the tracker runs at 640 px wide anyway,
+    # and two 1080p renders per frame starved the simulator of frames.
+    front:
+      horizontal_fov_deg: 134.669081
+      k: [200.448435, 0.0, 480.0, 0.0, 200.448435, 270.0, 0.0, 0.0, 1.0]
+      distortion_model: plumb_bob
+      d: [0.0, 0.0, 0.0, 0.0, 0.0]
+      calibration_width: 960
+      calibration_height: 540
+      # Trim only the bottom sliver of the frame. This camera's lowest visible
+      # ground is 0.52 m ahead of it, so 0.6 discards a couple of rows; the
+      # 1.5 m this used to be threw away 48 % of the image, and it was the
+      # half where a pixel is worth 5 mm rather than the 34 cm it is worth at
+      # the far limit. Measured on a recorded drive: 0.6 m gives 1.11 % drift,
+      # 1.0 gives 1.94 %, 1.5 gives 2.62 %, 2.5 gives 4.03 %.
+      ground_min_distance_m: 0.6
+      # ROS optical axes expressed in base_link. Derived from the CARLA sensor
+      # kit pose (pitch -30 deg, yaw 0) and identical to the Isaac rig.
+      rotation_base_from_camera: [0.0, -0.5, 0.8660254, -1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      # x matches the kit exactly, and that is correct: both are base_link.
+      # The bridge converts to CARLA's vehicle-centre frame itself, in
+      # sensor_kit_loader, so neither file carries the offset.
+      #
+      # Height above the road, which is what the ground plane solve scales
+      # with -- not the offset the sensor is attached at, which is 0.0372 less
+      # because CARLA holds the actor origin off the ground. The kit now picks
+      # its offset so this lands on the IONIQ's own 0.89 m; it used to land on
+      # 0.9272, 4.2% high. test_sensor_kit_consistency holds the two together.
+      translation_base_from_camera: [3.694, 0.0, 0.89]
+    rear:
+      horizontal_fov_deg: 134.669081
+      k: [200.448435, 0.0, 480.0, 0.0, 200.448435, 270.0, 0.0, 0.0, 1.0]
+      distortion_model: plumb_bob
+      d: [0.0, 0.0, 0.0, 0.0, 0.0]
+      calibration_width: 960
+      calibration_height: 540
+      # CARLA sensor kit pose pitch -30 deg, yaw 180 deg.
+      rotation_base_from_camera: [0.0, 0.5, -0.8660254, 1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      translation_base_from_camera: [-0.82, 0.0, 1.26]
+
+    # Run the tracker at 640x360 while keeping the 960x540 calibration scale.
+    processing_width: 640
+    # 600 was set at parking speed and is the single biggest constraint at
+    # road speed: at a steady 8 m/s it left a median of 78 usable ground
+    # points per solve against 188 at 2.5 m/s, only 10 of them matching an
+    # anchor, and 32% of solves returned nothing at all. At 2000 the failures
+    # go to zero, the median rises to 426 with 132 anchored, and position RMSE
+    # over 34 m falls from 3.478 m to 0.250 m. It also helps at parking speed
+    # (0.213 -> 0.156 m), so there is no speed to trade off against.
+    max_features_per_camera: 2000
+    quality_level: 0.01
+    min_feature_distance_px: 8.0
+    lk_error_threshold: 30.0
+    lk_window_px: 21
+    lk_pyramid_levels: 5
+    # Detections spread over a grid of cells with a quota each, the way
+    # OpenVINS extracts (ov_core Grider_GRID), instead of taking the globally
+    # strongest corners. What the ground registration is conditioned on is how
+    # far apart the points are, not how many there are, and quality ordering
+    # hands the whole budget to whichever patch has the richest texture.
+    # Off at 2000 features, where the plain ordering already covers the image
+    # and the quota costs a little (0.250 -> 0.314 m). Turn it on when the
+    # budget has to come down for throughput: at 600 features it is the
+    # difference between 3.478 m and 0.615 m.
+    detection_grid_columns: 0
+    detection_grid_rows: 0
+    lk_forward_backward_threshold_px: 1.0
+
+    # Beyond this the ground plane assumption is doing most of the work and
+    # anything standing on the road projects far away and moves too fast,
+    # which biases the solve long.
+    # 8 m, down from 12. The far ground is where a small error in the assumed
+    # camera pitch turns into a large depth error, and how far out the band
+    # reaches moves the recovered scale monotonically: 6/8/10/12 m give scale
+    # 0.995/0.999/1.007/1.018 at a steady 8 m/s. At 12 the estimate over-
+    # travelled by 1.8%, which for a long time was hidden because it cancelled
+    # against the 0.375 m the pose lost while the map was warming up. With
+    # that offset gone the bias is what is left, and 8 m puts scale on 1.000 at
+    # both speeds: 0.091 m RMSE at 8 m/s and 0.103 m at 2.5.
+    ground_max_distance_m: 8.0
+    # Off. The adaptive band below was measured against bags re-recorded in
+    # this environment and helped there, but on the original recordings it
+    # hurts: park comes out at 2.518 m with scale 0.776 against 0.110 m and
+    # 0.996 with the band fixed. The original bags are the reference the
+    # recorded figures were taken on, so the fixed band stands until the
+    # adaptive one is shown to beat it on those.
+    min_ground_flow_px: 0.0
+    ground_ransac_threshold_m: 0.12
+    ground_min_inliers: 24
+    max_scale_error: 0.08
+    # 20 Hz frames, so this caps the vehicle at 20 m/s before a frame is rejected.
+    # One, not two. The two cameras were worked by a pair of threads, and
+    # measured against each other on the same recording the pair is slower --
+    # 2.7 ms a pair against 2.5 -- for exactly the same answer. Nearly all of
+    # what a camera does here is numpy and Python, which hold the interpreter
+    # lock, so the threads cannot overlap the part that costs and still pay
+    # to hand the work over.
+    # How much further than the truth each camera measures the ground to have
+    # moved, as a factor to divide out. Not an extrinsic: the camera is where
+    # the kit says it is, and this is measured downstream of that, from the
+    # flow and the projection alone against the simulator's own pose with no
+    # estimator in between (scratchpad/flow_scale.py, straight drives only).
+    #
+    # 0.39% on the front and 0.60% on the rear, and dividing them out is worth
+    # 2.6x on the drives that were worst: 0.127 m to 0.048 at 2.5 m/s and
+    # 0.151 to 0.059 through a turn. The fastest drive was already close and
+    # goes the other way, 0.040 to 0.076, so one factor per camera cannot zero
+    # all of them; a 0.4% spread is left that still tracks speed. What causes
+    # any of it is not known -- the ground band, the body's pitch, the solve
+    # cadence and the anchor map were each ruled out first.
+    ground_range_scale_front: 1.0039
+    ground_range_scale_rear: 1.0060
+    # Roll and pitch from the IMU, feeding the ground projection. The gain
+    # here is small because this simulator's vehicle barely tilts -- 0.1
+    # degrees under hard braking and hard steering -- and the whole four drive
+    # set improves by 3%. Where it shows is the manoeuvre it was built for:
+    # the parking drive, which starts and stops repeatedly, goes from 0.051 m
+    # to 0.036. On a vehicle whose suspension actually moves, one degree is
+    # worth two and a half to five per cent of every range in the frame.
+    #
+    # The two numbers matter more than the feature does. Correcting towards
+    # gravity on every sample with a one second constant put pitch 4.3 degrees
+    # out; a sixty second trim, applied only while the measured acceleration
+    # is within 0.3 m/s2 of gravity, lands at 0.046 against the simulator's
+    # own attitude.
+    attitude_tau_sec: 60.0
+    attitude_gravity_tolerance: 0.3
+    camera_workers: 1
+    # How much the ground has to move before a solve is worth attempting.
+    # Declared at 40.0 in odometry_node.py and absent from here until
+    # 08-07, which meant the code default was running and nothing said so.
+    #
+    # It is the single largest handle on the occupancy map, because the map is
+    # built from solved poses and this decides how many there are. On approach,
+    # scored with --poses estimate:
+    #
+    #     px  keyframes  IoU    path  obstacle  car    explored
+    #     40    198      0.350   280   0.368    0.448   0.376
+    #     20    340      0.395   680   0.534    0.633   0.462
+    #     10    540      0.431   279   0.583    0.672   0.528
+    #      5    604      0.432    94   0.575    0.649   0.536
+    #
+    # At 40 the map finds barely a third of the obstacle cells. 10 edges 5 on
+    # obstacle recall but carries three times the cells wrongly occupied on the
+    # driven path, which is the one error a coaching system must not make.
+    #
+    # Cost is keyframe count, not keyframe price: 35-36 ms/keyframe throughout,
+    # 198 -> 604 keyframes. The Orin Nano port measures 477 ms/keyframe and
+    # 88% of real time at this setting -- it fits, with 12% to spare.
+    #
+    # Note this is what adaptive_solve_interval reads. frame_decimation below
+    # is dead while that stays true.
+    # 1.0 was set against 20 Hz frames, where it caps the vehicle at 20 m/s.
+    # The solve is triggered by accumulated parallax rather than by frame, so
+    # at 60 Hz one solve closes several frames and the interval it covers is
+    # not 1/60 s -- at 8 m/s the steps reach 1.15 m and the gate threw three of
+    # them away, taking the travel with them: scale 0.894, RMSE 2.428 m. The
+    # arrears widening below only helps once a rejection has already happened,
+    # so it does not reach this. 1.5, 2.0 and 3.0 all give the same answer
+    # (0.315 m), which says this is a floor to clear rather than a value to
+    # tune; 2.0 leaves margin without inventing one.
+    max_translation_per_frame_m: 1.0
+    max_yaw_per_frame_rad: 0.35
+    twist_lowpass_tau: 0.12
+
+    # A 20 Hz frame pair at parking speed gives a baseline of a few centimetres.
+    # Below about a degree of parallax the triangulated depth is worth metres of
+    # error, which smeared obstacles across the map instead of placing them.
+    triangulation_reprojection_error_px: 2.5
+    triangulation_min_distance_m: 0.5
+    triangulation_max_distance_m: 30.0
+    # The lowest plane the sweep may believe. 0.15 matched height_gate.py's
+    # cut for the LiDAR reference, which is where it came from, but the two
+    # answer different questions and the sweep does not need to agree.
+    #
+    # Every one of the 542 cells this map wrongly occupies on the driven
+    # corridor stands on flat road: overhead depth puts them at a median of
+    # 0.004 m, and their labels are Roads 397, RoadLines 143, Sidewalks 2. A
+    # quarter of them are painted markings -- high contrast, which is exactly
+    # what a correlation sweep locks onto, and it locks on at the lowest plane
+    # it is allowed to consider.
+    #
+    # Raising the floor to 0.20 removes them without costing an obstacle.
+    # approach, estimated poses, deployment settings:
+    #
+    #     0.15   corridor ghosts 750   obstacle 0.906   car 0.940
+    #     0.20                   473            0.906         0.940
+    #     0.25                   394            0.905         0.939
+    #     0.30                   390            0.905         0.939
+    #
+    # Scored against the overhead truth reference instead, 0.20 also takes
+    # precision 0.249 -> 0.269 and IoU 0.174 -> 0.178, both of which peak here.
+    # Going further keeps trimming ghosts but starts costing real returns.
+    obstacle_max_height_m: 2.5
+
+    # One keyframe triangulation that survives the parallax, reprojection and
+    # height gates is enough to call a cell occupied. Demanding a second hit on
+    # the same 10 cm cell cost most of the recall, and a coaching system would
+    # rather warn about an obstacle it half believes than stay silent.
+    # Measured against the LiDAR reference grid: at 0.65 a single triangulation
+    # is enough, which scored precision 0.28 and recall 0.30. Raise it towards
+    # 0.85 to demand a second hit, which scored precision 0.62 and recall 0.10.
+    # How far the vehicle must travel before the current view is triangulated
+    # against the held keyframe. At 8 m range this buys about 2.5 degrees of
+    # parallax, where consecutive frames gave a tenth of that.
+    mapping_baseline_m: 0.35
+
+    # Filter off: measured worse than the anchor map alone at parking speed.
+    use_inertial_prediction: false
+
+    # Velocity filter. The process noise has to be large enough that a frame's
+    # worth of covariance growth is comparable to the vision measurement noise,
+    # or the filter grows over-confident and starts gating out solves that were
+    # right: at 2 m/s that cost drift 1.3 % -> 38 %.
+    filter_vision_noise: 0.25
+    filter_reference_inliers: 300.0
+    filter_innovation_gate: 9.0
+
+    # Anchor memory is a fixed-gain filter, so its time constant is counted in
+    # frames rather than seconds: 0.35 is roughly three frames of history,
+    # which is 0.15 s at 20 Hz but only 0.05 s at 60 Hz. On the 60 Hz kit that
+    # leaves the map no more history than the previous frame, which is the
+    # two-frame solve the anchor map exists to replace. Removing the floor
+    # makes each anchor a true running mean of every sighting it has had.
+    # Unused while the estimator weights each sighting by its own precision,
+    # which it always does; it is the fallback for callers that pass no
+    # weights. Equal weighting is what this used to be, and it is what put a
+    # 2.7 mrad rotation into the ground solve's heading.
+    # Left at the declared 4000. Raising it looked worth trying once each
+    # camera carried 2000 features, but 4000/8000/16000 give 0.188/0.321/0.169
+    # m at parking speed and RMSE and final error move opposite ways, which is
+    # this bag's noise rather than an effect.
+    # Solve on every sixteenth pair. Tracking runs on every frame regardless,
+    # so this sets how far apart the two views a solve compares are, not how
+    # much of the camera is thrown away. At 2 m/s and 60 Hz that is 53 cm.
+    # Measured, RMSE in metres: 4 -> 0.872, 8 -> 0.829, 12 -> 0.125,
+    # 16 -> 0.124, 20 -> 0.162, 24 -> 0.334, 32 -> 8.5 (tracking gives out).
+    #
+    # TUNED FOR PARKING SPEED. What matters is the ground travelled between
+    # the two views, so at 8 m/s the same 53 cm is reached at 4.
+    frame_decimation: 4
+    # Lossless input so a sweep compares configurations rather than whichever
+    # frames survived the run. Costs throughput; the simulator waits instead of
+    # dropping.
+    # Set to /vision/tracks to take tracks from monoscale_tracker instead of
+    # doing optical flow here. The path runs end to end and holds scale (0.974)
+    # but the trajectory is not right yet: 5.92 m against the 0.258 m the image
+    # path gives on the same run.
+    #
+    # Prime suspect, for whoever picks this up: the tracker downscales to
+    # processing_width and publishes pixels in that frame, but the code that
+    # rescales K to match lives inside _on_image, which the topic path never
+    # calls. So the intrinsics are probably still at full width while the
+    # pixels are not. Scale coming out at 0.974 argues against a clean 1.5x
+    # error, so check it rather than assume it. The way to settle it is to feed
+    # the same bag to both paths and compare the projected ground points frame
+    # by frame -- offline_replay makes that deterministic.
+    #
+    # Off until that is understood.
+    track_topic_prefix: ''
+    input_reliability: reliable
+    input_queue_depth: 200
+
+    # Occupancy mapping is deferred while odometry accuracy is the priority.
+    # It cost 15 of the 24 ms each frame pair took and contributes nothing to
+    # the pose. Set this to 0.04 to rebuild the grid at the camera rate again.

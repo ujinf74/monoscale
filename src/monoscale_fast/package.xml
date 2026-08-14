@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>monoscale_fast</name>
+  <version>0.1.0</version>
+  <description>
+    The estimator's two hot functions, in C++.
+
+    The geometry was never the interesting part of this stack, but it is where
+    the time goes: of 11.2 ms a pair, the anchor alignment is 7.3 and the
+    ground projection 2.1. That is affordable on a desktop and is not on the
+    board this is meant to run on, whose cores are several times slower.
+
+    A separate package rather than a rewrite, and the Python keeps working
+    without it. Both implementations have to agree to the last bit for the
+    comparison between them to mean anything, and a fallback that is exercised
+    is the only way to keep that true.
+  </description>
+  <maintainer email="ujin@tukorea.ac.kr">Xxxng</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>pybind11_vendor</depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <depend>eigen</depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

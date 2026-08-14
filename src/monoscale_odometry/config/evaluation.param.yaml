@@ -1,0 +1,30 @@
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+    estimate_topic: /localization/kinematic_state
+    # Exact ego transform, read from the CARLA API by carla_ground_truth so the
+    # sensor kit needs no GNSS pseudo sensor.
+    truth_topic: /carla/ground_truth/pose
+    estimate_path_topic: /vision/evaluation/estimate_path
+    truth_path_topic: /vision/evaluation/truth_path
+    error_topic: /vision/evaluation/position_error
+    map_frame: map
+
+    # The CARLA actor origin is the vehicle centre; the stack estimates the
+    # rear axle, so the truth is shifted back by half the wheelbase.
+    truth_is_vehicle_center: true
+    wheel_base: 2.8192
+
+    match_tolerance_sec: 0.05
+    # Every run is scored over the same 34 m of road. Runs end on a wall clock
+    # timeout but the manoeuvre is scripted in simulation time, so they used to
+    # finish with anywhere from 0.5 to 12.5 seconds of standing still attached,
+    # which inflates drift without adding distance.
+    evaluation_distance_m: 34.0
+    relative_segment_m: 1.0
+    report_period_sec: 2.0
+    path_stride: 5
+    max_path_poses: 4000
+    # Set to a directory to dump estimate.tum, truth.tum and summary.txt on exit.
+    output_directory: ''

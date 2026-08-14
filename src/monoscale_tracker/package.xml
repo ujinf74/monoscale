@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>monoscale_tracker</name>
+  <version>0.1.0</version>
+  <description>Ground feature tracking front end, in C++ so it can keep up.</description>
+  <maintainer email="ujin@tukorea.ac.kr">Woojin Kwon</maintainer>
+  <license>Apache-2.0</license>
+  <url type="repository">https://github.com/ujinf74/monoscale</url>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>OpenCV</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
