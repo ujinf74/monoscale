@@ -230,6 +230,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.gravity_noise = settings.spatial_gravity_noise;
     filter.height_noise_m = settings.spatial_height_noise_m;
     filter.innovation_gate = settings.spatial_innovation_gate;
+    filter.initial_scale_variance = settings.spatial_scale_variance;
     spatial_filter_ = std::make_unique<SpatialMsckfFilter>(filter);
   }
   map_ready_ = !settings.require_map_before_translating;
@@ -1237,6 +1238,7 @@ void Estimator::process_pair()
     diagnostics_.pitch = spatial_filter_->pitch();
     diagnostics_.height = spatial_filter_->position().z();
     diagnostics_.levelled = spatial_filter_->levelled();
+    diagnostics_.range_scale = spatial_filter_->range_scale();
     if (spatial_filter_->last_update().has_value()) {
       diagnostics_.last_nis = spatial_filter_->last_update()->nis;
     }

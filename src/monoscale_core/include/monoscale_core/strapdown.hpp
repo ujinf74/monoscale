@@ -99,6 +99,34 @@ public:
     // does not change height, and over a kilometre of grade it certainly does.
     // Constraining the hop leaves the grade alone.
     double height_noise_m = 0.01;
+
+    // What the ground projection's scale might be wrong by, and how fast that
+    // can change. This is Ground-VIO's camera height, in the only form this
+    // stack can carry it: the projection divides every range by a measured
+    // constant, so an error in the camera's height is an error in that
+    // constant, and it multiplies every hop vision reports.
+    //
+    // Twenty per cent, and that is not a claim that a calibrated rig is twenty
+    // per cent out. It is the freedom the state needs to move at all inside a
+    // drive: the scale is weakly observable -- the only thing arguing with
+    // vision about how far the vehicle went is an instrument that never
+    // measured distance, only how the speed was changing -- so a prior set to
+    // what the calibration is worth leaves it standing still. ATE in metres,
+    // over a drive replayed with the ground scale deliberately wrong:
+    //
+    //   prior sigma   calibrated   +5% out   -5% out
+    //         (off)       0.1971    1.1250    0.4616
+    //            2%       0.1951    1.1230    0.4606
+    //            5%       0.1946    1.0625    0.4592
+    //           10%       0.1942    1.1133    0.4358
+    //           20%       0.1971    0.8958    0.2751
+    //
+    // The calibrated column does not move, so the freedom is free where it is
+    // not needed, and it is worth a fifth to two fifths of the error where it
+    // is. The walk is per root second and is meant to be nearly nothing: what
+    // this tracks changes with load and suspension, over minutes not hops.
+    double initial_scale_variance = 4.0e-2;
+    double scale_walk = 1.0e-5;
   };
 
   struct UpdateRecord
@@ -121,6 +149,9 @@ public:
   double pitch() const;
   const Eigen::Vector3d & bias() const {return accel_bias_;}
   const Eigen::Vector3d & gyro_bias() const {return gyro_bias_;}
+  // How much further than the truth vision is measuring the ground to have
+  // moved. 1 is the calibration being right.
+  double range_scale() const {return range_scale_;}
   int updates() const {return updates_;}
   int rejected() const {return rejected_;}
   int dropped() const {return dropped_;}
@@ -185,9 +216,11 @@ public:
   double speed() const {return velocity_.head<2>().norm();}
 
 private:
-  // Error state: position, velocity, attitude, both biases, then the anchor's
-  // position and attitude cloned beside them.
-  static constexpr int kSize = 21;
+  // Error state: position, velocity, attitude, both biases, the anchor's
+  // position and attitude cloned beside them, and the ground projection's
+  // scale. The scale is not cloned: it is a property of the rig, not of the
+  // instant the anchor was taken.
+  static constexpr int kSize = 22;
   using Covariance = Eigen::Matrix<double, kSize, kSize>;
 
   void observation(
@@ -204,6 +237,7 @@ private:
   Eigen::Quaterniond attitude_ = Eigen::Quaterniond::Identity();
   Eigen::Vector3d accel_bias_ = Eigen::Vector3d::Zero();
   Eigen::Vector3d gyro_bias_ = Eigen::Vector3d::Zero();
+  double range_scale_ = 1.0;
   Eigen::Vector3d anchor_position_ = Eigen::Vector3d::Zero();
   Eigen::Quaterniond anchor_attitude_ = Eigen::Quaterniond::Identity();
   Covariance covariance_ = Covariance::Zero();

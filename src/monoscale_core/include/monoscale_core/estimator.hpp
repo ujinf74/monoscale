@@ -151,6 +151,10 @@ struct EstimatorSettings
   // quantities and only look alike.
   double spatial_gravity_tolerance = 0.15;
   double spatial_height_noise_m = 0.01;
+  // How far the ground projection's scale is allowed to move. Not what the
+  // calibration is worth -- SpatialMsckfFilter::Settings carries the measured
+  // reason it has to be looser than that.
+  double spatial_scale_variance = 4.0e-2;
   // The same three degrees of freedom the planar filter's hop has, and the same
   // gate. The vehicle staying on the road is not one of them: it is an
   // assumption rather than a measurement, it gets its own update, and gating
@@ -350,6 +354,10 @@ struct Diagnostics
   double pitch = 0.0;
   double height = 0.0;
   int64_t levelled = 0;
+  // How much further than the truth vision is measuring the ground to have
+  // moved, as the six degree of freedom filter has it. 1 is the ground
+  // projection's scale being right.
+  double range_scale = 1.0;
   double worst_rejected = 0.0;
   double worst_allowance = 0.0;
   double camera_disagreement = 0.0;

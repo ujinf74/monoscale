@@ -431,9 +431,9 @@ int main(int argc, char ** argv)
   }
   if (diagnostics.levelled > 0) {
     std::printf(
-      "자세: roll=%+.3fdeg pitch=%+.3fdeg 높이=%+.3fm 수평보정=%ld\n",
+      "자세: roll=%+.3fdeg pitch=%+.3fdeg 높이=%+.3fm 수평보정=%ld 지면스케일=%.5f\n",
       diagnostics.roll * 180.0 / M_PI, diagnostics.pitch * 180.0 / M_PI,
-      diagnostics.height, diagnostics.levelled);
+      diagnostics.height, diagnostics.levelled, diagnostics.range_scale);
   }
   if (diagnostics.last_nis != 0.0 || diagnostics.gyro_bias != 0.0) {
     std::printf(

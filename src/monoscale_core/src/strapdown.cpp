@@ -16,6 +16,7 @@ constexpr int kBA = 9;
 constexpr int kBG = 12;
 constexpr int kPA = 15;
 constexpr int kThA = 18;
+constexpr int kScale = 21;
 
 double wrap(double angle)
 {
@@ -92,6 +93,7 @@ SpatialMsckfFilter::SpatialMsckfFilter(const Settings & settings)
   covariance_(kTh + 0, kTh + 0) = settings.initial_tilt_variance;
   covariance_(kTh + 1, kTh + 1) = settings.initial_tilt_variance;
   covariance_(kTh + 2, kTh + 2) = settings.initial_heading_variance;
+  covariance_(kScale, kScale) = settings.initial_scale_variance;
 }
 
 double SpatialMsckfFilter::yaw() const
@@ -182,6 +184,7 @@ void SpatialMsckfFilter::predict(
   covariance_.block<3, 3>(kBA, kBA) += eye * (settings_.bias_walk * settings_.bias_walk * dt);
   covariance_.block<3, 3>(kBG, kBG) +=
     eye * (settings_.gyro_bias_walk * settings_.gyro_bias_walk * dt);
+  covariance_(kScale, kScale) += settings_.scale_walk * settings_.scale_walk * dt;
 }
 
 Eigen::Matrix3d SpatialMsckfFilter::measurement_covariance(
@@ -209,11 +212,17 @@ void SpatialMsckfFilter::observation(
   const double anchor_yaw = yaw_of(anchor_rotation);
   const Eigen::Matrix3d inverse = level_from_yaw(anchor_yaw).transpose();
   const Eigen::Vector3d offset = position_ - anchor_position_;
-  predicted = inverse * offset;
+  // What vision will report, not what the vehicle did: the two differ by
+  // whatever the ground projection's scale is wrong by, and that difference is
+  // the only thing that makes the scale observable at all.
+  predicted = range_scale_ * (inverse * offset);
 
   model.setZero();
-  model.block<2, 3>(0, kP) = inverse.topRows<2>();
-  model.block<2, 3>(0, kPA) = -inverse.topRows<2>();
+  model.block<2, 3>(0, kP) = range_scale_ * inverse.topRows<2>();
+  model.block<2, 3>(0, kPA) = -range_scale_ * inverse.topRows<2>();
+  // The scale multiplies the whole hop, so its column is the hop itself.
+  model.block<2, 1>(0, kScale) =
+    range_scale_ > 1e-9 ? (predicted.head<2>() / range_scale_).eval() : Eigen::Vector2d::Zero();
   // Turning the anchor's frame turns what the hop looks like in it. Only the
   // horizontal part moves: the frame is a rotation about the vertical.
   Eigen::Matrix3d perpendicular = Eigen::Matrix3d::Zero();
@@ -232,6 +241,7 @@ void SpatialMsckfFilter::correct(const Eigen::Matrix<double, kSize, 1> & error)
   velocity_ += error.segment<3>(kV);
   attitude_ = (attitude_ * turned(error.segment<3>(kTh))).normalized();
   accel_bias_ += error.segment<3>(kBA);
+  range_scale_ += error(kScale);
   gyro_bias_ += error.segment<3>(kBG);
   anchor_position_ += error.segment<3>(kPA);
   anchor_attitude_ = (anchor_attitude_ * turned(error.segment<3>(kThA))).normalized();

@@ -219,3 +219,114 @@ TEST(Strapdown, CovarianceStaysSymmetricAndFinite)
   EXPECT_TRUE(std::isfinite(filter.yaw()));
   EXPECT_NEAR(filter.attitude().norm(), 1.0, 1e-9);
 }
+
+// The ground projection's scale: Ground-VIO's camera height, in the form this
+// stack can carry it.
+
+namespace
+{
+
+// Drive a filter through hops whose speed will not sit still, with vision
+// reading the ground short by `reported`. A scale error shows as a hop wrong
+// in proportion to how far the vehicle went and an accelerometer bias as one
+// wrong in proportion to how long it took; at a constant speed those are the
+// same thing, so the speed has to move for either to be found.
+void drive_scaled(SpatialMsckfFilter & filter, int hops, double reported, double & velocity,
+  double & phase)
+{
+  for (int hop = 0; hop < hops; ++hop) {
+    filter.open_hop();
+    phase += 0.05;
+    const double acceleration = 1.5 * std::sin(phase);
+    double travelled = 0.0;
+    for (int i = 0; i < 5; ++i) {
+      const double step = 0.01;
+      travelled += velocity * step + 0.5 * acceleration * step * step;
+      velocity += acceleration * step;
+      filter.predict(
+        Eigen::Vector3d(acceleration, 0.0, kGravity), Eigen::Vector3d::Zero(), step);
+    }
+    filter.update(Eigen::Vector2d(reported * travelled, 0.0), 0.0, 400);
+  }
+}
+
+}  // namespace
+
+TEST(Strapdown, TheGroundScaleIsLearnedFromWhatTheAccelerometerSaysInstead)
+{
+  SpatialMsckfFilter::Settings settings;
+  // What a rig's calibration is worth knowing to, loosened to what a test can
+  // drive home in hundreds of hops rather than thousands.
+  settings.initial_scale_variance = 0.04;
+  SpatialMsckfFilter filter(settings);
+
+  // Vision reading the ground five per cent short, which is what believing the
+  // camera sits higher than it does produces.
+  double velocity = 0.0;
+  double phase = 0.0;
+  drive_scaled(filter, 400, 0.95, velocity, phase);
+  const double early = filter.range_scale();
+  drive_scaled(filter, 1200, 0.95, velocity, phase);
+  const double late = filter.range_scale();
+
+  // What is claimed is the direction and that it keeps going, not a rate. This
+  // is a weakly observable parameter: the only thing that argues with vision
+  // about how far the vehicle went is an instrument that never measured the
+  // distance, only how the speed was changing. Measured, four hundred hops
+  // reach 0.987 of the 0.95 and it is still moving.
+  EXPECT_LT(early, 1.0);
+  EXPECT_LT(late, early);
+  EXPECT_GT(late, 0.90);
+}
+
+TEST(Strapdown, ARigWhoseCalibrationIsRightIsLeftAlone)
+{
+  SpatialMsckfFilter::Settings settings;
+  settings.initial_scale_variance = 0.04;
+  SpatialMsckfFilter filter(settings);
+
+  double velocity = 0.0;
+  double phase = 0.0;
+  for (int hop = 0; hop < 400; ++hop) {
+    filter.open_hop();
+    phase += 0.05;
+    const double acceleration = 1.5 * std::sin(phase);
+    double travelled = 0.0;
+    for (int i = 0; i < 5; ++i) {
+      const double step = 0.01;
+      travelled += velocity * step + 0.5 * acceleration * step * step;
+      velocity += acceleration * step;
+      filter.predict(
+        Eigen::Vector3d(acceleration, 0.0, kGravity), Eigen::Vector3d::Zero(), step);
+    }
+    filter.update(Eigen::Vector2d(travelled, 0.0), 0.0, 400);
+  }
+
+  // A state that finds an error where there is none is worse than no state.
+  EXPECT_NEAR(filter.range_scale(), 1.0, 0.01);
+}
+
+TEST(Strapdown, ASteadySpeedTellsTheScaleNothing)
+{
+  SpatialMsckfFilter::Settings settings;
+  settings.initial_scale_variance = 0.04;
+  SpatialMsckfFilter filter(settings);
+
+  // The same five per cent, and this time the vehicle holds its speed. The
+  // accelerometer has nothing to say about how fast it is going, only about
+  // how that is changing, so there is no reference for the scale to be wrong
+  // against. This is not a shortcoming to be tuned away -- it is why the height
+  // is unobservable at constant velocity and why the alignment residual, which
+  // never sees it at all, was the wrong place to look.
+  for (int hop = 0; hop < 400; ++hop) {
+    filter.open_hop();
+    double travelled = 0.0;
+    for (int i = 0; i < 5; ++i) {
+      travelled += 5.0 * 0.01;
+      filter.predict(Eigen::Vector3d(0.0, 0.0, kGravity), Eigen::Vector3d::Zero(), 0.01);
+    }
+    filter.update(Eigen::Vector2d(0.95 * travelled, 0.0), 0.0, 400);
+  }
+
+  EXPECT_NEAR(filter.range_scale(), 1.0, 0.02);
+}
