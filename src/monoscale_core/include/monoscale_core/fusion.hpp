@@ -247,7 +247,7 @@ public:
     double bias_walk = 0.01;
     double gyro_bias_walk = 0.0005;
     double vision_noise_m = 0.005;
-    double vision_yaw_noise = 0.02;
+    double vision_yaw_noise = 0.01;
     double vision_reference_inliers = 300.0;
     double initial_velocity_variance = 25.0;
     double initial_bias_variance = 1.0;

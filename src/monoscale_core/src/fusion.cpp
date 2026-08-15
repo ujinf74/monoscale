@@ -376,9 +376,17 @@ Eigen::Matrix3d PlanarMsckfFilter::measurement_covariance(
     (settings_.vision_reference_inliers / count);
   double position = spread <= 0.0 ? floor : std::max(floor, spread * spread / count);
   position += std::max(extra_variance, 0.0);
+  // A floor, not a fallback. The fit reports how tightly its own residuals pin
+  // a rotation down -- fit over lever over the root of the inlier count -- and
+  // on a good frame that is 2e-4 rad, a hundredth of what this is configured
+  // at. The shrink by the root of the count is what makes it so small, and it
+  // assumes the residuals are independent. A mounting or tilt error is not: it
+  // leans the whole frame the same way, so more points do not average it out.
+  // That is the same systematic error the heading measurement exists to catch,
+  // and letting the fit claim 2e-4 hands it to the filter as certainty.
+  const double configured = settings_.vision_yaw_noise * settings_.vision_yaw_noise;
   const double yaw = (!std::isfinite(yaw_sigma) || yaw_sigma <= 0.0)
-    ? settings_.vision_yaw_noise * settings_.vision_yaw_noise
-    : yaw_sigma * yaw_sigma;
+    ? configured : std::max(yaw_sigma * yaw_sigma, configured);
   Eigen::Matrix3d noise = Eigen::Matrix3d::Zero();
   noise(0, 0) = position;
   noise(1, 1) = position;

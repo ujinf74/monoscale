@@ -354,7 +354,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   // ground solve's own heading is the measurement that observes both.
   settings.msckf_gyro_noise = declare_double("msckf_gyro_noise", 0.01);
   settings.msckf_gyro_bias_walk = declare_double("msckf_gyro_bias_walk", 0.0005);
-  settings.msckf_vision_yaw_noise = declare_double("msckf_vision_yaw_noise", 0.02);
+  settings.msckf_vision_yaw_noise = declare_double("msckf_vision_yaw_noise", 0.01);
   settings.msckf_initial_gyro_bias_variance =
     declare_double("msckf_initial_gyro_bias_variance", 1.0e-4);
   // Three degrees of freedom, so the chi-square gate moves with them: 11.3 is

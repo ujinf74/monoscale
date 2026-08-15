@@ -447,6 +447,9 @@ TEST(Fusion, MsckfAdaptiveHeadingLoosensOnAOneSidedVisionResidual)
   // instrument insisted on, because it stopped believing it as hard.
   EXPECT_GT(std::abs(loosened.yaw()), std::abs(fixed.yaw()));
   // The residual is watched either way -- it is a diagnostic before it is a
-  // mechanism. What the gain changes is only what is done about it.
-  EXPECT_NEAR(fixed.heading_drift(), loosened.heading_drift(), 1.0e-3);
+  // mechanism. Not to the same value: once the gain differs the two filters are
+  // in different states and see different residuals. What is claimed is that
+  // both keep watching, and agree about which way the ground is leaning.
+  EXPECT_GT(std::abs(fixed.heading_drift()), 1.0e-4);
+  EXPECT_GT(fixed.heading_drift() * loosened.heading_drift(), 0.0);
 }

@@ -194,7 +194,11 @@ void SpatialMsckfFilter::predict(
   covariance_.block<3, 3>(kBA, kBA) += eye * (settings_.bias_walk * settings_.bias_walk * dt);
   covariance_.block<3, 3>(kBG, kBG) +=
     eye * (settings_.gyro_bias_walk * settings_.gyro_bias_walk * dt);
-  covariance_(kScale, kScale) += settings_.scale_walk * settings_.scale_walk * dt;
+  // Only if the scale is a state at all: a walk added to a variance of zero is
+  // a state that was meant to be held at one and is not.
+  if (settings_.initial_scale_variance > 0.0) {
+    covariance_(kScale, kScale) += settings_.scale_walk * settings_.scale_walk * dt;
+  }
 }
 
 Eigen::Matrix3d SpatialMsckfFilter::measurement_covariance(
@@ -205,9 +209,17 @@ Eigen::Matrix3d SpatialMsckfFilter::measurement_covariance(
     (settings_.vision_reference_inliers / count);
   double position = spread <= 0.0 ? floor : std::max(floor, spread * spread / count);
   position += std::max(extra_variance, 0.0);
+  // A floor, not a fallback. The fit reports how tightly its own residuals pin
+  // a rotation down -- fit over lever over the root of the inlier count -- and
+  // on a good frame that is 2e-4 rad, a hundredth of what this is configured
+  // at. The shrink by the root of the count is what makes it so small, and it
+  // assumes the residuals are independent. A mounting or tilt error is not: it
+  // leans the whole frame the same way, so more points do not average it out.
+  // That is the same systematic error the heading measurement exists to catch,
+  // and letting the fit claim 2e-4 hands it to the filter as certainty.
+  const double configured = settings_.vision_yaw_noise * settings_.vision_yaw_noise;
   const double heading = (!std::isfinite(yaw_sigma) || yaw_sigma <= 0.0)
-    ? settings_.vision_yaw_noise * settings_.vision_yaw_noise
-    : yaw_sigma * yaw_sigma;
+    ? configured : std::max(yaw_sigma * yaw_sigma, configured);
   Eigen::Matrix3d noise = Eigen::Matrix3d::Zero();
   noise(0, 0) = position;
   noise(1, 1) = position;

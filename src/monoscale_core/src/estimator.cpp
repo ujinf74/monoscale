@@ -134,6 +134,9 @@ struct Estimator::Camera
   // by carrying it beside them.
   double mounting_pitch = 0.0;
   double mounting_variance = 0.0;
+  // The mount the correction is measured from, kept apart from `calibration`
+  // because that is what the correction writes into.
+  Eigen::Matrix3d mount_rotation = Eigen::Matrix3d::Identity();
   // The frame the calibration was last brought to, so a mounting correction can
   // be folded back into it without asking the caller for the size again.
   int frame_width = 0;
@@ -197,6 +200,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
   for (const auto & camera : settings.cameras) {
     cameras_.push_back(std::make_unique<Camera>(camera, anchor_settings));
     cameras_.back()->mounting_variance = settings.mounting_pitch_variance;
+    cameras_.back()->mount_rotation = camera.rotation_base_from_camera;
   }
 
   if (settings.attitude_from_imu) {
@@ -278,6 +282,7 @@ void Estimator::set_mount(
   Camera & target = *cameras_[camera];
   target.calibration.rotation_base_from_camera = rotation;
   target.calibration.translation_base_from_camera = translation;
+  target.mount_rotation = rotation;
   target.model.rotation_base_from_camera = rotation;
   target.model.translation_base_from_camera = translation;
 }
@@ -387,20 +392,19 @@ void Estimator::ingest_imu(const ImuSample & sample)
       // filter that owns its own attitude is not handed a vector somebody
       // else's attitude decided about. Gravity is along z on a road vehicle, so
       // what is left in x and y is what the vehicle is doing.
-      Eigen::Vector3d force = sample.linear_acceleration;
-      bool screened = false;
+      const Eigen::Vector3d raw = sample.linear_acceleration;
+      Eigen::Vector3d held = raw;
       if (settings_.inertial_max_acceleration_mps2 > 0.0 &&
-        force.head<2>().norm() > settings_.inertial_max_acceleration_mps2)
+        raw.head<2>().norm() > settings_.inertial_max_acceleration_mps2)
       {
-        screened = true;
-        force = last_specific_force_.value_or(Eigen::Vector3d(0.0, 0.0, 9.80665));
+        held = last_specific_force_.value_or(Eigen::Vector3d(0.0, 0.0, 9.80665));
       } else {
-        last_specific_force_ = force;
+        last_specific_force_ = raw;
       }
       imu_window_.push_back(
         AccelerationSample{
           sample.stamp + settings_.imu_acceleration_offset_sec, acceleration, body,
-          sample.angular_velocity.z(), force, sample.angular_velocity, screened,
+          sample.angular_velocity.z(), raw, held, sample.angular_velocity,
           step.dt, yaw});
       while (imu_window_.size() > 8000) {
         imu_window_.pop_front();
@@ -584,6 +588,19 @@ bool Estimator::ready_to_solve() const
          frames_since_solve_ >= settings_.solve_max_frames;
 }
 
+// The propagator integrates against the orientation the instrument reports, so
+// its world frame is the instrument's. The MSCKF and the six degree of freedom
+// filter carry their own heading, whose zero is wherever the drive started.
+Eigen::Vector2d Estimator::imu_world_velocity(const Eigen::Vector2d & velocity) const
+{
+  if (!imu_yaw_datum_.has_value()) {
+    return velocity;
+  }
+  const double c = std::cos(*imu_yaw_datum_);
+  const double s = std::sin(*imu_yaw_datum_);
+  return Eigen::Vector2d(c * velocity.x() - s * velocity.y(), s * velocity.x() + c * velocity.y());
+}
+
 std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
 {
   // The six degree of freedom filter carries roll and pitch as states, so it
@@ -658,9 +675,11 @@ void Estimator::learn_mounting_pitch(Camera & camera, double lean)
   if (!settings_.mounting_pitch_apply) {
     return;
   }
+  // Onto the mount as it stands, which is the transform tree's when there is
+  // one -- composing onto the parameter default would quietly discard it.
   camera.calibration.rotation_base_from_camera =
     Eigen::AngleAxisd(-camera.mounting_pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() *
-    camera.settings.rotation_base_from_camera;
+    camera.mount_rotation;
   if (camera.frame_width > 0 && camera.frame_height > 0) {
     camera.model = frame_model(camera, camera.frame_width, camera.frame_height);
   }
@@ -1054,12 +1073,8 @@ void Estimator::process_pair()
     replay_inertial(
       previous_stamp, current_stamp,
       [this, &levelling](const AccelerationSample & sample, double step) {
-        Eigen::Vector3d force = sample.specific_force;
-        if (settings_.spatial_screen_impulses && sample.force_screened) {
-          // Held rather than believed. See AccelerationSample.
-        } else if (!settings_.spatial_screen_impulses) {
-          force = sample.specific_force;
-        }
+        Eigen::Vector3d force =
+          settings_.spatial_screen_impulses ? sample.held_force : sample.specific_force;
         // Nothing sideways until vision has supplied the integral's constant.
         // The planar propagator withholds the spawn and drop transient for the
         // same reason, and a filter that integrates it starts the drive with a
@@ -1257,7 +1272,7 @@ void Estimator::process_pair()
           wrap_pi(*reported - *imu_yaw_datum_), settings_.msckf_heading_noise);
       }
     }
-    inertial_.correct_velocity(msckf_filter_->velocity());
+    inertial_.correct_velocity(imu_world_velocity(msckf_filter_->velocity()));
     diagnostics_.gyro_bias = msckf_filter_->gyro_bias();
     diagnostics_.heading_drift = msckf_filter_->heading_drift();
     diagnostics_.filter_dropped = msckf_filter_->dropped();
@@ -1312,7 +1327,8 @@ void Estimator::process_pair()
     {
       // Straight after the hop and before anything else touches the state:
       // whether the filter took the measurement it was given.
-      const Eigen::Vector2d taken = spatial_filter_->body_translation();
+      const Eigen::Vector2d taken =
+        spatial_filter_->range_scale() * spatial_filter_->body_translation();
       hop_taken_squared_ += (taken - hop).squaredNorm();
     }
     // Separately, and ungated: the vehicle did not climb over this hop.
@@ -1327,7 +1343,7 @@ void Estimator::process_pair()
           wrap_pi(*reported - *imu_yaw_datum_), settings_.msckf_heading_noise);
       }
     }
-    inertial_.correct_velocity(spatial_filter_->velocity().head<2>());
+    inertial_.correct_velocity(imu_world_velocity(spatial_filter_->velocity().head<2>()));
     diagnostics_.gyro_bias = spatial_filter_->gyro_bias().z();
     diagnostics_.filter_dropped = spatial_filter_->dropped();
     diagnostics_.roll = spatial_filter_->roll();
@@ -1336,7 +1352,8 @@ void Estimator::process_pair()
     diagnostics_.levelled = spatial_filter_->levelled();
     diagnostics_.range_scale = spatial_filter_->range_scale();
     {
-      const Eigen::Vector2d after = spatial_filter_->body_translation();
+      const Eigen::Vector2d after =
+        spatial_filter_->range_scale() * spatial_filter_->body_translation();
       hop_residual_squared_ += (after - hop).squaredNorm();
       ++hop_residual_count_;
       diagnostics_.hop_residual =
@@ -1557,6 +1574,14 @@ void Estimator::process_pair()
     // the origin on purpose; without this the filter would carry on
     // integrating away from it and hand back the difference as travel the
     // moment a solve is finally accepted.
+    //
+    // It puts the heading back too, and on a rejected solve that heading came
+    // from the instrument -- so the filter inherits the AHRS it exists to stop
+    // inheriting, and keeps the covariance it had before doing so. On these
+    // recordings it never happens outside the warm-up: one failure per drive,
+    // the first solve, and nothing coasted. On a rig whose solves do get
+    // rejected it would, and the heading would want holding rather than
+    // replacing.
     msckf_filter_->set_pose(Eigen::Vector2d(pose_.x, pose_.y), pose_.yaw);
   }
   if (spatial_filter_) {

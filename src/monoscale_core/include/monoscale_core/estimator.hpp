@@ -80,11 +80,6 @@ struct CameraSettings
   // measured about. Excluding it from the regression is not enough; it would
   // have to leave the solve, and the band it uses was chosen on drift.
   bool learn_mounting_pitch = false;
-  // Root mean square of how far the filter's own hop ends up from the one
-  // vision handed it. Near zero means the filter is reproducing the
-  // measurement and any error is upstream of it.
-  double hop_residual = 0.0;
-  double hop_taken = 0.0;
   // Calibration, as CameraInfo would report it, at the resolution it describes.
   Eigen::Matrix3d k = Eigen::Matrix3d::Identity();
   Eigen::VectorXd distortion;
@@ -302,7 +297,15 @@ struct EstimatorSettings
   // under whatever the ground solve reports for its own heading.
   double msckf_gyro_noise = 0.01;
   double msckf_gyro_bias_walk = 0.0005;
-  double msckf_vision_yaw_noise = 0.02;
+  // A floor under what the ground solve claims about its own heading, not a
+  // fallback for when it claims nothing. The fit reports fit over lever over
+  // the root of the inlier count, which on a good frame is 2e-4 rad -- and that
+  // root assumes the residuals are independent, which a mounting or tilt error
+  // is not: it leans the whole frame one way and more points do not average it
+  // out. Measured over three drives, mean ATE in metres: 0.248 with no floor,
+  // 0.165 at 0.01, 0.223 at 0.02. Better on every drive at 0.01, and the cost
+  // is two tenths of a point of relative error.
+  double msckf_vision_yaw_noise = 0.01;
   double msckf_initial_gyro_bias_variance = 1.0e-4;
   double msckf_innovation_gate = 11.3;
   double msckf_reject_beyond_m = 1.5;
@@ -498,6 +501,7 @@ private:
   void remember_solve_pixels(Camera & camera);
   void learn_mounting_pitch(Camera & camera, double lean);
   std::optional<Eigen::Matrix3d> body_tilt() const;
+  Eigen::Vector2d imu_world_velocity(const Eigen::Vector2d & velocity) const;
   std::optional<double> imu_yaw_at(double stamp) const;
   bool imu_still_arriving(double stamp) const;
   bool is_stationary(double start, double end, double speed) const;
@@ -540,12 +544,13 @@ private:
     // What the part actually reported, gravity and all. The six degree of
     // freedom filter puts gravity back itself, because where gravity points is
     // one of the things it is estimating.
+    // What the part reported, and what to propagate on if impulses are being
+    // screened -- the same reading, or the last believable one when this is not.
+    // The simulator reports suspension contacts as hundreds of m/s2, and a
+    // single 17 ms step of one leaves the velocity wrong for many frames.
     Eigen::Vector3d specific_force;
+    Eigen::Vector3d held_force;
     Eigen::Vector3d angular_velocity;
-    // Whether that reading was believable, or is the last one that was. The
-    // simulator reports suspension contacts as hundreds of m/s2, and a single
-    // 17 ms step of one leaves the velocity wrong for many frames.
-    bool force_screened = false;
     double dt;
     double yaw;
   };
