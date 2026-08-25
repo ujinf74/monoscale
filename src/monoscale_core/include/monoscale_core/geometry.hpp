@@ -113,6 +113,12 @@ Eigen::Matrix3d intrinsic_from_fov(int width, int height, double horizontal_fov_
 // residual already zero. The result is identical and the iteration is not.
 Points2 undistort_pixels(const Points2 & pixels, const CameraModel & model);
 
+// Unit ray per pixel, in base_link. The same first half of pixels_to_ground --
+// undistort, then rotate the normalised ray through the mount -- stopping
+// before the plane is intersected, for the points that are not on it.
+Eigen::Matrix<double, Eigen::Dynamic, 3> pixels_to_bearings(
+  const Points2 & pixels, const CameraModel & model);
+
 // Ground intersections of the rays through `pixels`, and which are usable.
 //
 // `min_distance` exists because pixel motion goes as the inverse of range: the

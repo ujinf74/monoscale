@@ -309,6 +309,14 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.softness_from_residual = declare_double("softness_from_residual", 0.0);
   settings.fuse_camera_points = declare_bool("fuse_camera_points", false);
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
+  settings.offground_anchors = declare_bool("offground_anchors", false);
+  settings.offground_min_views = declare_int("offground_min_views", 5);
+  settings.offground_min_parallax_deg = declare_double("offground_min_parallax_deg", 2.0);
+  settings.offground_min_height_m = declare_double("offground_min_height_m", 0.20);
+  settings.offground_max_range_m = declare_double("offground_max_range_m", 25.0);
+  settings.offground_max_residual_m = declare_double("offground_max_residual_m", 0.10);
+  settings.offground_max_observations = declare_int("offground_max_observations", 12);
+  settings.offground_weight = declare_double("offground_weight", 1.0);
   settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);

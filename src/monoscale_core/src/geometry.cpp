@@ -156,6 +156,25 @@ Points2 undistort_pixels(const Points2 & pixels, const CameraModel & model)
   return from_point_mat(corrected);
 }
 
+Eigen::Matrix<double, Eigen::Dynamic, 3> pixels_to_bearings(
+  const Points2 & pixels, const CameraModel & model)
+{
+  const Eigen::Index count = pixels.rows();
+  Eigen::Matrix<double, Eigen::Dynamic, 3> out(count, 3);
+  if (count == 0) {
+    return out;
+  }
+  const Points2 corrected = undistort_pixels(pixels, model);
+  const Eigen::Matrix3d ray_from_pixel = model.rotation_base_from_camera * model.k_inverse;
+  for (Eigen::Index i = 0; i < count; ++i) {
+    const Eigen::Vector3d ray =
+      ray_from_pixel * Eigen::Vector3d(corrected(i, 0), corrected(i, 1), 1.0);
+    const double length = ray.norm();
+    out.row(i) = length > 1e-12 ? (ray / length).transpose() : Eigen::RowVector3d(0, 0, 0);
+  }
+  return out;
+}
+
 void pixels_to_ground(
   const Points2 & pixels, const CameraModel & model, double max_distance,
   double min_distance, const Eigen::Matrix3d * tilt, double range_scale,
