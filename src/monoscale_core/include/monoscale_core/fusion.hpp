@@ -324,6 +324,10 @@ public:
   // the filter would integrate away from it and hand back the difference as
   // travel the moment the first solve is accepted.
   void set_pose(const Eigen::Vector2d & position, double yaw);
+  // Position alone. On a hop the estimator refused, the pose it ended up with
+  // carries the instrument's heading, and handing that back would make the
+  // filter inherit the AHRS it exists to improve on.
+  void set_position(const Eigen::Vector2d & position);
 
   // Clone pose and heading as the anchor the next hop measures from.
   void open_hop();

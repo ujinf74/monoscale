@@ -128,6 +128,11 @@ void SpatialMsckfFilter::set_pose(const Eigen::Vector2d & position, double yaw)
   attitude_.normalize();
 }
 
+void SpatialMsckfFilter::set_position(const Eigen::Vector2d & position)
+{
+  position_.head<2>() = position;
+}
+
 void SpatialMsckfFilter::open_hop()
 {
   anchor_position_ = position_;

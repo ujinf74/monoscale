@@ -516,9 +516,10 @@ struct EstimatorSettings
 // processed, whose size travels with them so the intrinsics can be brought to
 // the same coordinates.
 // Identities at or above this are carried by the tracker's photometric road
-// fit rather than by per-corner flow. Float32 holds integers exactly to 2^24
-// and the track message is float32, so the range is safe to reserve.
-constexpr int64_t kRoadIdentity = 1 << 22;
+// fit rather than by per-corner flow. 2^40 sits far above what the corner
+// counter reaches in any run and far below the 2^53 a float64 message carries
+// exactly, so the two ranges cannot meet.
+constexpr int64_t kRoadIdentity = 1LL << 40;
 
 struct TrackFrame
 {
@@ -840,6 +841,11 @@ private:
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;
   std::unique_ptr<PlanarMsckfFilter> msckf_filter_;
   std::unique_ptr<SpatialMsckfFilter> spatial_filter_;
+  // World frame velocity from whichever filter this run is actually running.
+  // Only one of the four is fed vision; the other three are propagated on the
+  // accelerometer alone and drift without bound, so asking the wrong one is
+  // asking an open integrator.
+  std::optional<Eigen::Vector2d> fused_world_velocity() const;
   // The last accelerometer reading believable enough to propagate on.
   std::optional<Eigen::Vector3d> last_specific_force_;
   double hop_residual_squared_ = 0.0;

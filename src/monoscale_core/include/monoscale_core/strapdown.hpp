@@ -184,6 +184,8 @@ public:
   // Put the pose where the caller says it is, in the plane. Height and tilt are
   // the filter's own: the caller is placing a vehicle on a road, not in space.
   void set_pose(const Eigen::Vector2d & position, double yaw);
+  // Position alone -- see PlanarMsckfFilter::set_position.
+  void set_position(const Eigen::Vector2d & position);
 
   void open_hop();
 

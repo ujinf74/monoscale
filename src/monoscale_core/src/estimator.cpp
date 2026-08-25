@@ -247,13 +247,16 @@ Estimator::Estimator(const EstimatorSettings & settings)
     cameras_.push_back(std::make_unique<Camera>(camera, source_index++));
     cameras_.back()->mounting_variance = settings.mounting_pitch_variance;
     cameras_.back()->mount_rotation = camera.rotation_base_from_camera;
+    // On the model rather than in a global, so two estimators in one process
+    // cannot overwrite each other's.
+    cameras_.back()->calibration.level_frame_origin = settings.level_frame_origin;
+    cameras_.back()->model.level_frame_origin = settings.level_frame_origin;
   }
 
   if (settings.attitude_from_imu) {
     attitude_ = std::make_unique<AttitudeFilter>(
       settings.attitude_tau_sec, settings.attitude_gravity_tolerance);
   }
-  g_level_frame_origin = settings.level_frame_origin;
   if (settings.fusion_model == FusionModel::Displacement) {
     PlanarDisplacementFilter::Settings filter;
     filter.acceleration_noise = settings.filter_acceleration_noise;
@@ -346,10 +349,12 @@ CameraModel Estimator::frame_model(const Camera & camera, int width, int height)
     k.row(0) *= static_cast<double>(width) / camera.calibration_width;
     k.row(1) *= static_cast<double>(height) / camera.calibration_height;
   }
-  return make_camera_model(
+  CameraModel model = make_camera_model(
     k, camera.calibration.rotation_base_from_camera,
     camera.calibration.translation_base_from_camera, camera.calibration.distortion,
     camera.calibration.lens);
+  model.level_frame_origin = settings_.level_frame_origin;
+  return model;
 }
 
 void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
@@ -675,6 +680,37 @@ Eigen::Vector2d Estimator::imu_world_velocity(const Eigen::Vector2d & velocity) 
   const double c = std::cos(*imu_yaw_datum_);
   const double s = std::sin(*imu_yaw_datum_);
   return Eigen::Vector2d(c * velocity.x() - s * velocity.y(), s * velocity.x() + c * velocity.y());
+}
+
+std::optional<Eigen::Vector2d> Estimator::fused_world_velocity() const
+{
+  // The order is the order the constructor builds them in, so whichever filter
+  // this run owns is the one that answers. Unsettled means it has not seen a
+  // vision update yet, and an accelerometer-only velocity is not worth
+  // reckoning on.
+  //
+  // The two that carry their own heading answer in the instrument's frame, and
+  // are turned into the estimator's the same way their velocity corrections
+  // are -- the estimator's frame starts at zero yaw, the instrument's does not.
+  if (spatial_filter_) {
+    return spatial_filter_->settled()
+           ? std::optional<Eigen::Vector2d>(
+      imu_world_velocity(spatial_filter_->velocity().head<2>()))
+           : std::nullopt;
+  }
+  if (msckf_filter_) {
+    return msckf_filter_->settled()
+           ? std::optional<Eigen::Vector2d>(imu_world_velocity(msckf_filter_->velocity()))
+           : std::nullopt;
+  }
+  if (displacement_filter_) {
+    return displacement_filter_->settled()
+           ? std::optional<Eigen::Vector2d>(displacement_filter_->velocity())
+           : std::nullopt;
+  }
+  return velocity_filter_.settled()
+         ? std::optional<Eigen::Vector2d>(velocity_filter_.velocity())
+         : std::nullopt;
 }
 
 std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
@@ -1399,16 +1435,32 @@ void Estimator::process_pair()
     expected_hop_ = displacement_filter_->velocity() * dt;
   }
 
+  // Read here, before the solves, because remembering a solve frame resets it.
+  // What it holds at this point is the disparity accumulated since the last
+  // solve, which is exactly what the zero-velocity test downstream wants -- and
+  // reading it there gets zero from every camera, so the gate always passed.
+  double hop_disparity = -1.0;
+  bool have_disparity = false;
+  for (const auto & camera : cameras_) {
+    if (camera->latest.has_value()) {
+      hop_disparity = std::max(hop_disparity, camera->hop_disparity);
+      have_disparity = true;
+    }
+  }
+
   std::vector<std::optional<Solved>> solved(count);
   if (imu_available) {
     for (size_t i = 0; i < count; ++i) {
       solved[i] = solve_camera(*cameras_[i], yaw_delta, yaw_guess);
     }
-  } else {
-    for (auto & camera : cameras_) {
-      remember_solve_pixels(*camera);
-    }
   }
+  // Nothing else. The solve frame stays where it is, deliberately: the vision
+  // half of this interval is sound and only the heading prior is missing, so
+  // remembering the current frame here would drop the motion since the last
+  // solve out of the trajectory for good. Held, the next pair spans the gap and
+  // measures it over a longer baseline. Nothing has to bound the hold -- every
+  // path through solve_camera ends by remembering, so the first pair after the
+  // instrument comes back resyncs whether or not it finds a motion.
 
   // Carried out to the diagnostics here, where the cameras are indexed: the
   // solve holds a reference and does not know which one it was handed.
@@ -1641,21 +1693,13 @@ void Estimator::process_pair()
     ? std::hypot(motion->x, motion->y) / dt
     : std::numeric_limits<double>::infinity();
 
-  double disparity = -1.0;
-  bool have_disparity = false;
-  for (const auto & camera : cameras_) {
-    if (camera->latest.has_value()) {
-      disparity = std::max(disparity, camera->hop_disparity);
-      have_disparity = true;
-    }
-  }
-  diagnostics_.last_disparity = have_disparity ? disparity : -1.0;
+  diagnostics_.last_disparity = have_disparity ? hop_disparity : -1.0;
 
   // Decided before the fusion, not after it. Standing still used to be noticed
   // only once the vision displacement had already gone into the filter, and
   // those are the hops it most needed protecting from.
   const bool standing = settings_.zero_velocity_update && have_disparity &&
-    disparity <= settings_.zero_velocity_disparity_px &&
+    hop_disparity <= settings_.zero_velocity_disparity_px &&
     is_stationary(previous_stamp, current_stamp, vision_speed);
   if (standing) {
     ++diagnostics_.zupt_holds;
@@ -1973,9 +2017,15 @@ void Estimator::process_pair()
       std::optional<PlanarMotion> carried;
       // Not while the map is still being built. There the pose is deliberately
       // pinned at the origin, because the anchors are written from it.
-      if (dt > 1e-4 && settings_.coast_on_reject && !warming_up) {
-        const Eigen::Vector2d predicted =
-          velocity_filter_.body_translation(dt, pose_.yaw);
+      const auto coast_velocity = fused_world_velocity();
+      if (dt > 1e-4 && settings_.coast_on_reject && !warming_up &&
+        coast_velocity.has_value())
+      {
+        const Eigen::Vector2d delta = *coast_velocity * dt;
+        const double c = std::cos(pose_.yaw);
+        const double s = std::sin(pose_.yaw);
+        const Eigen::Vector2d predicted(
+          c * delta.x() + s * delta.y(), -s * delta.x() + c * delta.y());
         if (predicted.norm() <= allowance) {
           // The IMU already says how fast the heading is turning over this same
           // gap, so the dead reckoning can follow the arc rather than shoot off
@@ -2058,17 +2108,25 @@ void Estimator::process_pair()
     // integrating away from it and hand back the difference as travel the
     // moment a solve is finally accepted.
     //
-    // It puts the heading back too, and on a rejected solve that heading came
-    // from the instrument -- so the filter inherits the AHRS it exists to stop
-    // inheriting, and keeps the covariance it had before doing so. On these
-    // recordings it never happens outside the warm-up: one failure per drive,
-    // the first solve, and nothing coasted. On a rig whose solves do get
-    // rejected it would, and the heading would want holding rather than
-    // replacing.
-    msckf_filter_->set_pose(Eigen::Vector2d(pose_.x, pose_.y), pose_.yaw);
+    // The heading is a different matter. On a rejected solve the pose carries
+    // the instrument's heading, so handing it back makes the filter inherit
+    // the AHRS it exists to improve on -- and the gyro bias it has learned is
+    // what makes that improvement. The position is pinned; the heading is left
+    // where the filter's own propagation put it.
+    const Eigen::Vector2d position(pose_.x, pose_.y);
+    if (rejected) {
+      msckf_filter_->set_position(position);
+    } else {
+      msckf_filter_->set_pose(position, pose_.yaw);
+    }
   }
   if (spatial_filter_) {
-    spatial_filter_->set_pose(Eigen::Vector2d(pose_.x, pose_.y), pose_.yaw);
+    const Eigen::Vector2d position(pose_.x, pose_.y);
+    if (rejected) {
+      spatial_filter_->set_position(position);
+    } else {
+      spatial_filter_->set_pose(position, pose_.yaw);
+    }
   }
 
   ++diagnostics_.frames_processed;

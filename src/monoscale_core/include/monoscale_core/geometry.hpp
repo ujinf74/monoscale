@@ -49,6 +49,14 @@ struct CameraModel
   Eigen::VectorXd distortion;
   Lens lens = Lens::Pinhole;
 
+  // Carry the camera's own position into the level frame before measuring how
+  // far a ground point is from it. Comparing a level-frame point against a
+  // body-frame origin is only harmless while the body is level, and 0.89 m of
+  // camera height at the 5.4 degrees curve_s10 rolls is 78 mm against a 114 mm
+  // hop. It lives on the model, not in a global: two estimators in one process
+  // -- an A/B harness, say -- would otherwise share whichever was built last.
+  bool level_frame_origin = true;
+
   // inv(K), kept beside K because every ray in the stack needs it and it does
   // not change while the frame size holds.
   Eigen::Matrix3d k_inverse = Eigen::Matrix3d::Identity();
@@ -104,14 +112,6 @@ Eigen::Matrix3d intrinsic_from_fov(int width, int height, double horizontal_fov_
 // reaches the same answer by running ten Newton steps that all find the
 // residual already zero. The result is identical and the iteration is not.
 Points2 undistort_pixels(const Points2 & pixels, const CameraModel & model);
-
-// When true, `pixels_to_ground` carries the camera's own position into the
-// level frame before it measures how far a ground point is from it, and
-// reports that position so the caller can use the same frame. It used to
-// compare a level-frame point against a body-frame origin, which is only
-// harmless while the body is level: 0.89 m of camera height at the 5.4 degrees
-// of roll measured on curve_s10 is 78 mm, against a 114 mm hop.
-extern bool g_level_frame_origin;
 
 // Ground intersections of the rays through `pixels`, and which are usable.
 //

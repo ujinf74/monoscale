@@ -10,6 +10,7 @@
 // elsewhere, and none of which proves the assembly.
 
 #include <cmath>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -162,11 +163,13 @@ struct Drive
   explicit Drive(const EstimatorSettings & settings)
   : estimator(settings), world(road_points()), cameras(settings.cameras.size()) {}
 
-  // One camera frame at the current truth pose, for every camera.
-  void step(double forward, double yaw_rate, double dt)
+  // One camera frame at the current truth pose, for every camera. Withholding
+  // the inertial samples models the instrument dropping out while the cameras
+  // keep delivering, which is a live failure and not a recordable one.
+  void step(double forward, double yaw_rate, double dt, bool feed_imu = true)
   {
     // The IMU runs at twice the camera rate, as the release kit does.
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; feed_imu && i < 2; ++i) {
       ImuSample imu;
       imu.stamp = stamp + 0.5 * dt * i;
       imu.orientation = yaw_quaternion(truth.yaw + yaw_rate * 0.5 * dt * i);
@@ -285,6 +288,112 @@ TEST(EstimatorDrive, ARejectedMapAlignmentDoesNotMakeThePoseValid)
   for (const auto & update : updates) {
     EXPECT_FALSE(update.pose_valid);
   }
+}
+
+TEST(EstimatorDrive, AnInstrumentDropoutDelaysTheMotionRatherThanLosingIt)
+{
+  // The solve needs a heading prior from the instrument. When it cannot have
+  // one the pair cannot be solved -- but the two camera frames bounding the
+  // interval are perfectly good, and remembering the current one throws the
+  // motion between them away permanently. Holding the solve frame instead lets
+  // the next pair measure across the gap.
+  //
+  // A drive with a dropout in the middle must therefore end up where a drive
+  // without one ends up. Discarding the interval does not merely lose the
+  // 0.4 m covered during it: measured, a 0.2 s dropout put the old code 4.87 m
+  // ahead of the clean run over 16 m of driving, because resynchronising the
+  // solve frame leaves the map holding anchors the pose never caught up to.
+  // Distance covered, and how many times the heading was missed.
+  auto run = [](int gap_at) {
+      Drive drive(deployment_settings());
+      for (int i = 0; i < 240; ++i) {
+        // imu_max_age_sec is 20 ms and the instrument runs at 60 Hz, so
+        // withholding a few frames' worth puts every stamp out of reach.
+        const bool feed = gap_at < 0 || i < gap_at || i >= gap_at + 6;
+        drive.step(2.0, 0.0, 1.0 / 30.0, feed);
+      }
+      drive.estimator.take_updates();
+      return std::pair<double, int64_t>(
+        drive.estimator.pose().x, drive.estimator.diagnostics().imu_yaw_misses);
+    };
+
+  const auto clean = run(-1);
+  const auto gapped = run(120);
+
+  ASSERT_EQ(clean.second, 0);
+  ASSERT_GT(gapped.second, 0)
+    << "the dropout was not deep enough to miss the heading";
+  // Held, the next solve spans the gap and the two drives agree to within a
+  // solve's worth of travel.
+  EXPECT_NEAR(gapped.first, clean.first, 0.15);
+}
+
+TEST(EstimatorDrive, StandingStillIsJudgedOnDisparityThatStillExists)
+{
+  // The zero-velocity hold zeroes the translation outright, so what lets it
+  // fire matters. Two things have to agree: the instrument has to look at rest
+  // and the image has to have stopped moving. The synthetic drive reports a
+  // perfectly quiet instrument -- gravity down, no rates -- so a slow drive
+  // passes the inertial half, and only the disparity keeps the hold off.
+  //
+  // Solving a frame remembers it, and remembering it resets the disparity. Read
+  // the disparity after the solves and every camera answers zero, the gate
+  // passes unconditionally, and a vehicle creeping along a car park is told it
+  // did not move.
+  EstimatorSettings settings = deployment_settings();
+  settings.zero_velocity_update = true;
+  Drive drive(settings);
+
+  // 0.5 m/s: under zero_velocity_speed_mps, so the speed gate does not save it.
+  for (int i = 0; i < 300; ++i) {
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  ASSERT_GT(drive.estimator.diagnostics().map_aligned_frames, 0);
+
+  EXPECT_EQ(drive.estimator.diagnostics().zupt_holds, 0)
+    << "the image was moving four pixels a frame and it was called stationary";
+  EXPECT_GT(drive.estimator.pose().x, 0.5 * drive.travelled);
+}
+
+TEST(EstimatorDrive, CoastingReadsTheFilterVisionActuallyFeeds)
+{
+  // Drive normally until the map answers and the fusion filter has settled,
+  // then thin the road out below the inlier floor so nothing solves. Every pair
+  // after that is rejected and the coast is the only thing left to move the
+  // pose, which makes it a direct test of which filter the coast asks.
+  //
+  // Four filters exist and exactly one of them is fed vision. The other three
+  // are propagated on the accelerometer alone, and on a constant-speed drive
+  // that integrates to zero -- so reading the wrong one does not coast, it
+  // stops. The default model is Displacement, so the velocity filter beside it
+  // is one of the three.
+  Drive drive(deployment_settings());
+  for (int i = 0; i < 180; ++i) {
+    drive.step(2.0, 0.0, 1.0 / 30.0);
+  }
+  ASSERT_GT(drive.estimator.diagnostics().map_aligned_frames, 0)
+    << "the map never answered, so the filter never settled either";
+  const double before = drive.estimator.pose().x;
+  const int64_t failures_before = drive.estimator.diagnostics().motion_failures;
+
+  std::vector<Eigen::Vector3d> sparse;
+  for (size_t n = 0; n < drive.world.size(); n += 40) {
+    sparse.push_back(drive.world[n]);
+  }
+  drive.world = sparse;
+  for (int i = 0; i < 60; ++i) {
+    drive.step(2.0, 0.0, 1.0 / 30.0);
+  }
+
+  ASSERT_GT(drive.estimator.diagnostics().motion_failures, failures_before)
+    << "the solve was supposed to be starved";
+  EXPECT_GT(drive.estimator.diagnostics().coasted, 0);
+  // Two seconds at 2 m/s, dead reckoned, so nothing here is exact. What is
+  // being asserted is that it kept going at roughly road speed rather than
+  // parking on the spot.
+  const double carried = drive.estimator.pose().x - before;
+  EXPECT_GT(carried, 2.0);
+  EXPECT_LT(carried, 6.0);
 }
 
 TEST(EstimatorDrive, TheScaleComesOutOfTheGroundPlaneNotAFit)

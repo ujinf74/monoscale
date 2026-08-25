@@ -9,8 +9,6 @@
 namespace monoscale
 {
 
-bool g_level_frame_origin = true;
-
 namespace
 {
 
@@ -182,7 +180,7 @@ void pixels_to_ground(
   Eigen::Vector3d normal(0.0, 0.0, 1.0);
   // The camera's own position, in whichever frame the points come out in.
   Eigen::Vector3d reference = origin;
-  if (tilt != nullptr && g_level_frame_origin) {
+  if (tilt != nullptr && model.level_frame_origin) {
     reference = (*tilt) * origin;
   }
   if (tilt != nullptr) {

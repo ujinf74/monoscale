@@ -308,6 +308,11 @@ void PlanarMsckfFilter::set_pose(const Eigen::Vector2d & position, double yaw)
   state_(kT) = wrap(yaw);
 }
 
+void PlanarMsckfFilter::set_position(const Eigen::Vector2d & position)
+{
+  state_.segment<2>(kP) = position;
+}
+
 void PlanarMsckfFilter::open_hop()
 {
   state_.segment<2>(kPA) = state_.segment<2>(kP);
