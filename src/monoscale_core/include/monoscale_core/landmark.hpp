@@ -58,6 +58,26 @@ struct LandmarkSettings
   // Across the ray both start at the bearing noise times the range, which is
   // the same for either kind. Nothing else differs.
 
+  // Whether a feature the plane can answer for takes a seat in the state.
+  //
+  // It should not, and the reason is a cost law rather than a preference. The
+  // dense update runs 6.9 s a frame at 480 landmarks and the exponent is still
+  // climbing, so seats are the scarcest thing here -- and a ground feature is
+  // the worst possible tenant for one. The plane re-derives its position from a
+  // single bearing every frame, so what it carries is instantaneous: holding it
+  // between frames adds nothing the next frame would not hand over for free.
+  // Structure off the road is the opposite. It persists, it is seen from poses
+  // far apart, and the distance travelled past it is exactly the quantity the
+  // ground solve cannot see in itself.
+  //
+  // So the split this filter was built to remove comes back, on a different
+  // axis: not ground against off-ground, but persisting against instantaneous.
+  //
+  // Default off, because holding the road is the only mode that cannot run:
+  // 6.9 s a frame against a 0.05 s budget, and still under a sixth of the road
+  // in view.
+  bool ground_in_state = false;
+
   // A landmark with no plane under it waits here until its own bearings have
   // spread far enough to carry a range. Initialising it early and letting the
   // filter fix it is what makes an XYZ landmark inconsistent.

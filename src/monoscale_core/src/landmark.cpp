@@ -169,6 +169,12 @@ int LandmarkFilter::observe(const std::vector<Sighting> & sightings, int64_t fra
   rows.reserve(sightings.size());
 
   for (const auto & sighting : sightings) {
+    // A seat in the state is for what lasts. The plane answers for this one
+    // again next frame from one bearing, so keeping it costs the scarcest
+    // resource here and buys a number that arrives free anyway.
+    if (!settings_.ground_in_state && sighting.ground_range.has_value()) {
+      continue;
+    }
     const auto found = index_.find(sighting.identity);
     if (found != index_.end()) {
       found->second.seen = frame;

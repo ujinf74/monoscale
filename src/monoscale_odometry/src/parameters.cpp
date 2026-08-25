@@ -318,6 +318,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.landmark.hop_process_noise_m = declare_double("landmark_hop_noise_m", 0.08);
   settings.landmark.yaw_noise_rad = declare_double("landmark_yaw_noise_rad", 0.002);
   settings.landmark.range_from_plane = declare_bool("landmark_range_from_plane", true);
+  settings.landmark.ground_in_state = declare_bool("landmark_ground_in_state", false);
   settings.landmark.initialise_parallax_rad =
     declare_double("landmark_parallax_rad", 0.035);
   settings.landmark.initialise_min_views = declare_int("landmark_min_views", 4);

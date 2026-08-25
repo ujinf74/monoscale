@@ -81,6 +81,7 @@ TEST(LandmarkFilter, BearingsPullThePoseBackWhenTheStepIsWrong)
   LandmarkSettings settings;
   settings.bearing_noise_rad = 0.002;
   settings.hop_process_noise_m = 0.10;
+  settings.ground_in_state = true;
   LandmarkFilter filter(settings);
 
   Eigen::Vector3d truth = Eigen::Vector3d::Zero();
@@ -120,6 +121,7 @@ TEST(LandmarkFilter, StructureOffTheGroundCarriesTheSameWeight)
   settings.bearing_noise_rad = 0.002;
   settings.range_from_plane = false;
   settings.initialise_min_views = 4;
+  settings.ground_in_state = true;
   LandmarkFilter filter(settings);
 
   Eigen::Vector3d truth = Eigen::Vector3d::Zero();
@@ -133,4 +135,39 @@ TEST(LandmarkFilter, StructureOffTheGroundCarriesTheSameWeight)
   ASSERT_GT(filter.landmarks(), 50u);
   EXPECT_NEAR(filter.pose().x(), truth.x(), 0.10)
     << "triangulated structure alone could not hold the step";
+}
+
+TEST(LandmarkFilter, GroundFeaturesTakeNoSeatAndAreNotMissed)
+{
+  // The deployed shape: the road is still seen and still handed in, but it does
+  // not enter the state. Only what stands beside it takes a seat, so the state
+  // stays small enough to update, and the step still has to be recovered.
+  const auto points = world();
+  LandmarkSettings settings;
+  settings.bearing_noise_rad = 0.002;
+  settings.ground_in_state = false;
+  settings.max_landmarks = 200;
+  LandmarkFilter filter(settings);
+
+  // How many of the sightings are road, so the saving is stated rather than
+  // assumed.
+  size_t road = 0;
+  for (const auto & sighting : look(points, Eigen::Vector3d::Zero())) {
+    road += sighting.ground_range.has_value() ? 1 : 0;
+  }
+  ASSERT_GT(road, 50u) << "the fixture is not handing the filter any road";
+
+  Eigen::Vector3d truth = Eigen::Vector3d::Zero();
+  const double step = 0.15;
+  for (int i = 0; i < 40; ++i) {
+    truth.x() += step;
+    // Honest for twenty-five steps, then two-thirds of the hop for fifteen.
+    filter.predict(Eigen::Vector2d(i < 25 ? step : 0.6 * step, 0.0), 0.0);
+    filter.observe(look(points, truth), i);
+    filter.retire(i);
+  }
+  EXPECT_LE(filter.landmarks(), 200u);
+  EXPECT_GT(filter.landmarks(), 20u) << "no structure was held at all";
+  EXPECT_NEAR(filter.pose().x(), truth.x(), 0.10)
+    << "structure alone could not recover the step the prediction withheld";
 }
