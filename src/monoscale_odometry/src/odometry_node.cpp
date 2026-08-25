@@ -28,7 +28,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
@@ -123,9 +123,9 @@ public:
       rclcpp::SubscriptionOptions options;
       options.callback_group = groups_.back();
       tracks_.push_back(
-        create_subscription<std_msgs::msg::Float32MultiArray>(
+        create_subscription<std_msgs::msg::Float64MultiArray>(
           configuration_.topics.track_prefix + "/" + name, qos,
-          [this, i](std_msgs::msg::Float32MultiArray::ConstSharedPtr message) {
+          [this, i](std_msgs::msg::Float64MultiArray::ConstSharedPtr message) {
             on_tracks(i, *message);
           },
           options));
@@ -184,7 +184,7 @@ public:
   int executor_threads() const {return configuration_.topics.executor_threads;}
 
 private:
-  void on_tracks(size_t camera, const std_msgs::msg::Float32MultiArray & message)
+  void on_tracks(size_t camera, const std_msgs::msg::Float64MultiArray & message)
   {
     // Counted before any validity check, so a message rejected here can be told
     // apart from one that never arrived.
@@ -216,13 +216,15 @@ private:
     }
     ++received_[camera];
 
-    std::vector<monoscale::Update> updates;
-    {
-      std::lock_guard<std::mutex> guard(lock_);
-      estimator_->ingest_tracks(camera, frame);
-      updates = estimator_->take_updates();
-    }
-    publish(updates);
+    // Published under the same lock the updates came out of. Each camera and
+    // the instrument sit in their own callback group, so with more than one
+    // executor thread two of them can be here at once -- and taking the
+    // updates in order then publishing them outside the lock lets the later
+    // batch reach the topic first. Odometry that goes backwards in time is
+    // worse than odometry that arrives late.
+    std::lock_guard<std::mutex> guard(lock_);
+    estimator_->ingest_tracks(camera, frame);
+    publish(estimator_->take_updates());
   }
 
   void on_imu(const sensor_msgs::msg::Imu & message)
@@ -238,13 +240,10 @@ private:
       message.linear_acceleration.x, message.linear_acceleration.y,
       message.linear_acceleration.z);
 
-    std::vector<monoscale::Update> updates;
-    {
-      std::lock_guard<std::mutex> guard(lock_);
-      estimator_->ingest_imu(sample);
-      updates = estimator_->take_updates();
-    }
-    publish(updates);
+    // Under the lock, for the ordering reason in on_tracks.
+    std::lock_guard<std::mutex> guard(lock_);
+    estimator_->ingest_imu(sample);
+    publish(estimator_->take_updates());
   }
 
   void on_camera_info(size_t camera, const sensor_msgs::msg::CameraInfo & message)
@@ -456,7 +455,7 @@ private:
   std::mutex lock_;
 
   std::vector<rclcpp::CallbackGroup::SharedPtr> groups_;
-  std::vector<rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr> tracks_;
+  std::vector<rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr> tracks_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr> infos_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_;
