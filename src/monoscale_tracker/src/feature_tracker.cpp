@@ -295,6 +295,10 @@ public:
     grid_columns_ = declare_parameter<int>("detection_grid_columns", 4);
     grid_rows_ = declare_parameter<int>("detection_grid_rows", 3);
     warm_start_ = declare_parameter<bool>("lk_warm_start", true);
+    seed_new_from_cell_ =
+      declare_parameter<bool>("lk_seed_new_from_cell", false);
+    seed_min_flow_ =
+      static_cast<float>(declare_parameter<double>("lk_seed_min_flow_px", 8.0));
     // Photometric alignment of the road region, emitted as virtual features.
     road_alignment_ = declare_parameter<bool>("road_alignment", false);
     road_roi_ = {
@@ -1313,6 +1317,66 @@ private:
       }
     }
 
+    // What the flow is doing where each refilled cell sits, taken from the
+    // features that survived into it. A feature seen once has no hop of its
+    // own, and at road speed most features have been seen once: the ground
+    // sweeps 15 to 22 px a frame at 8 m/s and identities last one or two
+    // frames, so the warm start it was meant to get never exists. Its
+    // neighbours' does, and the ground flow field is smooth enough to borrow.
+    // What the flow is doing where each refilled cell sits, taken from the
+    // features that survived into it. A feature seen once has no hop of its
+    // own, and at road speed most features have been seen once: the ground
+    // sweeps 15 to 22 px a frame at 8 m/s and identities last one or two
+    // frames, so the warm start it was meant to get never exists. Its
+    // neighbours' does, and the ground flow field is smooth enough to borrow.
+    std::vector<cv::Point2f> seed(refill.size(), cv::Point2f(0.0f, 0.0f));
+    if (seed_new_from_cell_ && state.velocities.size() == state.points.size() &&
+      !state.points.empty())
+    {
+      const auto middle = [](std::vector<float> & v) {
+          if (v.empty()) {
+            return 0.0f;
+          }
+          const size_t half = v.size() / 2;
+          std::nth_element(v.begin(), v.begin() + half, v.end());
+          return v[half];
+        };
+      std::vector<float> xs;
+      std::vector<float> ys;
+      xs.reserve(state.points.size());
+      ys.reserve(state.points.size());
+      for (const auto & step : state.velocities) {
+        xs.push_back(std::hypot(step.x, step.y));
+      }
+      // Decided for the whole frame, not per cell. Seeding only the fast cells
+      // was measured worse at 8 m/s than seeding all of them or none: what the
+      // consensus behind the solve wants is one population, and half a frame
+      // carrying a neighbour's hop while the other half starts from zero is
+      // two. Below a few pixels the search finds the right minimum from where
+      // the feature already is anyway.
+      if (middle(xs) >= seed_min_flow_) {
+        xs.clear();
+        ys.clear();
+        for (const auto & step : state.velocities) {
+          xs.push_back(step.x);
+          ys.push_back(step.y);
+        }
+        const cv::Point2f overall(middle(xs), middle(ys));
+        for (size_t c = 0; c < refill.size(); ++c) {
+          xs.clear();
+          ys.clear();
+          for (size_t i = 0; i < state.points.size(); ++i) {
+            if (refill[c].contains(state.points[i])) {
+              xs.push_back(state.velocities[i].x);
+              ys.push_back(state.velocities[i].y);
+            }
+          }
+          // A cell that kept nothing borrows the frame rather than guess zero.
+          seed[c] = xs.empty() ? overall : cv::Point2f(middle(xs), middle(ys));
+        }
+      }
+    }
+
     std::vector<cv::Point2f> found;
     for (size_t c = 0; c < refill.size(); ++c) {
       const cv::Rect & cell = refill[c];
@@ -1322,10 +1386,9 @@ private:
         mask(cell), 7);
       for (const auto & point : found) {
         state.points.emplace_back(point.x + cell.x, point.y + cell.y);
-        // A feature seen once has no hop behind it; it starts its first
-        // search where it is. The vectors have to stay the same length or
-        // the warm start silently switches itself off.
-        state.velocities.emplace_back(0.0f, 0.0f);
+        // The vectors have to stay the same length or the warm start silently
+        // switches itself off.
+        state.velocities.push_back(seed[c]);
         state.identities.push_back(state.next_identity++);
       }
     }
@@ -1387,6 +1450,8 @@ private:
   double error_threshold_;
   double refill_ratio_;
   bool warm_start_;
+  bool seed_new_from_cell_ = false;
+  float seed_min_flow_ = 8.0f;
   bool use_cuda_ = false;
   int cuda_iterations_ = 30;
   // Whether the GPU path is actually in use, which needs the parameter, an
