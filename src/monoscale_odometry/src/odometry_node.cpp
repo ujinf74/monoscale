@@ -440,12 +440,15 @@ private:
       get_logger(),
       "vision odometry: solves=%ld pairs=%ld evicted=%ld rx=%s anchors=%d "
       "map_frames=%ld failures=%ld (nosolve=%ld trans=%ld yaw=%ld) coasted=%ld "
-      "filter_rej=%ld imu_misses=%ld pose=(%.2f, %.2f, %.2f)",
+      "filter_rej=%ld imu_misses=%ld pose=(%.2f, %.2f, %.2f) "
+      "obst[usable=%ld ready=%ld noslip=%ld band=%ld out=%ld]",
       diagnostics.frames_processed, diagnostics.pairs_seen, diagnostics.frames_evicted,
       counts.c_str(), diagnostics.anchors, diagnostics.map_aligned_frames,
       diagnostics.motion_failures, diagnostics.fail_no_solve,
       diagnostics.fail_translation, diagnostics.fail_yaw, diagnostics.coasted,
-      diagnostics.filter_rejections, diagnostics.imu_yaw_misses, pose.x, pose.y, pose.yaw);
+      diagnostics.filter_rejections, diagnostics.imu_yaw_misses, pose.x, pose.y, pose.yaw,
+      diagnostics.obstacle_usable, diagnostics.obstacle_ready, diagnostics.obstacle_no_slip,
+      diagnostics.obstacle_out_of_band, diagnostics.obstacle_points);
   }
 
   Configuration configuration_;

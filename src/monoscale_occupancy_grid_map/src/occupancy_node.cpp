@@ -48,13 +48,21 @@ public:
       "occupancy_topic", "/perception/occupancy_grid_map");
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
 
-    // 60 x 60 m at 10 cm, centred on where the run started. A parking
-    // manoeuvre stays well inside it.
+    // Cells live in tiles allocated where something is seen, so there is no
+    // extent to size up front -- only where the lattice is anchored, and how
+    // much of it around the car is ever published.
     settings.resolution = declare_parameter<double>("map_resolution", 0.1);
-    settings.width = static_cast<int>(declare_parameter<int>("map_width", 600));
-    settings.height = static_cast<int>(declare_parameter<int>("map_height", 600));
-    settings.origin_x = declare_parameter<double>("map_origin_x", -30.0);
-    settings.origin_y = declare_parameter<double>("map_origin_y", -30.0);
+    settings.origin_x = declare_parameter<double>("map_origin_x", 0.0);
+    settings.origin_y = declare_parameter<double>("map_origin_y", 0.0);
+    settings.tile_size_cells = static_cast<int>(declare_parameter<int>("tile_size_cells", 64));
+    settings.roi_tiles_x = static_cast<int>(declare_parameter<int>("roi_tiles_x", 15));
+    settings.roi_tiles_y = static_cast<int>(declare_parameter<int>("roi_tiles_y", 15));
+    settings.decay_log_odds_per_sec =
+      declare_parameter<double>("decay_log_odds_per_sec", 0.0);
+    settings.collect_min_abs_log_odds =
+      declare_parameter<double>("collect_min_abs_log_odds", 0.135);
+    settings.collect_min_age_sec = declare_parameter<double>("collect_min_age_sec", 3.0);
+    settings.tile_forget_sec = declare_parameter<double>("tile_forget_sec", 60.0);
 
     // Evidence per observation, and the probabilities a cell has to reach
     // before it is called one thing or the other.
@@ -110,6 +118,8 @@ private:
 
     last_stamp_ = message.header.stamp;
     have_stamp_ = true;
+    grid_->advance(
+      static_cast<double>(last_stamp_.sec) + static_cast<double>(last_stamp_.nanosec) * 1e-9);
     ++clouds_;
     points_ += count;
 
@@ -127,6 +137,12 @@ private:
         grid_->integrate_point(row.x, row.y);
       }
     }
+    if (!rows.empty()) {
+      here_x_ = rows.back().origin_x;
+      here_y_ = rows.back().origin_y;
+      have_here_ = true;
+    }
+    grid_->collect();
   }
 
   void report()
@@ -135,8 +151,8 @@ private:
       return;
     }
     RCLCPP_INFO(
-      get_logger(), "occupancy: clouds=%ld points=%ld obstacles=%ld", clouds_, points_,
-      obstacles_);
+      get_logger(), "occupancy: clouds=%ld points=%ld obstacles=%ld tiles=%zu published=%dx%d",
+      clouds_, points_, obstacles_, grid_->tile_count(), published_width_, published_height_);
   }
 
   void publish()
@@ -144,18 +160,27 @@ private:
     if (!have_stamp_) {
       return;
     }
+    if (!have_here_) {
+      return;
+    }
+    const auto window = grid_->window(here_x_, here_y_);
+    if (window.width <= 0 || window.height <= 0) {
+      return;
+    }
     const auto & settings = grid_->settings();
     nav_msgs::msg::OccupancyGrid message;
     message.header.stamp = last_stamp_;
     message.header.frame_id = map_frame_;
     message.info.resolution = static_cast<float>(settings.resolution);
-    message.info.width = static_cast<uint32_t>(settings.width);
-    message.info.height = static_cast<uint32_t>(settings.height);
-    message.info.origin.position.x = settings.origin_x;
-    message.info.origin.position.y = settings.origin_y;
+    message.info.width = static_cast<uint32_t>(window.width);
+    message.info.height = static_cast<uint32_t>(window.height);
+    message.info.origin.position.x = window.origin_x;
+    message.info.origin.position.y = window.origin_y;
     message.info.origin.orientation.w = 1.0;
-    message.data = grid_->message_values();
+    message.data = grid_->message_values(window);
     publisher_->publish(message);
+    published_width_ = window.width;
+    published_height_ = window.height;
   }
 
   std::string map_frame_;
@@ -169,6 +194,11 @@ private:
   int64_t clouds_ = 0;
   int64_t points_ = 0;
   int64_t obstacles_ = 0;
+  double here_x_ = 0.0;
+  double here_y_ = 0.0;
+  bool have_here_ = false;
+  int published_width_ = 0;
+  int published_height_ = 0;
 };
 
 int main(int argc, char ** argv)

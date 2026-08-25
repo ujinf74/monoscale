@@ -251,6 +251,42 @@ TEST(EstimatorDrive, RecoversAStraightDriveInMetres)
   EXPECT_NEAR(pose.yaw, 0.0, 0.02);
 }
 
+TEST(EstimatorDrive, ACurvedDriveDoesNotInventLateralVelocity)
+{
+  EstimatorSettings settings = deployment_settings();
+  settings.twist_lowpass_tau = 0.0;
+  Drive drive(settings);
+
+  for (int i = 0; i < 180; ++i) {
+    drive.step(2.0, 0.35, 1.0 / 30.0);
+  }
+  const auto updates = drive.estimator.take_updates();
+
+  ASSERT_FALSE(updates.empty());
+  const Eigen::Vector3d & twist = updates.back().twist;
+  EXPECT_GT(twist.x(), 1.0);
+  EXPECT_NEAR(twist.y(), 0.0, 0.05);
+  EXPECT_NEAR(twist.z(), 0.35, 0.05);
+}
+
+TEST(EstimatorDrive, ARejectedMapAlignmentDoesNotMakeThePoseValid)
+{
+  EstimatorSettings settings = deployment_settings();
+  settings.max_translation_per_frame_m = 1e-6;
+  Drive drive(settings);
+
+  for (int i = 0; i < 180; ++i) {
+    drive.step(2.0, 0.0, 1.0 / 30.0);
+  }
+  const auto updates = drive.estimator.take_updates();
+
+  ASSERT_GT(drive.estimator.diagnostics().map_aligned_frames, 0);
+  ASSERT_FALSE(updates.empty());
+  for (const auto & update : updates) {
+    EXPECT_FALSE(update.pose_valid);
+  }
+}
+
 TEST(EstimatorDrive, TheScaleComesOutOfTheGroundPlaneNotAFit)
 {
   // The claim the whole stack rests on: distance is metric because the camera
@@ -305,6 +341,38 @@ TEST(EstimatorDrive, AFrameWithNoPeerDoesNotStallTheRun)
   }
 
   EXPECT_GT(drive.estimator.diagnostics().pairs_seen, before + 30);
+}
+
+TEST(EstimatorDrive, OneImuSampleDrainsEveryReadyPair)
+{
+  EstimatorSettings settings = deployment_settings();
+  settings.adaptive_solve_interval = false;
+  settings.frame_decimation = 100;
+  Estimator estimator(settings);
+
+  ImuSample imu;
+  imu.stamp = 1.0;
+  imu.orientation = yaw_quaternion(0.0);
+  imu.linear_acceleration = Eigen::Vector3d(0.0, 0.0, kGravity);
+  estimator.ingest_imu(imu);
+
+  for (double stamp : {1.1, 1.2}) {
+    TrackFrame frame;
+    frame.stamp = stamp;
+    frame.width = kTrackWidth;
+    frame.height = kTrackHeight;
+    frame.ids.resize(0);
+    frame.pixels.resize(0, 2);
+    frame.previous_pixels.resize(0, 2);
+    estimator.ingest_tracks(0, frame);
+    estimator.ingest_tracks(1, frame);
+  }
+  EXPECT_EQ(estimator.diagnostics().pairs_seen, 0);
+
+  imu.stamp = 1.3;
+  estimator.ingest_imu(imu);
+
+  EXPECT_EQ(estimator.diagnostics().pairs_seen, 2);
 }
 
 TEST(EstimatorDrive, ObstaclesAreSilentRatherThanFatalWithoutImages)
