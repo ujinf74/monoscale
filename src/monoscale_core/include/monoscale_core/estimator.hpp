@@ -423,6 +423,13 @@ struct EstimatorSettings
   // apart and averaging the two answers. Their points are already in base_link
   // and describe the same hop, so this is the fusion the geometry allows.
   bool fuse_camera_points = false;
+  // Whether the anchor alignment estimates the heading itself when a filter
+  // exists that could consume one. It only ever did because such a filter
+  // implies a gyro bias state, and a bias is only observable against an
+  // independent heading. On a rig whose gyro is already exact that trade is
+  // all cost: turning it on under the displacement model takes mean ATE from
+  // 0.1703 to 0.8056.
+  bool align_solves_yaw = true;
   double curvature_scale_gain = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;

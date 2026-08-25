@@ -1161,7 +1161,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       aligned = align_to_anchors(
         body, world, weights, handed, gate,
         settings_.ground_min_inliers,
-        heading_.enabled() || msckf_filter_ != nullptr || spatial_filter_ != nullptr,
+        settings_.align_solves_yaw &&
+        (heading_.enabled() || msckf_filter_ != nullptr || spatial_filter_ != nullptr),
         lens, settings_.radial_min_range_m,
         softness_for(camera, settings_.ground_align_softness_m),
         settings_.align_seed_from_last_hop && camera.last_translation.has_value()

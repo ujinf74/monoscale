@@ -308,6 +308,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.ground_pair_softness_m = declare_double("ground_pair_softness_m", 0.0);
   settings.softness_from_residual = declare_double("softness_from_residual", 0.0);
   settings.fuse_camera_points = declare_bool("fuse_camera_points", false);
+  settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
   settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);
