@@ -27,6 +27,32 @@
     # the Isaac cameras whose CameraInfo was all zeros.
     use_camera_info: true
     imu_topic: /sensing/imu/imu_data
+    # Where the IMU actually sits, from base_link: (1.35, 0, 0.34). Left at
+    # zero, which means the samples are used exactly as they arrive.
+    #
+    # The lever arm is real and CARLA renders it. Regressing the measured
+    # lateral specific force on v*omega and on yaw acceleration recovers the
+    # arm as the alpha coefficient: 1.425 m on park_clean, 1.376 on
+    # approach_hd60, 1.209 on park_obst_a, against the 1.35 configured, and
+    # including the term takes the explained variance from 0.25 to 0.46 and
+    # from 0.10 to 0.42 on the first two. It is not small either -- the
+    # tangential part runs 0.727 m/s^2 at p95 through a parking manoeuvre
+    # against a 1.277 m/s^2 signal.
+    #
+    # Compensating it correctly still costs: mean ATE 0.1302 -> 0.1352, and
+    # the cost falls monotonically as the differentiated term is smoothed away
+    # (tau 0 / 0.02 / 0.05 / 0.15 give 0.1373 / 0.1358 / 0.1352 / 0.1341,
+    # centripetal alone 0.1323). Nothing unlocks it: trusting the
+    # accelerometer more afterwards is worse with the arm on or off (noise 0.6
+    # gives 0.289 on / 0.267 off), and a faster attitude filter tracks the
+    # uncompensated one at every tau. The pose comes from the ground solve and
+    # the accelerometer is held at noise 1.55, i.e. barely consulted, so the
+    # correction buys less than the gyro differentiation it costs.
+    #
+    # Set it to [1.35, 0.0, 0.34] on a rig whose accelerometer is actually
+    # trusted. The physics does not stop being right here.
+    imu_translation_base_from_imu: [0.0, 0.0, 0.0]
+    imu_angular_accel_tau_sec: 0.05
     use_imu_yaw: true
     # 100 Hz IMU against the same simulation clock as the images.
     imu_max_age_sec: 0.02
@@ -113,7 +139,38 @@
     # 8 -> 24 costs 0.022 -> 0.053 m and lk_window 21 -> 31 costs 0.148, so
     # dense corners and a small window still suit this manoeuvre. The
     # triangulation and solve-trigger thresholds move nothing at all.
-    processing_width: 2560
+    #
+    # 640, not 2560. The header above describes an assembled 2560x1440 pair,
+    # but `record_run.sh` records 1280x720 (`FISHEYE_ARGS -p width:=1280`,
+    # which is what fx = 525.91 is calibrated to). The tracker only downscales
+    # when `gray.cols > processing_width`, so on a 1280 frame **2560 did
+    # nothing at all** -- it silently tracked at native 1280, a setting nobody
+    # chose. That is not where the accuracy is. Sweeping the width alone, with
+    # every other tracker setting held, on straight120_v3:
+    #
+    #   width   320     480     640     960     1280
+    #   ate    0.608   0.208   0.099   0.184   0.269
+    #   points  256     576     706     764     760
+    #   spread 0.0211  0.0145  0.0086  0.0042  0.0035
+    #
+    # A sharp optimum, and the two arms fail differently: below 640 the ground
+    # solve starves, above it the points agree with each other *better*
+    # (spread falls) while the answer gets worse -- more agreement, less
+    # accuracy, the same trap `fuse_by_precision` fell into.
+    #
+    # This file's own settings at 640 beat the candidate's at 640 everywhere
+    # except a wash on park, so only the width was wrong:
+    #
+    #   drive   candidate 640    this file @ 640
+    #   1.5    0.191 / 0.45%    0.189 / 0.12%
+    #   2.0    0.099 / 0.12%    0.072 / 0.11%
+    #   4.0    0.232 / 0.36%    0.183 / 0.19%
+    #   8.0    0.817 / 2.94%    0.695 / 1.79%
+    #   park   0.246 / 1.06%    0.251 / 1.10%
+    #
+    # It is an absolute target width, so it survives the rig ever delivering
+    # the 2560 assembly the header assumes.
+    processing_width: 640
     # 600 was set at parking speed and is the single biggest constraint at
     # road speed: at a steady 8 m/s it left a median of 78 usable ground
     # points per solve against 188 at 2.5 m/s, only 10 of them matching an
@@ -132,15 +189,30 @@
     # strongest corners. What the ground registration is conditioned on is how
     # far apart the points are, not how many there are, and quality ordering
     # hands the whole budget to whichever patch has the richest texture.
-    # Off at 2000 features, where the plain ordering already covers the image
-    # and the quota costs a little (0.250 -> 0.314 m). Turn it on when the
-    # budget has to come down for throughput: at 600 features it is the
-    # difference between 3.478 m and 0.615 m.
-    detection_grid_columns: 0
-    detection_grid_rows: 0
-    # Scaled with processing_width: 1.0 suits 1920, so 2560 wants 1.333. This
-    # is the one pixel threshold that has to follow the frame -- see
-    # processing_width above for what leaving it fixed costs.
+    # ON. It used to be off here, justified by one measurement at 2000 features
+    # on a 34 m stretch at 8 m/s where the quota cost 0.250 -> 0.314 m. That
+    # does not reproduce anywhere in the purpose-recorded set. Grid off against
+    # grid on, ate_rmse over four speeds and both processing widths:
+    #
+    #   speed   640 on/off        2560 on/off        ground points on/off
+    #   1.5   0.191 / 7.307     0.240 / 4.869        738/673   1011/251
+    #   2.0   0.099 / 0.294     0.217 / 0.640        706/615    946/191
+    #   4.0   0.232 / 0.893     0.314 / 1.273        572/502    757/140
+    #   8.0   0.817 / 3.453     0.903 / 46.667       209/170    218/ 93
+    #
+    # Eight of eight, and worst exactly where this file is deployed: at 2560
+    # and 8 m/s the quality ordering leaves 93 usable ground points a solve and
+    # the estimate diverges. The comment above already says why -- what the
+    # registration is conditioned on is how far apart the points are -- and
+    # quality ordering spends the whole budget on whichever patch has the
+    # richest texture, which at these speeds is not the road.
+    detection_grid_columns: 4
+    detection_grid_rows: 3
+    # Left at 1.333 even though processing_width is now 640, where the old
+    # rule (1.0 suits 1920) would ask for 0.333. Measured: this file's settings
+    # at 640, fb gate included, beat the candidate's 1.0 at the same width on
+    # four of five drives -- see the table under processing_width. The rule was
+    # never checked below 1920 and does not hold there.
     lk_forward_backward_threshold_px: 1.333
 
     # Beyond this the ground plane assumption is doing most of the work and
@@ -162,7 +234,68 @@
     # recorded figures were taken on, so the fixed band stands until the
     # adaptive one is shown to beat it on those.
     min_ground_flow_px: 0.0
-    ground_ransac_threshold_m: 0.12
+    # The plane fit's inlier gate, and the width of the Gaussian that now
+    # weights points inside it instead of counting them all alike.
+    #
+    # A hard gate makes the estimate a step function of its own threshold:
+    # sweeping it moved the score in jumps (0.04 was a disaster at 0.478, 0.08
+    # good, 0.12 worse, 0.30 good again) because a point crossing the edge
+    # changes from full vote to none. Weighting by exp(-d^2/2s^2) instead is
+    # what Chandraker et al. do for the same estimate (PAMI 2015, "High
+    # Accuracy Monocular SFM and Scale Correction for Autonomous Driving",
+    # their eq. 4 scores ground height by sum_j exp(-mu dh_ij^2) with mu = 50,
+    # i.e. s = 0.14 m), and it removes the jumps.
+    #
+    # Measured over ten drives, mean ATE: hard gate at 0.12 gives 0.1779; the
+    # pair below gives 0.1437, and nine of the ten drives improve. The gate is
+    # still needed -- widening it to 0.20 under the same softness costs 0.239 --
+    # so this is a soft weight inside a hard bound, not a replacement for it.
+    ground_ransac_threshold_m: 0.10
+    ground_align_softness_m: 0.055
+
+    # How many starting points the alignment's mode search tries.
+    #
+    # The reweighted mean only walks downhill from where it starts, and it
+    # started at the median vote. When the hop is short the votes spread wider
+    # than the hop itself, so the median sits near zero and the iteration
+    # settles on "did not move" -- a real local optimum, just the wrong one.
+    # This is the same failure that makes the slow drives read 5% short and
+    # that breaks them outright when the anchor supply is raised.
+    #
+    # Starting the same iteration from several votes and keeping whichever
+    # attracts the most weight finds the mode the data has. Mean ATE over ten
+    # drives: 0.1437 at 1, 0.1367 at 6; the reference bag
+    # approach_hd60_tracks_w1280 goes 0.1090 -> 0.0639. Counts of 4, 5, 8 and
+    # 10 all land in 0.140-0.144, so 6 is chosen from a flat region rather
+    # than a sharp optimum -- do not read the exact value as tuned.
+    #
+    # Note that once the solve band below was narrowed, most of this gain went
+    # with it: at band 5.0 restarts 1 scores 0.1315 against 0.1302 for 6. The
+    # two are treating the same disease -- far ground points are what widened
+    # the vote spread that swallowed the hop in the first place.
+    align_restarts: 6
+
+    # How far out a ground point may be and still speak for the pose.
+    #
+    # ground_max_distance_m (8 m) bounds three things at once: which pixels
+    # project to a usable ground point, which sightings found anchors, and
+    # which points the registration reads. Only the first is about the map.
+    # A ground point's position error grows with its range -- the same angular
+    # error is worth proportionally more centimetres further out -- so the far
+    # half of the band maps well and registers badly.
+    #
+    # Bounding the pose paths alone at 4.5 m takes mean ATE over ten drives
+    # from 0.1367 to 0.1291, exactly matching what narrowing the whole band to
+    # 4.5 m achieves, while the grid keeps its 8 m reach. Both frames of a hop
+    # are tested, because it is the AND of the two that narrowing tightens.
+    # 4.0 is too few points (0.1495); 4.5-5.5 is flat on the mean
+    # (0.129-0.133). 5.0 rather than 4.5 because the mean is not the whole
+    # story: at 4.5 the three recordings of the identical 2.0 m/s drive spread
+    # 1.80x, at 5.0 they spread 1.20x, and SD over the ten drives is 0.076
+    # against 0.083. Buying 0.001 of mean with half the repeatability is not a
+    # trade a general-purpose stack should take.
+    solve_max_distance_m: 5.0
+    anchor_max_range_m: 5.0
     ground_min_inliers: 24
     max_scale_error: 0.08
     # 20 Hz frames, so this caps the vehicle at 20 m/s before a frame is rejected.
@@ -185,6 +318,68 @@
     # all of them; a 0.4% spread is left that still tracks speed. What causes
     # any of it is not known -- the ground band, the body's pitch, the solve
     # cadence and the anchor map were each ruled out first.
+    # Extra metres of inlier gate per radian the vehicle turns over one hop.
+    #
+    # A ground point at range R sweeps R*dyaw when the vehicle rotates, so both
+    # its range error and any yaw error are multiplied by the turn: the votes
+    # spread wider through a manoeuvre than they ever do on a straight. A gate
+    # sized for the straight then throws away good points exactly where there
+    # are fewest. Swept per drive, the curved recordings want 0.16-0.24 m and
+    # the straight ones 0.06-0.10 -- one fixed number cannot serve both.
+    #
+    # Over the thirteen drives: mean ATE 0.1693 -> 0.1622, SD 0.1306 -> 0.1187,
+    # MAX 0.4481 -> 0.4079, repeat spread unchanged at 1.26x. The three slalom
+    # drives carry it (0.448 -> 0.408, 0.423 -> 0.383, 0.136 -> 0.109) and the
+    # straights do not move; park and the approach pay about 0.003 each.
+    #
+    # Flat from 15 to 40 (0.1620-0.1625). 15 is the conservative end: at 40 a
+    # parking hop would open the gate to 0.7 m, which is wider than the band
+    # the points come from.
+    ground_rotation_threshold_m: 15.0
+    # The same Gaussian weight the anchor alignment uses, for the two frame
+    # fallback that answers whenever the map cannot.
+    #
+    # That path ended in a hard gate and an unweighted mean, which is exactly
+    # the step function `ground_align_softness_m` was introduced to remove --
+    # it was simply never applied here. It matters most through a turn: with
+    # the map off, the parking drives read +1.32% long at a 0.04 m gate and
+    # +6.22% at 0.30, because a ground point's apparent displacement carries
+    # its own range error, range error grows with range, and a wider gate
+    # admits more of the far votes that read long. Softening takes park_obst
+    # from +3.31% to +1.12%.
+    #
+    # Over the thirteen drive set, mean ATE 0.1731 -> 0.1693 with SD
+    # 0.1318 -> 0.1306 and MAX 0.4460 -> 0.4481. 0.080 rather than the anchor
+    # path's 0.055, which reaches the same mean with a worse SD, MAX and repeat
+    # spread once the curved drives are in the set.
+    ground_pair_softness_m: 0.080
+    # Metres of hop given back per radian of turn.
+    #
+    # It acts on the **common** mode, which is what matters: both cameras share
+    # that error, so their disagreement cannot see it, and the fused bias is
+    # the only thing that reaches the output -- it equals the drift, and drift
+    # times distance is the error.
+    #
+    # THE NAME IS WRONG AND THE TERM IS EMPIRICAL. It was derived from hops on
+    # a straight reading 0.09-0.47% short against hops through a parking
+    # manoeuvre reading 0.67-0.82% long, i.e. a percentage point per 0.15
+    # rad/m. Purpose-recorded slalom drives then falsified the law: the turning
+    # bias runs -0.28% at 0.021 rad/m, +1.84% at 0.039 and +0.94% at 0.075,
+    # which is not monotonic in curvature at all. The two clusters it was
+    # fitted on (0 and ~0.15) simply could not show that.
+    #
+    # It is kept because it earns its keep on the wider set anyway: over
+    # thirteen drives mean ATE 0.1838 -> 0.1691, helping curve_s10 (0.488 ->
+    # 0.420) and curve_s20 (0.209 -> 0.134) and costing curve_s05 (0.421 ->
+    # 0.465). The sweep is flat from 0.067 to 0.120 and 0.067 holds the lowest
+    # SD. What it really does is shorten hops through a turn, which is right
+    # wherever the drive reads long and wrong where it reads short.
+    #
+    # A flat `vision_scale` is NOT applied with it. 1.0025 alone reaches mean
+    # 0.1185 and the two together 0.1098, but both take the repeat spread of
+    # one identical drive from 1.20x to 4.5x -- buying the mean with the
+    # repeatability, which is the trade this set has refused before.
+    curvature_scale_gain: 0.067
     ground_range_scale_front: 1.0039
     ground_range_scale_rear: 1.0060
     # Roll and pitch from the IMU, feeding the ground projection. The gain
@@ -200,6 +395,21 @@
     # out; a sixty second trim, applied only while the measured acceleration
     # is within 0.3 m/s2 of gravity, lands at 0.046 against the simulator's
     # own attitude.
+    # How long a ground anchor survives, in frames. 120 was tuned on the
+    # 24-32 m approach drives, where it is 4 s and the map turns over well
+    # inside one manoeuvre. Over a 110 m straight it starves: measured 08-19,
+    # the estimate tracks truth to within 0.5% for the first 50 m and then the
+    # local ratio falls to 0.94 and never recovers, for a whole-drive scale of
+    # 0.973. Three recordings of that identical drive scored 0.18/0.78/1.24 m
+    # -- a 6.7x spread -- because whether the map starves is not repeatable.
+    #
+    # At 250 the same three score 0.192/0.195/0.162 (1.20x) and scale lands at
+    # 0.998-1.000; the 1.5 m/s drive goes 2.405 -> 0.230. The cost is the short
+    # approach drives, which no longer turn the map over as often: v2 0.042 ->
+    # 0.076, w960 0.092 -> 0.097, w1280 0.111 -> 0.110. Paying 3 cm there to
+    # take 2.2 m off a road-speed drive.
+    anchor_max_age_frames: 250
+
     attitude_tau_sec: 60.0
     attitude_gravity_tolerance: 0.3
     camera_workers: 1

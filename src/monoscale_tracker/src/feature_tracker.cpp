@@ -24,9 +24,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <mutex>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -94,6 +96,22 @@ bool to_gray(const sensor_msgs::msg::Image & message, cv::Mat & gray)
   return true;
 }
 
+#ifdef MONOSCALE_TRACKER_HAS_CUDA
+// A page-locked buffer of at least `count` entries, handed back as a header
+// over exactly that many. Grown when it has to be and never shrunk, so a
+// steady feature count pays the allocation once and the rest of the drive
+// reuses it. Page-locked because a pageable transfer is staged by the driver
+// anyway and cannot overlap with a kernel; these are what let the copies ride
+// the stream instead of stalling it.
+cv::Mat pinned(cv::cuda::HostMem & memory, int count, int type)
+{
+  if (memory.empty() || memory.cols < count || memory.type() != type) {
+    memory.create(1, std::max(count, 1), type);
+  }
+  return memory.createMatHeader().colRange(0, count);
+}
+#endif
+
 struct TrackState
 {
   cv::Mat previous_gray;
@@ -113,6 +131,21 @@ struct TrackState
   // is wrong by a whole frame of motion.
   double stamp = 0.0;
   double interval = 0.0;
+  // Virtual features carried by a photometric fit of the road region instead
+  // of by per-corner flow. The road is a rapidly moving, low-textured surface
+  // -- sparse corners on it die in a median of eight frames and their
+  // aggregate carries a frame-wide error ten to twenty times what independent
+  // point noise would give. One warp fitted over thousands of road pixels does
+  // not have that: it is the same cue Song and Chandraker call plane-guided
+  // dense stereo (CVPR 2014), reported there as the term that "vastly improves
+  // camera self-localization".
+  std::vector<cv::Point2f> road_points;
+  std::vector<int64_t> road_identities;
+  std::vector<int> road_ages;
+  // Previous frame to current, in ROI coordinates. Kept as the warm start for
+  // the next fit, which is most of why the iteration converges at all.
+  cv::Mat road_warp;
+
   // How many features this camera is currently trying to hold. Owned by the
   // one thread that runs this camera's callback, so it needs no guard.
   int target = 0;
@@ -122,6 +155,28 @@ struct TrackState
   // rather than rebuilt for the same reason: two flow calls a frame would
   // otherwise build four pyramids where two are needed.
   std::vector<cv::cuda::GpuMat> previous_device_pyramid;
+  // One stream per camera, so a frame's whole conversation with the device --
+  // the image up, both flow calls, every result back -- is queued once and
+  // waited on once. It belongs to the camera and not to the node because the
+  // two callbacks run at the same time on their own threads.
+  cv::cuda::Stream stream;
+  // Page-locked staging for everything that crosses the bus.
+  cv::cuda::HostMem host_image;
+  cv::cuda::HostMem host_source;
+  cv::cuda::HostMem host_guess;
+  cv::cuda::HostMem host_forward;
+  cv::cuda::HostMem host_backward;
+  cv::cuda::HostMem host_status;
+  cv::cuda::HostMem host_backward_status;
+  cv::cuda::HostMem host_error;
+  // Held across frames so the device allocator is not asked for the same
+  // handful of buffers on every hop.
+  cv::cuda::GpuMat device_source;
+  cv::cuda::GpuMat device_forward;
+  cv::cuda::GpuMat device_status;
+  cv::cuda::GpuMat device_error;
+  cv::cuda::GpuMat device_backward;
+  cv::cuda::GpuMat device_backward_status;
 #endif
 };
 
@@ -229,6 +284,24 @@ public:
     grid_columns_ = declare_parameter<int>("detection_grid_columns", 4);
     grid_rows_ = declare_parameter<int>("detection_grid_rows", 3);
     warm_start_ = declare_parameter<bool>("lk_warm_start", true);
+    // Photometric alignment of the road region, emitted as virtual features.
+    road_alignment_ = declare_parameter<bool>("road_alignment", false);
+    road_roi_ = {
+      declare_parameter<double>("road_roi_x0", 0.20),
+      declare_parameter<double>("road_roi_y0", 0.50),
+      declare_parameter<double>("road_roi_x1", 0.80),
+      declare_parameter<double>("road_roi_y1", 1.00)};
+    road_columns_ = declare_parameter<int>("road_grid_columns", 3);
+    road_rows_ = declare_parameter<int>("road_grid_rows", 3);
+    road_iterations_ = declare_parameter<int>("road_ecc_iterations", 30);
+    road_homography_ = declare_parameter<bool>("road_homography", false);
+    // How many frames a grid point may be carried before it is dropped and
+    // reseeded. Each frame multiplies one more warp onto its position, so a
+    // long-lived point accumulates the fit's error; on a curve that error has
+    // a consistent direction and does not average out. 0 keeps them until they
+    // leave the region.
+    road_max_age_ = declare_parameter<int>("road_max_age", 0);
+    road_epsilon_ = declare_parameter<double>("road_ecc_epsilon", 1.0e-4);
     // Run the optical flow on the GPU.
     //
     // This is the one stage in the whole stack where a GPU has a case to make.
@@ -364,7 +437,6 @@ public:
 
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
-      states_[name] = TrackState{};
       states_[name].target = max_features_;
       publishers_[name] = create_publisher<std_msgs::msg::Float32MultiArray>(
         "/vision/tracks/" + name, output_qos);
@@ -424,7 +496,7 @@ private:
     // forward declares GpuMat and nothing can be held in a vector of them.
     std::vector<cv::cuda::GpuMat> device_pyramid;
     if (cuda_active_) {
-      build_device_pyramid(gray, device_pyramid);
+      build_device_pyramid(state, gray, device_pyramid);
     } else {
       cv::buildOpticalFlowPyramid(gray, pyramid, cv::Size(window_, window_), levels_);
     }
@@ -506,6 +578,9 @@ private:
     const size_t followed = state.points.size();
     detect(state, gray);
     stage.detect = lap();
+    // Held before it is replaced: the road fit needs the frame the flow just
+    // came from, and detection has already overwritten the state's copy.
+    const cv::Mat road_previous = state.previous_gray;
     state.previous_gray = gray;
     if (cuda_active_) {
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
@@ -523,13 +598,18 @@ private:
     // solving over a pool that was always a generation older -- median
     // baseline 0.272 m against 0.389 -- and the shorter the baseline the
     // noisier the geometry.
-    std::vector<cv::Point2f> published_previous = previous_points;
-    std::vector<cv::Point2f> published_current = current_points;
-    std::vector<int64_t> published_identities = identities;
+    //
+    // Appended to the followed set in place. Copying the three vectors whole
+    // to do this was copying the entire frame's output for the sake of the
+    // handful of points detection had just added.
     for (size_t i = followed; i < state.points.size(); ++i) {
-      published_previous.push_back(state.points[i]);
-      published_current.push_back(state.points[i]);
-      published_identities.push_back(state.identities[i]);
+      previous_points.push_back(state.points[i]);
+      current_points.push_back(state.points[i]);
+      identities.push_back(state.identities[i]);
+    }
+
+    if (road_alignment_ && !road_previous.empty() && road_previous.size() == gray.size()) {
+      align_road(state, road_previous, gray, previous_points, current_points, identities);
     }
 
     if (!dump_dir_.empty() && ++dumped_[name] == 60) {
@@ -542,8 +622,7 @@ private:
     }
 
     publish(
-      name, message, gray.size(), published_previous, published_current,
-      published_identities);
+      name, message, gray.size(), previous_points, current_points, identities);
 
     stage.publish = lap();
     const double spent = std::chrono::duration<double>(
@@ -667,6 +746,132 @@ private:
       get_logger(), "front end in: %s%s", line.c_str(), totals.c_str());
   }
 
+
+  // Photometric alignment of the road region, emitted as virtual features.
+  //
+  // A grid of points is carried across frames by one affine warp fitted to the
+  // whole road ROI rather than by tracking each of them. Everything downstream
+  // sees ordinary features with ordinary identities; what is different is where
+  // their positions come from. Per-corner flow on a low-textured road is
+  // aperture limited and its errors are shared across the frame -- measured on
+  // this rig, the hop those corners produce is eight to twenty times noisier
+  // than independent point noise would allow. A warp fitted over the whole
+  // region is not aperture limited.
+  void align_road(
+    TrackState & state, const cv::Mat & previous, const cv::Mat & current,
+    std::vector<cv::Point2f> & previous_points, std::vector<cv::Point2f> & current_points,
+    std::vector<int64_t> & identities)
+  {
+    const cv::Rect roi(
+      cv::Point(
+        cvRound(road_roi_[0] * current.cols), cvRound(road_roi_[1] * current.rows)),
+      cv::Point(
+        cvRound(road_roi_[2] * current.cols), cvRound(road_roi_[3] * current.rows)));
+    const cv::Rect bounded = roi & cv::Rect(0, 0, current.cols, current.rows);
+    if (bounded.width < 32 || bounded.height < 32) {
+      return;
+    }
+
+    const int motion = road_homography_ ? cv::MOTION_HOMOGRAPHY : cv::MOTION_AFFINE;
+    const int rows = road_homography_ ? 3 : 2;
+    if (state.road_warp.empty() || state.road_warp.rows != rows) {
+      state.road_warp = cv::Mat::eye(rows, 3, CV_32F);
+    }
+    // Warm started from the last frame's warp. Starting from identity every
+    // time asks the iteration to cross the whole hop, which at road speed is
+    // further than it can see.
+    cv::Mat warp = state.road_warp.clone();
+    try {
+      cv::findTransformECC(
+        previous(bounded), current(bounded), warp, motion,
+        cv::TermCriteria(
+          cv::TermCriteria::COUNT + cv::TermCriteria::EPS, road_iterations_, road_epsilon_),
+        cv::noArray(), 5);
+    } catch (const cv::Exception &) {
+      // Did not converge. The grid is dropped rather than carried on a warp
+      // nobody vouched for; it is reseeded next frame.
+      state.road_points.clear();
+      state.road_identities.clear();
+      state.road_ages.clear();
+      state.road_warp = cv::Mat::eye(rows, 3, CV_32F);
+      return;
+    }
+    if (!warp.empty() && cv::checkRange(warp)) {
+      state.road_warp = warp;
+    } else {
+      return;
+    }
+
+    const cv::Mat_<float> w = state.road_warp;
+    const cv::Point2f origin(
+      static_cast<float>(bounded.x), static_cast<float>(bounded.y));
+    // Carry whoever is already there, then emit the pair. Coordinates are the
+    // ROI's for the warp and the frame's for the message.
+    std::vector<cv::Point2f> carried;
+    std::vector<int64_t> kept;
+    carried.reserve(state.road_points.size());
+    kept.reserve(state.road_points.size());
+    std::vector<int> ages;
+    ages.reserve(state.road_points.size());
+    for (size_t i = 0; i < state.road_points.size(); ++i) {
+      if (road_max_age_ > 0 && i < state.road_ages.size() &&
+        state.road_ages[i] >= road_max_age_)
+      {
+        continue;
+      }
+      const cv::Point2f & from = state.road_points[i];
+      const float scale = road_homography_
+        ? w(2, 0) * from.x + w(2, 1) * from.y + w(2, 2) : 1.0f;
+      if (std::abs(scale) < 1e-6f) {
+        continue;
+      }
+      const cv::Point2f to(
+        (w(0, 0) * from.x + w(0, 1) * from.y + w(0, 2)) / scale,
+        (w(1, 0) * from.x + w(1, 1) * from.y + w(1, 2)) / scale);
+      if (to.x < 0.0f || to.y < 0.0f ||
+        to.x > static_cast<float>(bounded.width - 1) ||
+        to.y > static_cast<float>(bounded.height - 1))
+      {
+        continue;
+      }
+      previous_points.push_back(from + origin);
+      current_points.push_back(to + origin);
+      identities.push_back(state.road_identities[i]);
+      carried.push_back(to);
+      kept.push_back(state.road_identities[i]);
+      ages.push_back(i < state.road_ages.size() ? state.road_ages[i] + 1 : 1);
+    }
+
+    // Refill the grid wherever it has emptied. A cell is free when nothing
+    // carried lands within half a cell of its centre.
+    const float step_x = static_cast<float>(bounded.width) / road_columns_;
+    const float step_y = static_cast<float>(bounded.height) / road_rows_;
+    for (int row = 0; row < road_rows_; ++row) {
+      for (int column = 0; column < road_columns_; ++column) {
+        const cv::Point2f centre(
+          (column + 0.5f) * step_x, (row + 0.5f) * step_y);
+        bool taken = false;
+        for (const auto & point : carried) {
+          if (std::abs(point.x - centre.x) < 0.5f * step_x &&
+            std::abs(point.y - centre.y) < 0.5f * step_y)
+          {
+            taken = true;
+            break;
+          }
+        }
+        if (taken) {
+          continue;
+        }
+        carried.push_back(centre);
+        kept.push_back(road_next_identity_++);
+        ages.push_back(0);
+      }
+    }
+    state.road_points = carried;
+    state.road_identities = kept;
+    state.road_ages = ages;
+  }
+
   void follow(
     TrackState & state, const cv::Mat & gray,
     const std::vector<cv::Mat> & pyramid,
@@ -701,13 +906,6 @@ private:
       state.previous_pyramid, pyramid, state.points, forward, status, error,
       window, levels_, criteria, flags);
 
-    std::vector<cv::Point2f> backward;
-    std::vector<uchar> backward_status;
-    std::vector<float> backward_error;
-    cv::calcOpticalFlowPyrLK(
-      pyramid, state.previous_pyramid, forward, backward, backward_status,
-      backward_error, window, levels_, criteria);
-
     // What the flow returned before anything was thrown away, and why each
     // rejection happened. The survivors' mean hop alone cannot tell a camera
     // that is not moving apart from one whose moving features are all being
@@ -718,13 +916,30 @@ private:
     size_t noisy = 0;
     size_t drifted = 0;
 
+    // Settle everything the forward pass decides on its own, then run the
+    // backward pass over the survivors alone.
+    //
+    // Both flow calls are charged per point and together they are most of the
+    // frame. A point the forward pass lost, or whose patch error is already
+    // over the threshold, or that landed off the image, is going to be dropped
+    // whatever comes back -- so the second call was paying full price for
+    // points on their way to the bin. The gates below are the same gates in
+    // the same conjunction, and the flow treats each point independently of
+    // the others in the call, so the set that survives is unchanged to the
+    // bit. Only which counter a doomed point lands in can move: one that fails
+    // two gates is now charged to the first gate tested rather than to
+    // whichever the old order happened to reach first.
+    std::vector<cv::Point2f> candidates;
+    std::vector<size_t> source;
+    candidates.reserve(forward.size());
+    source.reserve(forward.size());
     for (size_t i = 0; i < forward.size(); ++i) {
       if (status[i]) {
         raw += std::hypot(
           forward[i].x - state.points[i].x, forward[i].y - state.points[i].y);
         ++raw_count;
       }
-      if (!status[i] || !backward_status[i]) {
+      if (!status[i]) {
         ++lost;
         continue;
       }
@@ -732,19 +947,40 @@ private:
         ++noisy;
         continue;
       }
-      const cv::Point2f drift = backward[i] - state.points[i];
-      if (std::hypot(drift.x, drift.y) > backward_threshold_) {
-        ++drifted;
-        continue;
-      }
       if (forward[i].x < 0 || forward[i].y < 0 ||
         forward[i].x >= gray.cols || forward[i].y >= gray.rows)
       {
         continue;
       }
+      candidates.push_back(forward[i]);
+      source.push_back(i);
+    }
+
+    std::vector<cv::Point2f> backward;
+    std::vector<uchar> backward_status;
+    if (!candidates.empty()) {
+      // No error vector out of this one. Nothing ever read it, and OpenCV
+      // skips the patch sum altogether when it is not asked for -- a window's
+      // worth of arithmetic per point, computed and discarded on every hop.
+      cv::calcOpticalFlowPyrLK(
+        pyramid, state.previous_pyramid, candidates, backward, backward_status,
+        cv::noArray(), window, levels_, criteria);
+    }
+
+    for (size_t k = 0; k < candidates.size(); ++k) {
+      const size_t i = source[k];
+      if (!backward_status[k]) {
+        ++lost;
+        continue;
+      }
+      const cv::Point2f drift = backward[k] - state.points[i];
+      if (std::hypot(drift.x, drift.y) > backward_threshold_) {
+        ++drifted;
+        continue;
+      }
       previous_points.push_back(state.points[i]);
-      current_points.push_back(forward[i]);
-      velocities.push_back(forward[i] - state.points[i]);
+      current_points.push_back(candidates[k]);
+      velocities.push_back(candidates[k] - state.points[i]);
       identities.push_back(state.identities[i]);
     }
     stats.raw = raw_count > 0 ? raw / static_cast<double>(raw_count) : 0.0;
@@ -755,15 +991,28 @@ private:
 
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
   void build_device_pyramid(
-    const cv::Mat & gray, std::vector<cv::cuda::GpuMat> & pyramid) const
+    TrackState & state, const cv::Mat & gray,
+    std::vector<cv::cuda::GpuMat> & pyramid) const
   {
     // The same ladder the flow builds for itself, kept so that two calls a
     // frame do not build four pyramids where two are needed.
+    //
+    // Staged through page-locked memory and queued on the camera's stream. The
+    // pageable upload it replaces blocked until the copy had landed and could
+    // overlap with nothing, which was half the cost of building the ladder.
     pyramid.resize(static_cast<size_t>(levels_) + 1);
-    pyramid[0].upload(gray);
+    if (state.host_image.empty() || state.host_image.size() != gray.size() ||
+      state.host_image.type() != gray.type())
+    {
+      state.host_image.create(gray.rows, gray.cols, gray.type());
+    }
+    cv::Mat staged = state.host_image.createMatHeader();
+    gray.copyTo(staged);
+    pyramid[0].upload(staged, state.stream);
     for (int level = 1; level <= levels_; ++level) {
       cv::cuda::pyrDown(
-        pyramid[static_cast<size_t>(level - 1)], pyramid[static_cast<size_t>(level)]);
+        pyramid[static_cast<size_t>(level - 1)],
+        pyramid[static_cast<size_t>(level)], state.stream);
     }
   }
 
@@ -787,53 +1036,57 @@ private:
     std::vector<int64_t> & identities, FollowStats & stats, double reach)
   {
     const size_t count = state.points.size();
-    cv::Mat source(1, static_cast<int>(count), CV_32FC2);
-    for (size_t i = 0; i < count; ++i) {
-      source.at<cv::Point2f>(0, static_cast<int>(i)) = state.points[i];
-    }
+    // The points already sit in a contiguous buffer of exactly this layout, so
+    // staging them is one memcpy rather than a loop of element writes through
+    // a Mat accessor.
+    cv::Mat source = pinned(state.host_source, static_cast<int>(count), CV_32FC2);
+    std::memcpy(source.ptr(), state.points.data(), count * sizeof(cv::Point2f));
 
     // Start each search where the feature was heading, the same warm start the
     // CPU path uses: the near ground sweeps fastest and carries most of the
     // metric information, so those are the points that fall into a wrong local
     // minimum without a guess.
-    cv::Mat guess = source.clone();
+    cv::Mat guess = pinned(state.host_guess, static_cast<int>(count), CV_32FC2);
     const bool warm = warm_start_ && state.velocities.size() == count;
-    if (warm) {
-      for (size_t i = 0; i < count; ++i) {
-        guess.at<cv::Point2f>(0, static_cast<int>(i)) =
-          state.points[i] + state.velocities[i] * static_cast<float>(reach);
-      }
+    cv::Point2f * heading = guess.ptr<cv::Point2f>();
+    for (size_t i = 0; i < count; ++i) {
+      heading[i] = warm
+        ? state.points[i] + state.velocities[i] * static_cast<float>(reach)
+        : state.points[i];
     }
 
-    cv::cuda::GpuMat device_source;
-    cv::cuda::GpuMat device_forward;
-    cv::cuda::GpuMat device_status;
-    cv::cuda::GpuMat device_error;
-    device_source.upload(source);
-    device_forward.upload(guess);
+    // The whole hop is queued on the camera's stream and waited on once. Every
+    // upload, flow call and download used to synchronise on its own -- five
+    // stalls a frame where one will do, and on a 640 px frame that plumbing
+    // cost more than the flow it was carrying.
+    state.device_source.upload(source, state.stream);
+    state.device_forward.upload(guess, state.stream);
     (warm ? forward_flow_ : backward_flow_)
     ->calc(
-      state.previous_device_pyramid, pyramid, device_source, device_forward,
-      device_status, device_error);
+      state.previous_device_pyramid, pyramid, state.device_source,
+      state.device_forward, state.device_status, state.device_error,
+      state.stream);
 
-    cv::cuda::GpuMat device_backward;
-    cv::cuda::GpuMat device_backward_status;
     backward_flow_->calc(
-      pyramid, state.previous_device_pyramid, device_forward, device_backward,
-      device_backward_status);
+      pyramid, state.previous_device_pyramid, state.device_forward,
+      state.device_backward, state.device_backward_status, cv::noArray(),
+      state.stream);
 
-    cv::Mat forward;
-    cv::Mat backward;
-    cv::Mat status;
-    cv::Mat backward_status;
+    cv::Mat forward = pinned(state.host_forward, static_cast<int>(count), CV_32FC2);
+    cv::Mat backward = pinned(state.host_backward, static_cast<int>(count), CV_32FC2);
+    cv::Mat status = pinned(state.host_status, static_cast<int>(count), CV_8UC1);
+    cv::Mat backward_status =
+      pinned(state.host_backward_status, static_cast<int>(count), CV_8UC1);
+    state.device_forward.download(forward, state.stream);
+    state.device_backward.download(backward, state.stream);
+    state.device_status.download(status, state.stream);
+    state.device_backward_status.download(backward_status, state.stream);
     cv::Mat error;
-    device_forward.download(forward);
-    device_backward.download(backward);
-    device_status.download(status);
-    device_backward_status.download(backward_status);
-    if (!device_error.empty()) {
-      device_error.download(error);
+    if (!state.device_error.empty()) {
+      error = pinned(state.host_error, static_cast<int>(count), CV_32FC1);
+      state.device_error.download(error, state.stream);
     }
+    state.stream.waitForCompletion();
 
     double raw = 0.0;
     size_t raw_count = 0;
@@ -849,7 +1102,12 @@ private:
         raw += std::hypot(moved.x - state.points[i].x, moved.y - state.points[i].y);
         ++raw_count;
       }
-      if (!kept || !backward_status.at<uchar>(0, at)) {
+      // The same gates in the same order as the CPU arm, so a rejection is
+      // charged to the same counter on both. Compacting before the backward
+      // call is what the CPU does with this order; here the flow has already
+      // run over every point, since compacting on the device would cost a
+      // pass of its own to save a pass that is already cheap.
+      if (!kept) {
         ++lost;
         continue;
       }
@@ -857,12 +1115,16 @@ private:
         ++noisy;
         continue;
       }
+      if (moved.x < 0 || moved.y < 0 || moved.x >= gray.cols || moved.y >= gray.rows) {
+        continue;
+      }
+      if (!backward_status.at<uchar>(0, at)) {
+        ++lost;
+        continue;
+      }
       const cv::Point2f drift = backward.at<cv::Point2f>(0, at) - state.points[i];
       if (std::hypot(drift.x, drift.y) > backward_threshold_) {
         ++drifted;
-        continue;
-      }
-      if (moved.x < 0 || moved.y < 0 || moved.x >= gray.cols || moved.y >= gray.rows) {
         continue;
       }
       previous_points.push_back(state.points[i]);
@@ -969,19 +1231,16 @@ private:
       ++occupancy[static_cast<size_t>(cy * columns + cx)];
     }
 
-    cv::Mat mask(gray.size(), CV_8UC1, cv::Scalar(255));
-    if (skip_top_ > 0.0) {
-      const int cut = std::min(
-        static_cast<int>(skip_top_ * gray.rows), gray.rows - 1);
-      if (cut > 0) {
-        mask(cv::Rect(0, 0, gray.cols, cut)).setTo(0);
-      }
-    }
-    for (const auto & point : state.points) {
-      cv::circle(mask, point, static_cast<int>(min_distance_), 0, -1);
-    }
-
-    std::vector<cv::Point2f> found;
+    // Which cells are being refilled, settled before the mask is built.
+    //
+    // The mask is only ever read through a refilled cell's rectangle. Painting
+    // it over the whole frame and stamping every held feature into it is work
+    // the skipped cells never look at, and on a frame where nothing needs
+    // refilling it is the entire cost of this stage, paid to be thrown away.
+    // Once the grid is holding its quota -- which is the steady state, since
+    // the point of the quota is to reach it -- that is every frame.
+    std::vector<cv::Rect> refill;
+    std::vector<int> room;
     for (int cy = 0; cy < rows; ++cy) {
       for (int cx = 0; cx < columns; ++cx) {
         const int held = occupancy[static_cast<size_t>(cy * columns + cx)];
@@ -998,18 +1257,65 @@ private:
         if (cell.width < 7 || cell.height < 7) {
           continue;
         }
-        found.clear();
-        cv::goodFeaturesToTrack(
-          gray(cell), found, quota - held, quality_level_, min_distance_,
-          mask(cell), 7);
-        for (const auto & point : found) {
-          state.points.emplace_back(point.x + x0, point.y + y0);
-          // A feature seen once has no hop behind it; it starts its first
-          // search where it is. The vectors have to stay the same length or
-          // the warm start silently switches itself off.
-          state.velocities.emplace_back(0.0f, 0.0f);
-          state.identities.push_back(state.next_identity++);
+        refill.push_back(cell);
+        room.push_back(quota - held);
+      }
+    }
+    if (refill.empty()) {
+      return;
+    }
+
+    // Left uninitialised on purpose: every pixel that will be read is written
+    // below, first by the cell fill and then by the exclusion discs.
+    cv::Mat mask(gray.size(), CV_8UC1);
+    for (const auto & cell : refill) {
+      mask(cell).setTo(255);
+    }
+    if (skip_top_ > 0.0) {
+      const int cut = std::min(
+        static_cast<int>(skip_top_ * gray.rows), gray.rows - 1);
+      if (cut > 0) {
+        const cv::Rect band(0, 0, gray.cols, cut);
+        for (const auto & cell : refill) {
+          const cv::Rect hidden = cell & band;
+          if (hidden.area() > 0) {
+            mask(hidden).setTo(0);
+          }
         }
+      }
+    }
+    // A held feature only has to be stamped where it can actually block a
+    // detection, which is the refilled cells its exclusion disc reaches. The
+    // horizon band is what makes this worth doing: those features survive
+    // every hop, so their cells stop refilling, and they are exactly the ones
+    // that were being drawn every frame into a mask nobody read.
+    const int radius = static_cast<int>(min_distance_);
+    for (const auto & point : state.points) {
+      const cv::Rect disc(
+        cvRound(point.x) - radius, cvRound(point.y) - radius,
+        2 * radius + 1, 2 * radius + 1);
+      for (const auto & cell : refill) {
+        if ((disc & cell).area() > 0) {
+          cv::circle(mask, point, radius, 0, -1);
+          break;
+        }
+      }
+    }
+
+    std::vector<cv::Point2f> found;
+    for (size_t c = 0; c < refill.size(); ++c) {
+      const cv::Rect & cell = refill[c];
+      found.clear();
+      cv::goodFeaturesToTrack(
+        gray(cell), found, room[c], quality_level_, min_distance_,
+        mask(cell), 7);
+      for (const auto & point : found) {
+        state.points.emplace_back(point.x + cell.x, point.y + cell.y);
+        // A feature seen once has no hop behind it; it starts its first
+        // search where it is. The vectors have to stay the same length or
+        // the warm start silently switches itself off.
+        state.velocities.emplace_back(0.0f, 0.0f);
+        state.identities.push_back(state.next_identity++);
       }
     }
   }
@@ -1036,7 +1342,7 @@ private:
       out.data.push_back(current_points[i].x);
       out.data.push_back(current_points[i].y);
     }
-    publishers_[name]->publish(out);
+    publishers_[name]->publish(std::move(out));
     {
       // Counted at the writer itself, so the estimator's tally can be
       // compared against it without a third subscriber in the middle
@@ -1047,6 +1353,19 @@ private:
   }
 
   int processing_width_;
+  bool road_alignment_ = false;
+  std::array<double, 4> road_roi_{{0.2, 0.5, 0.8, 1.0}};
+  int road_columns_ = 3;
+  int road_rows_ = 3;
+  int road_iterations_ = 30;
+  bool road_homography_ = false;
+  int road_max_age_ = 0;
+  double road_epsilon_ = 1.0e-4;
+  // Virtual road features live in their own identity range so they can never
+  // collide with a corner's. Float32 carries integers exactly to 2^24, and the
+  // message is float32.
+  static constexpr int64_t kRoadIdentityBase = 1 << 22;
+  int64_t road_next_identity_ = kRoadIdentityBase;
   int max_features_;
   double quality_level_ = 0.01;
   double min_distance_;
