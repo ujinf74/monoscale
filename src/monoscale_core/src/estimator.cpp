@@ -1190,8 +1190,60 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       return fx < settings_.pixel_region_x0 || fx > settings_.pixel_region_x1 ||
              fy < settings_.pixel_region_y0 || fy > settings_.pixel_region_y1;
     };
+  // How far a feature swept across the frame over this solve, and whether that
+  // is more than the flow could have followed.
+  //
+  // The band above is in metres and what decides whether a feature is
+  // trackable is pixels. A ground point's angular rate goes as h/(R^2+h^2), so
+  // the near field accelerates as it approaches: at 0.89 m of camera height and
+  // 0.53 m of travel -- 8 m/s over the two frames a solve spans -- a point
+  // 0.6 m ahead sweeps 135 px against the 21 px window, while at 2 m/s the same
+  // point sweeps 29. The same metre gate admits a good feature at one speed and
+  // an untrackable one at another, and the rear camera does not have the
+  // problem at all because its ground recedes and decelerates.
+  const double disparity_limit = settings_.solve_max_pixel_flow > 0.0
+    ? settings_.solve_max_pixel_flow : std::numeric_limits<double>::infinity();
+  const auto sweep_of = [&](Eigen::Index i) {
+      return std::hypot(
+        current_pixels(i, 0) - previous_pixels(i, 0),
+        current_pixels(i, 1) - previous_pixels(i, 1));
+    };
+  // And a floor, relative to what the rest of the frame did.
+  //
+  // A flow that cannot find its feature returns the point it started from, and
+  // a point that did not move passes the forward-backward check perfectly:
+  // zero out, zero back. It is the one failure that gate cannot see. At 8 m/s
+  // the front camera's median published flow is 0.19 px against 5.24 at 4 m/s
+  // and 4.05 at 2, with only 42% of features moving more than a pixel -- more
+  // than half the frame is a feature that stayed where it was while the ground
+  // swept past it. Those vote "did not move", which is the local optimum the
+  // alignment's multi-start exists to escape.
+  double floor_flow = 0.0;
+  if (settings_.solve_min_pixel_flow > 0.0 && previous_pixels.rows() == count &&
+    count > 0)
+  {
+    std::vector<double> sweeps;
+    sweeps.reserve(static_cast<size_t>(count));
+    for (Eigen::Index i = 0; i < count; ++i) {
+      if (solved.ground_valid(i)) {
+        sweeps.push_back(sweep_of(i));
+      }
+    }
+    if (!sweeps.empty()) {
+      const size_t half = sweeps.size() / 2;
+      std::nth_element(sweeps.begin(), sweeps.begin() + half, sweeps.end());
+      floor_flow = settings_.solve_min_pixel_flow * sweeps[half];
+    }
+  }
+  const auto swept = [&](Eigen::Index i) {
+      if (previous_pixels.rows() != count) {
+        return false;
+      }
+      const double moved = sweep_of(i);
+      return moved > disparity_limit || moved < floor_flow;
+    };
   for (Eigen::Index i = 0; i < count; ++i) {
-    if (!solved.ground_valid(i) || outside(i)) {
+    if (!solved.ground_valid(i) || outside(i) || swept(i)) {
       continue;
     }
     if (std::isfinite(solve_band)) {

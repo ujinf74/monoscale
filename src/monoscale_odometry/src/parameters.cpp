@@ -309,6 +309,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.softness_from_residual = declare_double("softness_from_residual", 0.0);
   settings.fuse_camera_points = declare_bool("fuse_camera_points", false);
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
+  settings.solve_max_pixel_flow = declare_double("solve_max_pixel_flow", 0.0);
+  settings.solve_min_pixel_flow = declare_double("solve_min_pixel_flow", 0.0);
   settings.offground_anchors = declare_bool("offground_anchors", false);
   settings.offground_min_views = declare_int("offground_min_views", 5);
   settings.offground_min_parallax_deg = declare_double("offground_min_parallax_deg", 2.0);

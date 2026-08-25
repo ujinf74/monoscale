@@ -430,6 +430,16 @@ struct EstimatorSettings
   // all cost: turning it on under the displacement model takes mean ATE from
   // 0.1703 to 0.8056.
   bool align_solves_yaw = true;
+  // Largest sweep across the frame, in pixels over the whole solve, that a
+  // ground feature may have and still be used. Zero is no limit. The band this
+  // sits beside is in metres, and metres do not say whether the flow could
+  // follow it.
+  double solve_max_pixel_flow = 0.0;
+  // Smallest sweep a ground feature may have, as a fraction of the frame's
+  // median. Zero is no floor. This is the gate for a flow that never found its
+  // feature and handed back the point it started from -- which the
+  // forward-backward check passes, because zero out is zero back.
+  double solve_min_pixel_flow = 0.0;
 
   // Anchors that are not on the ground, triangulated from their own track
   // rather than read off the plane. Ground features cross the band and die in

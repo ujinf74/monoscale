@@ -581,6 +581,37 @@
     # 0.2237 -> 0.2114. The win is not an artefact of the rest of the file.
     solve_trigger_disparity_px: 12.0
 
+    # Forbid the "did not move" alignment mode by how far the filter says the
+    # vehicle went, in metres of slack around it. Off until 08-25.
+    #
+    # It was measured and shelved as neutral before the ground solve's own
+    # errors were corrected. What sent it back for another look is a count: at
+    # 8 m/s the front camera's median published flow is **0.19 px**, against
+    # 5.24 at 4 m/s and 4.05 at 2, and only 42% of its features move more than
+    # a pixel. A flow that cannot find its feature hands back the point it
+    # started from, and a point that did not move passes the forward-backward
+    # check perfectly -- zero out is zero back -- so that is the one failure
+    # the gate above cannot see. When those are the majority they *are* the
+    # consensus, and the solve reads short.
+    #
+    #   gate    0.0     0.20    0.40    0.60
+    #   mean   .1703   .1693   .1683   .1683
+    #   SD     .1308   .1250   .1260   .1265
+    #   MAX    .5325   .5125   .5127   .5138
+    #
+    # Flat over 0.2-0.6 and the repeat spread does not move at all (2.05x).
+    # The per-drive profile is the reason to take it: **eight of the eleven
+    # drives come out bit-identical**, and only the three that were struggling
+    # move -- 8 m/s -3.7%, curve_s20 -1.6%, park_obst -1.2%. It fires where the
+    # stationary mode is a real risk and nowhere else.
+    #
+    # Gating the features directly instead was tried and is much worse: a floor
+    # on pixel flow relative to the frame's median scores .1878 / .2712 / .3389
+    # at 0.3 / 0.5 / 0.85 with the repeat spread reaching 14.91x, because at
+    # low speed the far ground is legitimately slow. The mode is what wants
+    # forbidding, not the feature.
+    inertial_gate_m: 0.40
+
     # Solve the ground once from both cameras' points, rather than solving each
     # camera apart and averaging the two answers.
     #

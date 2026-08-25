@@ -42,6 +42,7 @@
 #include <utility>
 #include <vector>
 
+#include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -135,6 +136,14 @@ struct TrackState
   // Where each point moved on the hop before this one, used to start the
   // search in the right place rather than at the feature's last position.
   std::vector<cv::Point2f> velocities;
+  // The same thing said once for the whole frame instead of once per feature.
+  // Image motion of a plane between two views is exactly a homography, and the
+  // ground is a plane, so one 3x3 describes every ground feature's hop -- new
+  // ones included, which a per-feature velocity cannot. It also carries the
+  // perspective: apply it to a point that has moved closer and it returns a
+  // larger step, which is the acceleration a constant pixel velocity misses.
+  // Empty until two frames have been seen.
+  cv::Mat plane_motion;
   std::vector<int64_t> identities;
   int64_t next_identity = 0;
   // When the last frame arrived and how long the hop before it took. A
@@ -295,6 +304,8 @@ public:
     grid_columns_ = declare_parameter<int>("detection_grid_columns", 4);
     grid_rows_ = declare_parameter<int>("detection_grid_rows", 3);
     warm_start_ = declare_parameter<bool>("lk_warm_start", true);
+    predict_by_plane_ =
+      declare_parameter<bool>("lk_predict_by_plane", false);
     seed_new_from_cell_ =
       declare_parameter<bool>("lk_seed_new_from_cell", false);
     seed_min_flow_ =
@@ -587,6 +598,16 @@ private:
         static_cast<double>(gray.total());
     }
 
+    if (predict_by_plane_ && previous_points.size() >= 12 &&
+      previous_points.size() == current_points.size())
+    {
+      // RANSAC because the horizon and anything standing up are not on the
+      // plane; they are the minority and the ground is the consensus.
+      cv::Mat fitted = cv::findHomography(previous_points, current_points, cv::RANSAC, 3.0);
+      if (!fitted.empty() && fitted.rows == 3 && fitted.cols == 3) {
+        state.plane_motion = fitted;
+      }
+    }
     state.points = current_points;
     state.velocities = velocities;
     state.identities = identities;
@@ -909,7 +930,17 @@ private:
     // path predicts from the estimated motion; the front end has no access to
     // that, so it carries each feature's own last hop forward instead.
     int flags = 0;
-    if (warm_start_ && state.velocities.size() == state.points.size()) {
+    if (predict_by_plane_ && !state.plane_motion.empty() && !state.points.empty()) {
+      // One prediction for the whole frame, from the plane's last hop.
+      std::vector<cv::Point2f> warped;
+      cv::perspectiveTransform(state.points, warped, state.plane_motion);
+      forward.resize(state.points.size());
+      for (size_t i = 0; i < state.points.size(); ++i) {
+        const cv::Point2f step = warped[i] - state.points[i];
+        forward[i] = state.points[i] + step * static_cast<float>(reach);
+      }
+      flags = cv::OPTFLOW_USE_INITIAL_FLOW;
+    } else if (warm_start_ && state.velocities.size() == state.points.size()) {
       forward.resize(state.points.size());
       for (size_t i = 0; i < state.points.size(); ++i) {
         forward[i] = state.points[i] +
@@ -1450,6 +1481,7 @@ private:
   double error_threshold_;
   double refill_ratio_;
   bool warm_start_;
+  bool predict_by_plane_ = false;
   bool seed_new_from_cell_ = false;
   float seed_min_flow_ = 8.0f;
   bool use_cuda_ = false;
