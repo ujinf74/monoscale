@@ -27,6 +27,7 @@
 #include "monoscale_core/attitude.hpp"
 #include "monoscale_core/fusion.hpp"
 #include "monoscale_core/geometry.hpp"
+#include "monoscale_core/landmark.hpp"
 #include "monoscale_core/inertial.hpp"
 #include "monoscale_core/strapdown.hpp"
 
@@ -448,6 +449,14 @@ struct EstimatorSettings
   // this is that drift priced in, instead of the hard age cutoff pretending it
   // is worth the same until the moment it is thrown away.
   double anchor_drift_variance_per_m = 0.0;
+
+  // Everything the cameras see, in one filter, with one covariance.
+  //
+  // The ground and the structure above it stop being different code and become
+  // different priors on a range. See landmark.hpp: this is the switch that
+  // hands the hop to that filter instead of to the two solvers.
+  bool landmark_filter = false;
+  LandmarkSettings landmark;
   // Whether the anchor alignment estimates the heading itself when a filter
   // exists that could consume one. It only ever did because such a filter
   // implies a gyro bias state, and a bias is only observable against an
@@ -494,6 +503,10 @@ struct EstimatorSettings
   // bearings. Zero never rebuilds, which lets it carry whatever the pose has
   // drifted since it was fixed.
   int offground_refresh_frames = 0;
+  // Keep a window of recent observations and re-solve the point every frame,
+  // the way a ground anchor is re-averaged every sighting, instead of fixing it
+  // once from whatever poses happened to be current then.
+  bool offground_rolling = false;
   double curvature_scale_gain = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;
@@ -701,6 +714,10 @@ struct Diagnostics
   // rather than from the feature's own previous sighting.
   int64_t unified_votes = 0;
   int64_t unified_from_map = 0;
+  // How much structure the unified filter is holding, and how many sightings
+  // it took.
+  int64_t landmarks = 0;
+  int64_t landmark_used = 0;
   int64_t zupt_holds = 0;
   int64_t obstacles_unavailable = 0;
   // Temporary instrumentation: where the slip obstacle path loses its
@@ -936,6 +953,10 @@ private:
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;
   std::unique_ptr<PlanarMsckfFilter> msckf_filter_;
   std::unique_ptr<SpatialMsckfFilter> spatial_filter_;
+  std::unique_ptr<LandmarkFilter> landmark_;
+  Eigen::Vector2d landmark_hop_ = Eigen::Vector2d::Zero();
+  Eigen::Vector3d landmark_previous_ = Eigen::Vector3d::Zero();
+  int64_t landmark_frame_ = 0;
   // World frame velocity from whichever filter this run is actually running.
   // Only one of the four is fed vision; the other three are propagated on the
   // accelerometer alone and drift without bound, so asking the wrong one is

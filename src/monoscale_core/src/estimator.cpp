@@ -282,6 +282,9 @@ Estimator::Estimator(const EstimatorSettings & settings)
     cameras_.back()->model.level_frame_origin = settings.level_frame_origin;
   }
 
+  if (settings.landmark_filter) {
+    landmark_ = std::make_unique<LandmarkFilter>(settings.landmark);
+  }
   if (settings.attitude_from_imu) {
     attitude_ = std::make_unique<AttitudeFilter>(
       settings.attitude_tau_sec, settings.attitude_gravity_tolerance);
@@ -782,24 +785,25 @@ void Estimator::record_offground(Camera & camera)
     }
     auto & track = camera.offground[identity];
     track.seen = camera.offground_frame;
-    if (track.solved) {
-      // A point fixed from one stretch of pose and read against another is an
-      // anchor that carries the drift between them. The ground anchors do not
-      // have the problem because they are averaged over every sighting; these
-      // are triangulated once, so they have to be triangulated again.
-      if (settings_.offground_refresh_frames <= 0 ||
-        camera.offground_frame - track.fixed < settings_.offground_refresh_frames)
-      {
-        continue;
-      }
-      track.solved = false;
-      track.centres.clear();
-      track.bearings.clear();
+    if (track.solved && settings_.offground_refresh_frames > 0 &&
+      camera.offground_frame - track.fixed < settings_.offground_refresh_frames)
+    {
+      continue;
     }
-    // Keep the oldest -- it is half the baseline -- and drop from just after it.
+    // A ground anchor works because every sighting moves it, so it follows the
+    // pose that is reading it. One triangulated once and frozen does not: it
+    // keeps the drift between the pose that fixed it and the pose asking. So
+    // this is a rolling window -- the oldest observation leaves, the newest
+    // arrives, and the point is solved again from what is currently in it.
+    //
+    // Rebuilding it every N frames instead was measured and is erratic (6 / 8 /
+    // 12 / 15 frames score .1853 / .2441 / .1805 / .2234): a discrete rebuild
+    // makes the estimate jump, and the jump is what the alignment sees.
     if (track.centres.size() >= cap) {
-      track.centres.erase(track.centres.begin() + 1);
-      track.bearings.erase(track.bearings.begin() + 1);
+      track.centres.erase(
+        track.centres.begin() + (settings_.offground_rolling ? 0 : 1));
+      track.bearings.erase(
+        track.bearings.begin() + (settings_.offground_rolling ? 0 : 1));
     }
     track.centres.push_back(centre);
     track.bearings.push_back(bearing);
@@ -849,11 +853,15 @@ void Estimator::record_offground(Camera & camera)
       continue;
     }
     track.world = point;
+    if (!track.solved) {
+      ++diagnostics_.offground_anchors;
+    }
     track.solved = true;
     track.fixed = camera.offground_frame;
-    track.centres.clear();
-    track.bearings.clear();
-    ++diagnostics_.offground_anchors;
+    if (!settings_.offground_rolling) {
+      track.centres.clear();
+      track.bearings.clear();
+    }
   }
 
   // Anything not seen this frame for a while is gone; the tracker will not
@@ -1923,6 +1931,89 @@ void Estimator::process_pair()
     fusion_weights.clear();
   }
   auto motion = fuse_planar_motions(motions, fusion_weights);
+
+  // Or hand the hop to the one filter that holds everything at once.
+  //
+  // Both cameras' sightings go into a single update against a single state, so
+  // there is nothing to fuse afterwards and no choice to make between a map
+  // and a fallback. A feature whose ray meets the road arrives with a tight
+  // range prior; one that does not arrives with none and waits for its own
+  // parallax. That is the entire difference between them here.
+  if (landmark_ && yaw_delta.has_value() && dt > 1e-4) {
+    ++landmark_frame_;
+    // Predicted with whatever the vision solve already found, falling back to
+    // carrying the last step forward. A filter is entitled to any prediction;
+    // starting from zero is a deadlock, because nothing can move the pose until
+    // a sighting is accepted and no sighting is accepted while the pose is a
+    // step behind.
+    const Eigen::Vector2d guess = motion.has_value()
+      ? Eigen::Vector2d(motion->x, motion->y) : landmark_hop_;
+    landmark_->predict(guess, *yaw_delta);
+    const auto tilt = body_tilt();
+    Eigen::Matrix3d level = Eigen::Matrix3d::Identity();
+    if (tilt.has_value()) {
+      level = *tilt;
+    }
+    std::vector<LandmarkFilter::Sighting> seen;
+    seen.reserve(1024);
+    for (size_t c = 0; c < solved.size(); ++c) {
+      if (!solved[c].has_value()) {
+        continue;
+      }
+      const auto & entry = *solved[c];
+      const Eigen::Index count = entry.track_ids.size();
+      if (count == 0 || entry.current_pixels.rows() != count) {
+        continue;
+      }
+      const auto & camera = *cameras_[c];
+      const Eigen::Vector3d mount = level * camera.model.translation_base_from_camera;
+      const auto rays = pixels_to_bearings(entry.current_pixels, camera.model);
+      for (Eigen::Index i = 0; i < count; ++i) {
+        LandmarkFilter::Sighting sighting;
+        // The two cameras issue identities from their own counters, so the
+        // source has to be part of the name or they collide in one state.
+        sighting.identity = (entry.track_ids(i) << 3) | static_cast<int64_t>(c);
+        sighting.mount = mount;
+        sighting.bearing = level * rays.row(i).transpose();
+        if (!sighting.bearing.allFinite() || sighting.bearing.norm() < 0.5) {
+          continue;
+        }
+        sighting.bearing.normalize();
+        if (entry.ground_valid.size() == count && entry.ground_valid(i)) {
+          // The plane already answered for this one; the range along the ray is
+          // how far its intersection sits from the lens.
+          const Eigen::Vector3d point(
+            entry.current_ground(i, 0), entry.current_ground(i, 1), 0.0);
+          const double range = (point - mount).norm();
+          if (range > 0.1 && range < 40.0) {
+            sighting.ground_range = range;
+          }
+        }
+        seen.push_back(sighting);
+      }
+    }
+    const int used = landmark_->observe(seen, landmark_frame_);
+    landmark_->retire(landmark_frame_);
+    diagnostics_.landmarks = static_cast<int64_t>(landmark_->landmarks());
+    diagnostics_.landmark_used += used;
+    const Eigen::Vector3d now = landmark_->pose();
+    const double cp = std::cos(landmark_previous_.z());
+    const double sp = std::sin(landmark_previous_.z());
+    const double dx = now.x() - landmark_previous_.x();
+    const double dy = now.y() - landmark_previous_.y();
+    landmark_hop_ = Eigen::Vector2d(cp * dx + sp * dy, -sp * dx + cp * dy);
+    landmark_previous_ = now;
+    if (used > 0) {
+      if (!motion.has_value()) {
+        motion = PlanarMotion{landmark_hop_.x(), landmark_hop_.y(), *yaw_delta, used, 1.0};
+      } else {
+        motion->x = landmark_hop_.x();
+        motion->y = landmark_hop_.y();
+        motion->inliers = used;
+      }
+      aligned_from_map = true;
+    }
+  }
 
   // One solve over every reference there is.
   //

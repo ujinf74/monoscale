@@ -313,6 +313,18 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.unified_exclusive = declare_bool("unified_exclusive", false);
   settings.anchor_drift_variance_per_m =
     declare_double("anchor_drift_variance_per_m", 0.0);
+  settings.landmark_filter = declare_bool("landmark_filter", false);
+  settings.landmark.bearing_noise_rad = declare_double("landmark_bearing_noise_rad", 0.0019);
+  settings.landmark.hop_process_noise_m = declare_double("landmark_hop_noise_m", 0.08);
+  settings.landmark.yaw_noise_rad = declare_double("landmark_yaw_noise_rad", 0.002);
+  settings.landmark.range_from_plane = declare_bool("landmark_range_from_plane", true);
+  settings.landmark.initialise_parallax_rad =
+    declare_double("landmark_parallax_rad", 0.035);
+  settings.landmark.initialise_min_views = declare_int("landmark_min_views", 4);
+  settings.landmark.retire_unseen_frames = declare_int("landmark_retire_frames", 60);
+  settings.landmark.max_landmarks = declare_int("landmark_capacity", 300);
+  settings.landmark.reject_chi_square = declare_double("landmark_reject_chi2", 9.0);
+  settings.landmark.iterations = declare_int("landmark_iterations", 3);
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
   settings.solve_max_pixel_flow = declare_double("solve_max_pixel_flow", 0.0);
   settings.solve_min_pixel_flow = declare_double("solve_min_pixel_flow", 0.0);
@@ -328,6 +340,7 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_double("offground_residual_range_m", 5.0);
   settings.offground_refresh_frames =
     declare_int("offground_refresh_frames", 0);
+  settings.offground_rolling = declare_bool("offground_rolling", false);
   settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);

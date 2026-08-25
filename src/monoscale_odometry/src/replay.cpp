@@ -826,12 +826,14 @@ int main(int argc, char ** argv)
   const auto & diagnostics = estimator.diagnostics();
   std::printf(
     "pairs=%ld solves=%ld estimates=%zu failures=%ld (nosolve=%ld trans=%ld yaw=%ld) "
-    "coasted=%ld yaw_misses=%ld anchors=%d offground=%ld/%ld map_frames=%ld evicted=%ld "
+    "coasted=%ld yaw_misses=%ld anchors=%d offground=%ld/%ld landmarks=%ld/%ld "
+    "map_frames=%ld evicted=%ld "
     "link[n=%ld gap=%.4fm range=%.2fm gap/range=%.5f]\n",
     diagnostics.pairs_seen, diagnostics.frames_processed, estimates.size(),
     diagnostics.motion_failures, diagnostics.fail_no_solve, diagnostics.fail_translation,
     diagnostics.fail_yaw, diagnostics.coasted, diagnostics.imu_yaw_misses, diagnostics.anchors,
     diagnostics.offground_live, diagnostics.offground_anchors,
+    diagnostics.landmarks, diagnostics.landmark_used,
     diagnostics.map_aligned_frames, diagnostics.frames_evicted,
     diagnostics.anchors_adopted, diagnostics.link_gap_m, diagnostics.link_range_m,
     diagnostics.link_gap_per_m);
