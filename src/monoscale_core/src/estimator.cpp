@@ -182,6 +182,12 @@ struct Estimator::Solved
   Identities track_ids;
   std::optional<PlanarMotion> motion;
   bool anchored_from_map = false;
+  // The banded, paired ground points this camera contributed, in base_link at
+  // each of the two frames. Both cameras' points live in the same frame and
+  // describe the same hop, so they can be solved together rather than solved
+  // apart and averaged. Only filled when that is asked for.
+  Points2 pair_previous;
+  Points2 pair_current;
   double spread = 0.0;
   // How well this camera pinned the heading down, when it was asked to solve
   // for one. Infinite when it was not.
@@ -1072,6 +1078,19 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     usable.push_back(i);
   }
 
+  if (settings_.fuse_camera_points) {
+    const Eigen::Index kept = static_cast<Eigen::Index>(usable.size());
+    solved.pair_previous.resize(kept, 2);
+    solved.pair_current.resize(kept, 2);
+    for (Eigen::Index i = 0; i < kept; ++i) {
+      const Eigen::Index at = usable[static_cast<size_t>(i)];
+      solved.pair_previous(i, 0) = solved.previous_ground(at, 0);
+      solved.pair_previous(i, 1) = solved.previous_ground(at, 1);
+      solved.pair_current(i, 0) = solved.current_ground(at, 0);
+      solved.pair_current(i, 1) = solved.current_ground(at, 1);
+    }
+  }
+
   Identities usable_ids(static_cast<Eigen::Index>(usable.size()));
   for (size_t i = 0; i < usable.size(); ++i) {
     usable_ids(static_cast<Eigen::Index>(i)) = track_ids(usable[i]);
@@ -1621,6 +1640,52 @@ void Estimator::process_pair()
     fusion_weights.clear();
   }
   auto motion = fuse_planar_motions(motions, fusion_weights);
+  // Or one solve over everything both cameras saw. The average above treats
+  // each camera's answer as a measurement and weighs them; this treats the
+  // ground itself as the measurement, which is what it is. The body is rigid,
+  // the points are already in base_link, and the hop is the same hop.
+  // Only where the map could not answer. Overwriting a map-anchored hop with a
+  // two-frame one throws away the thing that bounds the random walk, which is
+  // a different experiment from the one this switch is for.
+  bool any_anchored = false;
+  for (const auto & entry : solved) {
+    any_anchored = any_anchored || (entry.has_value() && entry->anchored_from_map);
+  }
+  if (settings_.fuse_camera_points && !any_anchored &&
+    yaw_delta.has_value() && motion.has_value())
+  {
+    Eigen::Index total = 0;
+    for (const auto & entry : solved) {
+      if (entry.has_value()) {
+        total += entry->pair_previous.rows();
+      }
+    }
+    if (total >= settings_.ground_min_inliers) {
+      Points2 pooled_previous(total, 2);
+      Points2 pooled_current(total, 2);
+      Eigen::Index at = 0;
+      for (const auto & entry : solved) {
+        if (!entry.has_value() || entry->pair_previous.rows() == 0) {
+          continue;
+        }
+        const Eigen::Index rows = entry->pair_previous.rows();
+        pooled_previous.block(at, 0, rows, 2) = entry->pair_previous;
+        pooled_current.block(at, 0, rows, 2) = entry->pair_current;
+        at += rows;
+      }
+      const double pooled_gate = settings_.ground_ransac_threshold_m +
+        settings_.ground_rotation_threshold_m * std::abs(*yaw_delta);
+      const auto pooled = estimate_planar_motion_with_yaw(
+        pooled_previous, pooled_current, *yaw_delta, pooled_gate,
+        settings_.ground_min_inliers, settings_.ground_pair_softness_m, Weights(),
+        settings_.ground_pair_passes);
+      if (pooled.has_value()) {
+        motion->x = pooled->motion.x;
+        motion->y = pooled->motion.y;
+        motion->inliers = pooled->motion.inliers;
+      }
+    }
+  }
   if (settings_.fuse_cameras_by_spread && all_have_spread &&
     precision_inputs.size() == motions.size() && motion.has_value())
   {

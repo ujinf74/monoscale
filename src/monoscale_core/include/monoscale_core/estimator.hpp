@@ -419,6 +419,10 @@ struct EstimatorSettings
   // Sharing one scale between the cameras instead of one each is worse again
   // (0.2135 at 2.0), so it is not the two-camera weighting. Left at 0.
   double softness_from_residual = 0.0;
+  // Solve both cameras' ground points together instead of solving each camera
+  // apart and averaging the two answers. Their points are already in base_link
+  // and describe the same hop, so this is the fusion the geometry allows.
+  bool fuse_camera_points = false;
   double curvature_scale_gain = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;

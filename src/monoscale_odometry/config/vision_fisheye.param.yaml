@@ -580,6 +580,34 @@
     # curvature gain it wins 0.1946 -> 0.1813, and at the old softness widths
     # 0.2237 -> 0.2114. The win is not an artefact of the rest of the file.
     solve_trigger_disparity_px: 12.0
+
+    # Solve the ground once from both cameras' points, rather than solving each
+    # camera apart and averaging the two answers.
+    #
+    # The average treats each camera's answer as a measurement and weighs them
+    # by inlier count. But the measurement is the ground, not the answer: both
+    # cameras' points come out of pixels_to_ground already in base_link, and
+    # both describe the same hop of the same rigid body. Pooling them is one
+    # consensus over twice the points, spanning the front band 2.2-5.2 m and
+    # the rear -2.3-0.65 m at once, which conditions the fit better than either
+    # can alone.
+    #
+    #   MEAN .1807 -> .1703, SD .1390 -> .1308, MAX .5522 -> .5325,
+    #   repeat 2.05x unchanged.
+    #
+    # Five drives improve meaningfully, led by park -17% and curve_s10 -17%;
+    # four are flat and curve_s05 and curve_s20 pay 2%. It holds on orthogonal
+    # settings: at the old solve trigger .1895 -> .1795, at the old softness
+    # widths .2237 -> .2057.
+    #
+    # **Only where the map could not answer.** Pooling over the map path as
+    # well scores .2778 with the repeat spread at 3.73x, because overwriting a
+    # map-anchored hop with a two-frame one throws away the thing that bounds
+    # the random walk. The scale stays right either way (1.006 against the
+    # average's 1.001) -- what is lost is the map, not the geometry. Pooling
+    # the map path too would need the two cameras to share anchors, and that
+    # loses for its own reasons: see the anchor_link_radius_m notes.
+    fuse_camera_points: true
     # 1.0 was set against 20 Hz frames, where it caps the vehicle at 20 m/s.
     # The solve is triggered by accumulated parallax rather than by frame, so
     # at 60 Hz one solve closes several frames and the interval it covers is
