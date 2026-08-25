@@ -49,8 +49,25 @@
     # the accelerometer is held at noise 1.55, i.e. barely consulted, so the
     # correction buys less than the gyro differentiation it costs.
     #
-    # Set it to [1.35, 0.0, 0.34] on a rig whose accelerometer is actually
+    # Set it to [1.35, 0.0, 0.3772] on a rig whose accelerometer is actually
     # trusted. The physics does not stop being right here.
+    #
+    # 0.3772, not the 0.34 the sensor kit lists: that file measures z from the
+    # CARLA actor origin, which sits actor_origin_height_m = 0.0372 off the
+    # road, while base_link here is on the road -- which is exactly why the
+    # camera heights below read 0.89 and 1.26 rather than the kit's 0.8528 and
+    # 1.2228. The cameras got that correction and the arm did not. It barely
+    # matters for a road vehicle: the rotation is nearly all yaw, and both
+    # alpha x r and omega x (omega x r) drop the z component of r under a
+    # z-axis rotation, so this is correctness rather than accuracy.
+    #
+    # Measured with the arm on at the corrected softness: 0.1951 -> 0.1964,
+    # inside the +-2% this harness resolves. Neutral, not a loss -- the earlier
+    # note that compensating it "costs" was reading noise as signal. Scored
+    # against the truth attitude instead, where it should show if anywhere, it
+    # moves the combined roll+pitch error 0.450 -> 0.456 deg, and the only
+    # drive that improves is park_clean at -5.5%, which is the one drive where
+    # the term was measured to be large.
     imu_translation_base_from_imu: [0.0, 0.0, 0.0]
     imu_angular_accel_tau_sec: 0.05
     use_imu_yaw: true

@@ -240,7 +240,20 @@ int main(int argc, char ** argv)
   double distance = 0.0;
   double segment = 1.0;
   double tolerance = 0.05;
-  double wheel_base = 2.8192;
+  // Where the truth pose is reported, ahead of the point the stack estimates.
+  //
+  // Half the wheelbase is the obvious guess and it is not the right quantity:
+  // CARLA reports the actor origin, which is the centre of the bounding box,
+  // and the box centre of the vehicle this rig drives sits 1.399 m ahead of
+  // the rear axle against a 2.8192 m wheelbase. Confirmed independently from
+  // the truth alone -- regressing the reported point's lateral velocity on the
+  // yaw rate locates the point that does not slide sideways, and on the
+  // best-conditioned drives that lands at 1.29 to 1.35 m, biased forward by
+  // whatever side-slip the manoeuvre has.
+  //
+  // Worth 0.3% of mean ATE here, which is inside the noise; it is applied
+  // because it is the right number, not because it measured better.
+  double truth_offset_m = 1.399;
   std::vector<std::string> ros_arguments{"--ros-args"};
 
   for (int i = 1; i < argc; ++i) {
@@ -264,8 +277,8 @@ int main(int argc, char ** argv)
       segment = std::stod(next());
     } else if (argument == "--tolerance") {
       tolerance = std::stod(next());
-    } else if (argument == "--wheel-base") {
-      wheel_base = std::stod(next());
+    } else if (argument == "--truth-offset") {
+      truth_offset_m = std::stod(next());
     } else if (bag.empty()) {
       bag = argument;
     }
@@ -350,13 +363,13 @@ int main(int argc, char ** argv)
       const auto pose =
         deserialize<geometry_msgs::msg::PoseWithCovarianceStamped>(serialized);
       const double yaw = yaw_of(pose.pose.pose.orientation);
-      // The truth reports the vehicle centre; the stack estimates the rear
-      // axle, so it is shifted back along the heading.
+      // The truth reports the box centre; the stack estimates the rear axle,
+      // so it is shifted back along the heading.
       truth.push_back(
         Sample{
           stamp_of(pose.header),
-          pose.pose.pose.position.x - 0.5 * wheel_base * std::cos(yaw),
-          pose.pose.pose.position.y - 0.5 * wheel_base * std::sin(yaw), yaw});
+          pose.pose.pose.position.x - truth_offset_m * std::cos(yaw),
+          pose.pose.pose.position.y - truth_offset_m * std::sin(yaw), yaw});
       continue;
     } else {
       continue;
