@@ -128,10 +128,27 @@ int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
 
 double GroundAnchorMap::weight_at(int64_t slot) const
 {
-  const double count = settings_.weight_by_information
+  double count = settings_.weight_by_information
     ? information_(slot)
     : static_cast<double>(
     std::min<int64_t>(observation_(slot), settings_.max_observations));
+  // What the anchor has stopped being sure of since it was written.
+  //
+  // An anchor is a world position, and the pose that put it there has moved on
+  // since. The distance travelled since it was founded is what that costs: the
+  // measured disagreement between the two cameras over ground one of them drove
+  // across earlier runs at 8% of range, and it did not shrink when the pose got
+  // three times better, so it is drift and it accumulates with the path.
+  //
+  // The map's only answer to this today is a hard age cutoff, and that cutoff
+  // has a *sharp* optimum -- 120 / 180 / 250 / 350 / 500 frames score 0.3925 /
+  // 0.2369 / 0.1895 / 0.2248 / 0.2396. A sharp optimum on a hard gate is what a
+  // soft one looks like from the outside, which is the third time in this
+  // estimator that has been true.
+  if (settings_.drift_variance_per_m > 0.0) {
+    const double travelled = std::max(path_ - founded_path_(slot), 0.0);
+    count /= 1.0 + settings_.drift_variance_per_m * travelled;
+  }
   if (!settings_.select_by_consistency) {
     return count;
   }

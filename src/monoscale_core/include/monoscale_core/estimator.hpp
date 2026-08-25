@@ -442,6 +442,12 @@ struct EstimatorSettings
   // anchor's own observation count is applied.
   double unified_anchor_weight = 1.0;
   bool unified_exclusive = false;
+
+  // How much an anchor's weight decays per metre driven since it was founded.
+  // An anchor is a world position and the pose that wrote it has drifted since;
+  // this is that drift priced in, instead of the hard age cutoff pretending it
+  // is worth the same until the moment it is thrown away.
+  double anchor_drift_variance_per_m = 0.0;
   // Whether the anchor alignment estimates the heading itself when a filter
   // exists that could consume one. It only ever did because such a filter
   // implies a gyro bias state, and a bias is only observable against an

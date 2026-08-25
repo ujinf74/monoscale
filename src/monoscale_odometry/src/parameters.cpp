@@ -311,6 +311,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.unified_solve = declare_bool("unified_solve", false);
   settings.unified_anchor_weight = declare_double("unified_anchor_weight", 1.0);
   settings.unified_exclusive = declare_bool("unified_exclusive", false);
+  settings.anchor_drift_variance_per_m =
+    declare_double("anchor_drift_variance_per_m", 0.0);
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
   settings.solve_max_pixel_flow = declare_double("solve_max_pixel_flow", 0.0);
   settings.solve_min_pixel_flow = declare_double("solve_min_pixel_flow", 0.0);

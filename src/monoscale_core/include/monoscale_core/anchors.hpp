@@ -89,6 +89,9 @@ struct AnchorSettings
   // information can run, so using it here is bounded too.
   bool weight_by_information = false;
   bool link_measure_only = false;
+  // How fast an anchor's worth decays with the distance driven since it was
+  // founded. Zero keeps the hard age cutoff on its own.
+  double drift_variance_per_m = 0.0;
 };
 
 // World positions of ground features, refined over the frames they survive.

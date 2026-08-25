@@ -251,6 +251,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.link_rebind_grace_frames = settings.anchor_link_rebind_grace;
   anchor_settings.evict_by_age = settings.anchor_evict_by_age;
   anchor_settings.evict_for_new = settings.anchor_evict_for_new;
+  anchor_settings.drift_variance_per_m = settings.anchor_drift_variance_per_m;
 
   // One map, every camera. The capacity parameter stays per camera so the
   // configured number keeps its meaning.
