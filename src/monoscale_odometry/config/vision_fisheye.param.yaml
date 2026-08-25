@@ -506,7 +506,30 @@
     # drive, and the slow drive and clean park pay 21% and 15% -- both are
     # manoeuvres where the true tilt is real and a slower filter tracked its
     # mean better.
-    attitude_tau_sec: 15.0
+    #
+    # 15 -> 8 on 2026-08-26, and the reason is mechanical rather than a better
+    # score. Differencing the deployed trajectory against truth per hop, the
+    # along-track error is not a random walk: its autocorrelation runs +0.29,
+    # +0.44, +0.35, +0.28, +0.19 at lags 1, 2, 5, 10, 20 and only dies by 50.
+    # The same points solved with truth heading give a white residual -- lag 2
+    # to 100 all inside +-0.09 -- so the persistence is manufactured here, and
+    # it is what makes nv2 accumulate 0.142 m where its own hop noise supports
+    # 0.069. A slow tilt estimate is exactly a slow error in the plane every
+    # range is measured against. At tau 2 the correlation is gone (lag 2 +0.14)
+    # and that drive ends at 0.042.
+    #
+    # The whole basin holds on the harness -- 5 / 6 / 8 / 10 give 0.1624 /
+    # 0.1644 / 0.1639 / 0.1629, inside each other's noise -- so ATE cannot pick
+    # inside it. The truth-measured tilt error can, and it reads 0.39 / 0.40 /
+    # 0.45 degrees at 5 / 8 / 15: the two measurements now meet, where before
+    # ATE wanted 12-15 and the truth wanted 5-8. Taking 8 rather than 5 because
+    # the repeat spread separates them (1.85x against 2.18x) where the mean
+    # does not.
+    #
+    # tau 2 is better still on nv2 and worse overall (0.1773): it wins the two
+    # sharp curves outright (s10 0.2121 -> 0.1401, s20 0.1258 -> 0.0772) and
+    # loses the slow straight and both parks. No single tau holds both.
+    attitude_tau_sec: 8.0
     # Left at 0.3. The gate is on the magnitude of the specific force, and for
     # a lateral acceleration the magnitude only grows as a^2/2g while the
     # apparent vertical tilts by atan(a/g) -- so 0.3 admits 2.43 m/s2, which is
