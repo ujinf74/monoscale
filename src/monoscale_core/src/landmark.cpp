@@ -86,14 +86,69 @@ void LandmarkFilter::world_of(
   ray = turn * sighting.bearing;
 }
 
+double LandmarkFilter::contribution(const Entry & entry) const
+{
+  // How much of the pose's uncertainty this landmark is holding down. Not a
+  // proxy for it -- the joint covariance is carried precisely so this can be
+  // read off, and a landmark uncorrelated with the pose is earning nothing
+  // however certain it is of its own position.
+  const Eigen::Matrix3d own = covariance_.block<3, 3>(entry.at, entry.at);
+  const Eigen::Matrix3d cross = covariance_.block<3, 3>(0, entry.at);
+  Eigen::Matrix3d inverse;
+  double determinant = 0.0;
+  bool invertible = false;
+  own.computeInverseAndDetWithCheck(inverse, determinant, invertible);
+  if (!invertible || !(determinant > 0.0)) {
+    return 0.0;
+  }
+  return (cross * inverse * cross.transpose()).trace();
+}
+
+std::optional<std::pair<int64_t, double>> LandmarkFilter::weakest() const
+{
+  std::optional<std::pair<int64_t, double>> worst;
+  for (const auto & held : index_) {
+    const double earning = contribution(held.second);
+    if (!worst.has_value() || earning < worst->second) {
+      worst = std::make_pair(held.first, earning);
+    }
+  }
+  return worst;
+}
+
 bool LandmarkFilter::admit(
   int64_t identity, const Eigen::Vector3d & position, const Eigen::Matrix3d & block,
   const Eigen::Matrix3d & by_pose)
 {
-  if (index_.count(identity) > 0 ||
-    static_cast<int>(order_.size()) >= settings_.max_landmarks)
-  {
+  if (index_.count(identity) > 0) {
     return false;
+  }
+  if (static_cast<int>(order_.size()) >= settings_.max_landmarks) {
+    // Full. Either the newcomer is worth more than the worst seat, or it is
+    // not; refusing on arrival order is what starved this filter.
+    if (!settings_.evict_by_contribution || evictions_left_ <= 0) {
+      return false;
+    }
+    // The newcomer's coupling is the pose error it inherits, which is what
+    // `by_pose` carries: it knows about the pose exactly as much as it was
+    // built from it.
+    const Eigen::Matrix3d incoming = by_pose * covariance_.topLeftCorner<3, 3>();
+    Eigen::Matrix3d inverse;
+    double determinant = 0.0;
+    bool invertible = false;
+    (by_pose * covariance_.topLeftCorner<3, 3>() * by_pose.transpose() + block)
+      .computeInverseAndDetWithCheck(inverse, determinant, invertible);
+    if (!invertible || !(determinant > 0.0)) {
+      return false;
+    }
+    const double earning = (incoming * inverse * incoming.transpose()).trace();
+    const auto worst = weakest();
+    if (!worst.has_value() || worst->second >= earning) {
+      return false;
+    }
+    drop(worst->first);
+    --evictions_left_;
+    ++evicted_;
   }
   const Eigen::Index n = size();
   Eigen::MatrixXd grown = Eigen::MatrixXd::Zero(n + 3, n + 3);
@@ -151,6 +206,7 @@ void LandmarkFilter::drop(int64_t identity)
 int LandmarkFilter::observe(const std::vector<Sighting> & sightings, int64_t frame)
 {
   seen_frame_ = frame;
+  evictions_left_ = settings_.evict_per_frame;
   // Everything this frame saw, in one update.
   //
   // Sequentially is cheaper and wrong in a way that matters: each update moves

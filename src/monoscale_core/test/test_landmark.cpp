@@ -171,3 +171,29 @@ TEST(LandmarkFilter, GroundFeaturesTakeNoSeatAndAreNotMissed)
   EXPECT_NEAR(filter.pose().x(), truth.x(), 0.10)
     << "structure alone could not recover the step the prediction withheld";
 }
+
+TEST(LandmarkFilter, AFullStateTurnsOverInsteadOfRefusingTheNewcomer)
+{
+  // Seats are finite and the vehicle drives away from whatever filled them
+  // first. With the newcomer simply refused, the state is whatever was in view
+  // at the start; with the seats compared, it has to follow the vehicle.
+  const auto points = world();
+  LandmarkSettings settings;
+  settings.bearing_noise_rad = 0.002;
+  settings.max_landmarks = 40;
+  settings.retire_unseen_frames = 10000;   // the clock must not do this for us
+  settings.evict_by_contribution = true;
+  LandmarkFilter filter(settings);
+
+  Eigen::Vector3d truth = Eigen::Vector3d::Zero();
+  const double step = 0.15;
+  for (int i = 0; i < 60; ++i) {
+    truth.x() += step;
+    filter.predict(Eigen::Vector2d(step, 0.0), 0.0);
+    filter.observe(look(points, truth), i);
+    filter.retire(i);
+  }
+  EXPECT_EQ(filter.landmarks(), 40u) << "the seats should be full";
+  EXPECT_GT(filter.evicted(), 0) << "nothing was ever displaced from a full state";
+  EXPECT_NEAR(filter.pose().x(), truth.x(), 0.15);
+}

@@ -324,6 +324,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.landmark.initialise_min_views = declare_int("landmark_min_views", 4);
   settings.landmark.retire_unseen_frames = declare_int("landmark_retire_frames", 60);
   settings.landmark.max_landmarks = declare_int("landmark_capacity", 300);
+  settings.landmark.evict_by_contribution = declare_bool("landmark_evict", true);
+  settings.landmark.evict_per_frame = declare_int("landmark_evict_per_frame", 24);
   settings.landmark.reject_chi_square = declare_double("landmark_reject_chi2", 9.0);
   settings.landmark.iterations = declare_int("landmark_iterations", 3);
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);

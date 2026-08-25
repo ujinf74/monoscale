@@ -89,6 +89,28 @@ struct LandmarkSettings
   int retire_unseen_frames = 60;
   int max_landmarks = 4000;
 
+  // What happens when the seats are full.
+  //
+  // Refusing the newcomer makes the seats first-come: whatever was in view when
+  // the filter started holds them until the clock retires it, and measurably
+  // starves the thing -- 150 seats held while only 36 sightings a frame were
+  // used. So compare instead. A landmark is worth its certainty and the number
+  // of times it has actually been re-observed, and the newcomer has to beat the
+  // worst incumbent to take its place.
+  //
+  // What a seat earns is measured rather than proxied. The anchor map's rule --
+  // observations over variance -- was tried here first and lost badly, because
+  // certainty is the wrong currency once the ranges spread: a near point is
+  // certain and out of view in three frames, while a far one is vague and is
+  // the only thing that can measure a long baseline. What is wanted is how much
+  // the landmark actually knows about the pose, and the joint covariance
+  // already holds it: trace(P_pl P_ll^-1 P_lp) is the pose covariance this
+  // landmark is currently holding down.
+  bool evict_by_contribution = true;
+  // Each eviction rewrites the covariance, so the frame gets a budget rather
+  // than churning the whole state whenever a wall comes into view.
+  int evict_per_frame = 24;
+
   // A sighting further than this from where the landmark says it should be is
   // not that landmark. Chi-square on two degrees of freedom.
   double reject_chi_square = 9.0;
@@ -132,6 +154,7 @@ public:
   int64_t initialised() const {return initialised_;}
   int64_t rejected() const {return rejected_;}
   int64_t updated() const {return updated_;}
+  int64_t evicted() const {return evicted_;}
 
 private:
   struct Entry
@@ -158,6 +181,10 @@ private:
   bool admit(int64_t identity, const Eigen::Vector3d & position,
     const Eigen::Matrix3d & covariance, const Eigen::Matrix3d & by_pose);
   void drop(int64_t identity);
+  // Certainty times persistence: what the seat is currently earning.
+  double contribution(const Entry & entry) const;
+  // The worst seat, and what it is earning. Absent when nothing is held.
+  std::optional<std::pair<int64_t, double>> weakest() const;
 
   LandmarkSettings settings_;
   Eigen::Vector3d pose_ = Eigen::Vector3d::Zero();   // x, y, yaw
@@ -169,7 +196,9 @@ private:
   int64_t initialised_ = 0;
   int64_t rejected_ = 0;
   int64_t updated_ = 0;
+  int64_t evicted_ = 0;
   int64_t seen_frame_ = 0;
+  int evictions_left_ = 0;
 };
 
 }  // namespace monoscale
