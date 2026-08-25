@@ -208,7 +208,6 @@ private:
   void grid_erase(int64_t slot);
   // Nearest anchor within link_radius_m that this source has not bound yet.
   int64_t adoptable(int source, double x, double y) const;
-  void grow_table(int source, int64_t highest);
   double weight_at(int64_t slot) const;
   void forget(int64_t slot);
   void prune();
@@ -223,9 +222,16 @@ private:
   Eigen::VectorXd information_;
   Eigen::Matrix<int64_t, Eigen::Dynamic, 1> identifier_;
   std::vector<int64_t> free_;
-  // Slot of each identity, per source, indexed by the identity, -1 where
-  // unknown. Track identities restart per camera, so one table each.
-  std::vector<std::vector<int64_t>> by_id_;
+  // Slot of each identity, per source. Track identities restart per camera, so
+  // one table each.
+  //
+  // Sparse, not a vector indexed by the identity. Identities only ever go up --
+  // 467,085 of them in 601 frames at road speed -- so a dense table grows with
+  // every feature the drive has ever detected rather than with the ones it is
+  // still holding, and an hour of driving would ask for hundreds of megabytes
+  // of mostly -1. The road alignment's identities start at 1 << 40 and made
+  // that fatal rather than merely wasteful.
+  std::vector<std::unordered_map<int64_t, int64_t>> by_id_;
   // Which identity each source has bound to a slot, -1 where none. A slot may
   // carry one per source: that is what makes it a shared landmark rather than
   // two anchors in the same place.

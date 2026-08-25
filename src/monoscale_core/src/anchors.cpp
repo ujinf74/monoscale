@@ -27,7 +27,7 @@ GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings, int sources)
     free_.push_back(slot);
   }
   for (auto & table : by_id_) {
-    table.assign(4096, -1);
+    table.clear();
   }
 }
 
@@ -37,10 +37,8 @@ int64_t GroundAnchorMap::slot_of(int source, int64_t identity) const
     return -1;
   }
   const auto & table = by_id_[static_cast<size_t>(source)];
-  if (identity < 0 || identity >= static_cast<int64_t>(table.size())) {
-    return -1;
-  }
-  return table[static_cast<size_t>(identity)];
+  const auto found = table.find(identity);
+  return found == table.end() ? -1 : found->second;
 }
 
 int64_t GroundAnchorMap::cell_of(double x, double y) const
@@ -128,19 +126,6 @@ int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
   return best;
 }
 
-void GroundAnchorMap::grow_table(int source, int64_t highest)
-{
-  auto & by_id_source = by_id_[static_cast<size_t>(source)];
-  if (highest < static_cast<int64_t>(by_id_source.size())) {
-    return;
-  }
-  // Geometric, and never below the identity that asked for it, so a whole
-  // drive costs a handful of reallocations.
-  const size_t size =
-    std::max(2 * by_id_source.size(), static_cast<size_t>(highest) + 1);
-  by_id_source.resize(size, -1);
-}
-
 double GroundAnchorMap::weight_at(int64_t slot) const
 {
   const double count = settings_.weight_by_information
@@ -216,14 +201,13 @@ void GroundAnchorMap::update(
         }
       }
       if (adopted >= 0 && !settings_.link_measure_only) {
-        grow_table(source, ids(i));
         // Release whatever identity this source had bound here before.
         auto & table = by_id_[static_cast<size_t>(source)];
         const int64_t previous = owner_(adopted, source);
-        if (previous >= 0 && previous < static_cast<int64_t>(table.size())) {
-          table[static_cast<size_t>(previous)] = -1;
+        if (previous >= 0) {
+          table.erase(previous);
         }
-        table[static_cast<size_t>(ids(i))] = adopted;
+        table[ids(i)] = adopted;
         owner_(adopted, source) = ids(i);
         // What the two cameras disagreed by, and how that compares with how
         // far away the point was.
@@ -310,11 +294,6 @@ void GroundAnchorMap::update(
   }
   const size_t room = std::min(fresh.size(), free_.size());
   if (room > 0) {
-    int64_t highest = 0;
-    for (size_t n = 0; n < room; ++n) {
-      highest = std::max(highest, ids(fresh[n]));
-    }
-    grow_table(source, highest);
     for (size_t n = 0; n < room; ++n) {
       const Eigen::Index i = fresh[n];
       const int64_t slot = free_.back();
@@ -332,7 +311,7 @@ void GroundAnchorMap::update(
       owner_(slot, source) = ids(i);
       founder_(slot) = source;
       founded_path_(slot) = path_;
-      by_id_[static_cast<size_t>(source)][static_cast<size_t>(ids(i))] = slot;
+      by_id_[static_cast<size_t>(source)][ids(i)] = slot;
       grid_insert(slot);
       ++live_;
     }
@@ -345,9 +324,8 @@ void GroundAnchorMap::forget(int64_t slot)
   // Every source that had bound an identity to this slot loses it.
   for (int source = 0; source < sources_; ++source) {
     const int64_t gone = owner_(slot, source);
-    auto & table = by_id_[static_cast<size_t>(source)];
-    if (gone >= 0 && gone < static_cast<int64_t>(table.size())) {
-      table[static_cast<size_t>(gone)] = -1;
+    if (gone >= 0) {
+      by_id_[static_cast<size_t>(source)].erase(gone);
     }
     owner_(slot, source) = -1;
   }
