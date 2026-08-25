@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <memory>
 #include <string>
@@ -49,6 +50,7 @@
 #include <opencv2/video/tracking.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
@@ -124,6 +126,100 @@ cv::Mat pinned(cv::cuda::HostMem & memory, int count, int type)
 }
 #endif
 
+// The ground under the camera, as a plane the vehicle's own motion moves.
+//
+// A plane's image motion between two views is exactly a homography, and for a
+// camera looking at the road it does not have to be fitted from correspondences
+// -- every term is known. For a plane n^T X = d and a camera motion (R, t),
+//
+//   b2 ~ (R + t n^T / d) b1
+//
+// so with the mount, the camera height and the vehicle's step the prediction is
+// computed rather than estimated. Nothing it produces can be poisoned by
+// features that failed to track, which is the whole point: fitting a predictor
+// to a flow that is already half stationary teaches it to predict stationary.
+struct GroundModel
+{
+  bool ready = false;
+  double fx = 0.0;
+  double fy = 0.0;
+  double cx = 0.0;
+  double cy = 0.0;
+  int calibration_width = 0;
+  int calibration_height = 0;
+  bool equidistant = true;
+  cv::Matx33d rotation_base_from_camera = cv::Matx33d::eye();
+  cv::Vec3d translation_base_from_camera{0.0, 0.0, 0.0};
+
+  // Intrinsics scale with the frame the tracker actually processes.
+  void scaled(int width, int height, double & sfx, double & sfy,
+    double & scx, double & scy) const
+  {
+    const double sx = calibration_width > 0
+      ? static_cast<double>(width) / calibration_width : 1.0;
+    const double sy = calibration_height > 0
+      ? static_cast<double>(height) / calibration_height : 1.0;
+    sfx = fx * sx; sfy = fy * sy; scx = cx * sx; scy = cy * sy;
+  }
+
+  cv::Vec3d bearing(const cv::Point2f & p, int width, int height) const
+  {
+    double sfx, sfy, scx, scy;
+    scaled(width, height, sfx, sfy, scx, scy);
+    const double xn = (p.x - scx) / sfx;
+    const double yn = (p.y - scy) / sfy;
+    const double theta = std::hypot(xn, yn);
+    if (!equidistant) {
+      const double n = std::sqrt(xn*xn + yn*yn + 1.0);
+      return cv::Vec3d(xn / n, yn / n, 1.0 / n);
+    }
+    const double s = theta > 1e-9 ? std::sin(theta) / theta : 1.0;
+    return cv::Vec3d(xn * s, yn * s, std::cos(theta));
+  }
+
+  cv::Point2f pixel(const cv::Vec3d & b, int width, int height) const
+  {
+    double sfx, sfy, scx, scy;
+    scaled(width, height, sfx, sfy, scx, scy);
+    const double r = std::hypot(b[0], b[1]);
+    double k = 1.0;
+    if (equidistant) {
+      const double theta = std::atan2(r, b[2]);
+      k = r > 1e-12 ? theta / r : 1.0;
+    } else {
+      k = std::abs(b[2]) > 1e-12 ? 1.0 / b[2] : 0.0;
+    }
+    return cv::Point2f(
+      static_cast<float>(b[0] * k * sfx + scx),
+      static_cast<float>(b[1] * k * sfy + scy));
+  }
+
+  // H for a forward step and a turn, both in the body frame.
+  cv::Matx33d homography(double step, double turn) const
+  {
+    const cv::Matx33d r_cb = rotation_base_from_camera.t();
+    const double c = std::cos(turn);
+    const double s = std::sin(turn);
+    const cv::Matx33d r_b(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0);
+    const cv::Matx33d rot = r_cb * r_b.t() * rotation_base_from_camera;
+    const cv::Vec3d hop(step, 0.0, 0.0);
+    const cv::Vec3d t =
+      r_cb * (r_b.t() * (translation_base_from_camera - hop) -
+      translation_base_from_camera);
+    const cv::Vec3d n = r_cb * cv::Vec3d(0.0, 0.0, 1.0);
+    const double height = translation_base_from_camera[2];
+    cv::Matx33d out = rot;
+    if (std::abs(height) > 1e-6) {
+      for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+          out(i, j) -= t[i] * n[j] / height;
+        }
+      }
+    }
+    return out;
+  }
+};
+
 struct TrackState
 {
   cv::Mat previous_gray;
@@ -144,6 +240,17 @@ struct TrackState
   // larger step, which is the acceleration a constant pixel velocity misses.
   // Empty until two frames have been seen.
   cv::Mat plane_motion;
+  // Where the vehicle's own motion says each held point will be. Filled before
+  // the flow and consumed by it; empty means fall back to the per-feature hop.
+  std::vector<cv::Point2f> predicted;
+  // The previous frame resampled into where the vehicle's motion says it will
+  // land. Matching against this instead of the raw previous frame removes the
+  // patch deformation rather than the displacement: a ground point approaching
+  // a downward camera does not merely move, it grows and shears, and a
+  // translation-only flow cannot match a patch that changed shape however well
+  // it is aimed. Measured, that is the failure at speed -- the front camera's
+  // photometric rejections go from 0 at 2 m/s to 191 at 8.
+  std::vector<cv::Mat> warped_pyramid;
   std::vector<int64_t> identities;
   int64_t next_identity = 0;
   // When the last frame arrived and how long the hop before it took. A
@@ -448,6 +555,24 @@ public:
       output_qos.reliable();
     }
 
+    // Predicting the flow from the vehicle's own motion instead of from each
+    // feature's last hop. Off until asked for.
+    predict_from_motion_ = declare_parameter<bool>("motion_prediction", false);
+    // Which camera is trusted to measure the step. Under forward motion the
+    // rear camera's ground enters its field of view while the front camera's
+    // leaves, so the rear keeps a population that moved and the front does not:
+    // measured over nine drives the rear recovers the step to 1.3-7.5 mm, and
+    // the front fails outright at 8 m/s, reporting zero with 64% support.
+    step_reference_ = declare_parameter<std::string>("motion_reference", "rear");
+    step_search_slack_ = declare_parameter<double>("motion_search_slack_m", 0.08);
+    step_tolerance_deg_ = declare_parameter<double>("motion_inlier_deg", 0.3);
+    // Resample the previous frame through the prediction before matching, so
+    // the flow sees a patch that has already been deformed the way the motion
+    // deforms it.
+    motion_warp_ = declare_parameter<bool>("motion_warp", false);
+    motion_warp_min_step_ =
+      declare_parameter<double>("motion_warp_min_step_m", 0.12);
+
     const auto cameras = declare_parameter<std::vector<std::string>>(
       "cameras", std::vector<std::string>{"front", "rear"});
     const auto topics = declare_parameter<std::vector<std::string>>(
@@ -464,6 +589,9 @@ public:
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
       states_[name].target = max_features_;
+      if (predict_from_motion_) {
+        models_[name] = load_ground_model(name);
+      }
       publishers_[name] = create_publisher<std_msgs::msg::Float64MultiArray>(
         "/vision/tracks/" + name, output_qos);
       // Each camera needs its own callback group. Subscriptions left in the
@@ -484,6 +612,28 @@ public:
           options));
       RCLCPP_INFO(
         get_logger(), "tracking %s on %s", name.c_str(), topics[index].c_str());
+    }
+
+    if (predict_from_motion_) {
+      // The turn in the induced homography is measured, not solved for. This
+      // rig's gyro yaw is exact -- correlation 0.985 to 0.9997 against the
+      // truth pose, scale 0.97 to 1.004 -- so the only thing left to find is
+      // the forward step.
+      const auto imu_topic =
+        declare_parameter<std::string>("imu_topic", "/sensing/imu/imu_data");
+      rclcpp::QoS imu_qos(rclcpp::KeepLast(400));
+      imu_qos.best_effort();
+      groups_.push_back(
+        create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive));
+      rclcpp::SubscriptionOptions imu_options;
+      imu_options.callback_group = groups_.back();
+      imu_ = create_subscription<sensor_msgs::msg::Imu>(
+        imu_topic, imu_qos,
+        [this](sensor_msgs::msg::Imu::ConstSharedPtr message) {on_imu(*message);},
+        imu_options);
+      RCLCPP_INFO(
+        get_logger(), "motion prediction on, heading from %s, step from %s",
+        imu_topic.c_str(), step_reference_.c_str());
     }
   }
 
@@ -536,6 +686,8 @@ private:
     std::vector<cv::Point2f> velocities;
     std::vector<int64_t> identities;
     FollowStats stats;
+    state.predicted.clear();
+    state.warped_pyramid.clear();
 
     // How much longer this hop is than the one the stored velocities measure.
     // Frames get dropped under load, and when one is missed the next hop
@@ -553,6 +705,59 @@ private:
 
     const bool have_previous = !state.points.empty() &&
       state.previous_gray.size() == gray.size();
+
+    // Where the vehicle's own motion says the held points will be. Built before
+    // the flow so the search starts there rather than where the feature was.
+    double turn = 0.0;
+    bool turn_known = false;
+    if (predict_from_motion_ && have_previous && !state.points.empty()) {
+      double yaw_now = 0.0;
+      double yaw_then = 0.0;
+      if (yaw_at(stamp, yaw_now) && yaw_at(state.stamp, yaw_then)) {
+        turn = std::remainder(yaw_now - yaw_then, 2.0 * M_PI);
+        turn_known = true;
+      }
+      double step = 0.0;
+      bool have_step = false;
+      {
+        std::lock_guard<std::mutex> guard(step_lock_);
+        step = shared_step_;
+        have_step = step_ready_;
+      }
+      const auto found = models_.find(name);
+      if (turn_known && have_step && found != models_.end() && found->second.ready) {
+        const double hop = step * reach;
+        const cv::Matx33d h = found->second.homography(hop, turn);
+        state.predicted.resize(state.points.size());
+        for (size_t i = 0; i < state.points.size(); ++i) {
+          const cv::Vec3d b =
+            h * found->second.bearing(state.points[i], gray.cols, gray.rows);
+          state.predicted[i] = found->second.pixel(b, gray.cols, gray.rows);
+        }
+        // Only where the deformation is worth a resample. The warp costs one
+        // bilinear interpolation of the whole frame, and at 1.5 m/s the flow is
+        // four pixels -- the signal is sub-pixel and the interpolation noise
+        // sits on top of it. At 8 m/s the near ground sweeps 68 px a frame and
+        // removing that deformation is worth far more than the resample costs.
+        if (motion_warp_ && std::abs(hop) >= motion_warp_min_step_ &&
+          !state.previous_gray.empty() &&
+          state.previous_gray.size() == gray.size())
+        {
+          cv::Mat map_x;
+          cv::Mat map_y;
+          build_warp(found->second, hop, turn, gray.cols, gray.rows, map_x, map_y);
+          cv::Mat warped;
+          cv::remap(
+            state.previous_gray, warped, map_x, map_y, cv::INTER_LINEAR,
+            cv::BORDER_REPLICATE);
+          // Same depth as the frame it will be matched against: the flow
+          // takes one maxLevel for both sides.
+          cv::buildOpticalFlowPyramid(
+            warped, state.warped_pyramid, cv::Size(window_, window_), levels_);
+        }
+      }
+    }
+
     if (cuda_active_) {
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
       if (have_previous && !state.previous_device_pyramid.empty()) {
@@ -565,6 +770,19 @@ private:
       follow(
         state, gray, pyramid, previous_points, current_points, velocities,
         identities, stats, reach);
+    }
+    // And what this frame says the step was, if this is the camera trusted to
+    // say it. Searched as one scalar over the induced family: the features that
+    // failed to track all agree on zero, so the vote is bimodal, and a window
+    // around the last answer keeps the zero out of reach.
+    if (predict_from_motion_ && turn_known && name == step_reference_ &&
+      previous_points.size() >= 60)
+    {
+      const auto found = models_.find(name);
+      if (found != models_.end() && found->second.ready) {
+        measure_step(found->second, previous_points, current_points,
+          gray.cols, gray.rows, turn, reach);
+      }
     }
     if (elapsed > 0.0) {
       state.interval = elapsed;
@@ -779,7 +997,13 @@ private:
       totals += " pub_" + entry.first + "=" + std::to_string(entry.second);
     }
     RCLCPP_INFO(
-      get_logger(), "front end in: %s%s", line.c_str(), totals.c_str());
+      get_logger(), "front end in: %s%s%s", line.c_str(), totals.c_str(),
+      predict_from_motion_
+      ? (" step=" + std::to_string(shared_step_) + (step_ready_ ? "" : " (none)") +
+      " models=" + std::to_string(std::count_if(
+        models_.begin(), models_.end(),
+        [](const auto & e) {return e.second.ready;}))).c_str()
+      : "");
   }
 
 
@@ -917,6 +1141,16 @@ private:
     std::vector<int64_t> & identities, FollowStats & stats,
     double reach) const
   {
+    // Match against the warped previous frame when there is one. The points
+    // start where the warp put them, so what the flow finds is the residual
+    // the motion model did not predict.
+    const bool warped = !state.warped_pyramid.empty() &&
+      state.predicted.size() == state.points.size() && !state.points.empty();
+    const std::vector<cv::Mat> & source_pyramid =
+      warped ? state.warped_pyramid : state.previous_pyramid;
+    const std::vector<cv::Point2f> & source_points =
+      warped ? state.predicted : state.points;
+
     std::vector<cv::Point2f> forward;
     std::vector<uchar> status;
     std::vector<float> error;
@@ -930,7 +1164,10 @@ private:
     // path predicts from the estimated motion; the front end has no access to
     // that, so it carries each feature's own last hop forward instead.
     int flags = 0;
-    if (predict_by_plane_ && !state.plane_motion.empty() && !state.points.empty()) {
+    if (state.predicted.size() == state.points.size() && !state.points.empty()) {
+      forward = state.predicted;
+      flags = cv::OPTFLOW_USE_INITIAL_FLOW;
+    } else if (predict_by_plane_ && !state.plane_motion.empty() && !state.points.empty()) {
       // One prediction for the whole frame, from the plane's last hop.
       std::vector<cv::Point2f> warped;
       cv::perspectiveTransform(state.points, warped, state.plane_motion);
@@ -949,7 +1186,7 @@ private:
       flags = cv::OPTFLOW_USE_INITIAL_FLOW;
     }
     cv::calcOpticalFlowPyrLK(
-      state.previous_pyramid, pyramid, state.points, forward, status, error,
+      source_pyramid, pyramid, source_points, forward, status, error,
       window, levels_, criteria, flags);
 
     // What the flow returned before anything was thrown away, and why each
@@ -1009,7 +1246,7 @@ private:
       // skips the patch sum altogether when it is not asked for -- a window's
       // worth of arithmetic per point, computed and discarded on every hop.
       cv::calcOpticalFlowPyrLK(
-        pyramid, state.previous_pyramid, candidates, backward, backward_status,
+        pyramid, source_pyramid, candidates, backward, backward_status,
         cv::noArray(), window, levels_, criteria);
     }
 
@@ -1019,7 +1256,7 @@ private:
         ++lost;
         continue;
       }
-      const cv::Point2f drift = backward[k] - state.points[i];
+      const cv::Point2f drift = backward[k] - source_points[i];
       if (std::hypot(drift.x, drift.y) > backward_threshold_) {
         ++drifted;
         continue;
@@ -1425,6 +1662,177 @@ private:
     }
   }
 
+  // One scalar, voted on by every correspondence this camera kept.
+  void measure_step(
+    const GroundModel & model, const std::vector<cv::Point2f> & previous,
+    const std::vector<cv::Point2f> & current, int width, int height,
+    double turn, double reach)
+  {
+    const size_t count = previous.size();
+    std::vector<cv::Vec3d> from(count);
+    std::vector<cv::Vec3d> to(count);
+    for (size_t i = 0; i < count; ++i) {
+      from[i] = model.bearing(previous[i], width, height);
+      to[i] = model.bearing(current[i], width, height);
+    }
+    const double tolerance = std::cos(step_tolerance_deg_ * M_PI / 180.0);
+    const auto support = [&](double step) {
+        const cv::Matx33d h = model.homography(step * std::max(reach, 1e-3), turn);
+        int agree = 0;
+        for (size_t i = 0; i < count; ++i) {
+          cv::Vec3d p = h * from[i];
+          const double n = cv::norm(p);
+          if (n < 1e-12) {
+            continue;
+          }
+          p *= 1.0 / n;
+          if (p.dot(to[i]) > tolerance) {
+            ++agree;
+          }
+        }
+        return agree;
+      };
+    const auto scan = [&](double low, double high, int samples) {
+        double best = low;
+        int best_count = -1;
+        for (int i = 0; i < samples; ++i) {
+          const double s = low + (high - low) * i / std::max(samples - 1, 1);
+          const int c = support(s);
+          if (c > best_count) {
+            best = s;
+            best_count = c;
+          }
+        }
+        return best;
+      };
+    double found = 0.0;
+    if (!step_ready_) {
+      // Nothing held: the whole plausible range, once.
+      found = scan(-0.05, 0.60, 66);
+    } else {
+      // Around the last answer, with additive slack so it can grow out of a
+      // standing start -- a window that scales with what it holds never can.
+      const double slack = std::max(0.45 * shared_step_, step_search_slack_);
+      found = scan(std::max(0.0, shared_step_ - slack), shared_step_ + slack, 49);
+    }
+    found = scan(found - 0.012, found + 0.012, 25);
+    std::lock_guard<std::mutex> guard(step_lock_);
+    shared_step_ = step_ready_ ? shared_step_ + 0.5 * (found - shared_step_) : found;
+    step_ready_ = true;
+  }
+
+  // Where each pixel of the predicted frame came from in the previous one.
+  //
+  // Built on a coarse lattice and stretched: the map is smooth -- it is a
+  // homography seen through one lens -- so sampling it every eighth pixel and
+  // interpolating is well under a tenth of a pixel wrong, and it costs a few
+  // thousand trigonometric evaluations instead of a quarter of a million.
+  void build_warp(
+    const GroundModel & model, double step, double turn, int width, int height,
+    cv::Mat & map_x, cv::Mat & map_y) const
+  {
+    const cv::Matx33d inverse = model.homography(step, turn).inv();
+    const int stride = 8;
+    const int cols = std::max(width / stride, 2);
+    const int rows = std::max(height / stride, 2);
+    cv::Mat sx(rows, cols, CV_32F);
+    cv::Mat sy(rows, cols, CV_32F);
+    // Sampled where cv::resize will read them: output pixel i comes from input
+    // coordinate (i + 0.5) * cols / width - 0.5, so the lattice has to sit at
+    // the matching places or the whole map is stretched by the ratio between
+    // the grid's span and the image's -- which at this stride is a percent, and
+    // a percent of 640 px is eight pixels of systematic error at the edge.
+    const double sx_step = static_cast<double>(width) / cols;
+    const double sy_step = static_cast<double>(height) / rows;
+    for (int r = 0; r < rows; ++r) {
+      for (int c = 0; c < cols; ++c) {
+        const cv::Point2f q(
+          static_cast<float>((c + 0.5) * sx_step - 0.5),
+          static_cast<float>((r + 0.5) * sy_step - 0.5));
+        const cv::Vec3d b = inverse * model.bearing(q, width, height);
+        const cv::Point2f p = model.pixel(b, width, height);
+        sx.at<float>(r, c) = p.x;
+        sy.at<float>(r, c) = p.y;
+      }
+    }
+    cv::resize(sx, map_x, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
+    cv::resize(sy, map_y, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
+  }
+
+  GroundModel load_ground_model(const std::string & name)
+  {
+    GroundModel model;
+    const auto k = declare_parameter<std::vector<double>>(
+      name + ".k", std::vector<double>{});
+    const auto rotation = declare_parameter<std::vector<double>>(
+      name + ".rotation_base_from_camera", std::vector<double>{});
+    const auto translation = declare_parameter<std::vector<double>>(
+      name + ".translation_base_from_camera", std::vector<double>{});
+    const auto lens = declare_parameter<std::string>(name + ".distortion_model", "equidistant");
+    model.calibration_width = declare_parameter<int>(name + ".calibration_width", 0);
+    model.calibration_height = declare_parameter<int>(name + ".calibration_height", 0);
+    if (k.size() != 9 || rotation.size() != 9 || translation.size() != 3) {
+      RCLCPP_WARN(
+        get_logger(),
+        "motion_prediction is on but %s has no calibration; it will fall back to "
+        "the per-feature warm start", name.c_str());
+      return model;
+    }
+    model.fx = k[0]; model.fy = k[4]; model.cx = k[2]; model.cy = k[5];
+    model.rotation_base_from_camera = cv::Matx33d(
+      rotation[0], rotation[1], rotation[2],
+      rotation[3], rotation[4], rotation[5],
+      rotation[6], rotation[7], rotation[8]);
+    model.translation_base_from_camera =
+      cv::Vec3d(translation[0], translation[1], translation[2]);
+    model.equidistant = lens != "plumb_bob" && lens != "pinhole";
+    model.ready = std::abs(model.translation_base_from_camera[2]) > 1e-3 && model.fx > 0.0;
+    return model;
+  }
+
+  // Heading at an image stamp, interpolated from the instrument. Returns false
+  // rather than guessing when the instrument has not covered the interval.
+  bool yaw_at(double stamp, double & out)
+  {
+    std::lock_guard<std::mutex> guard(imu_lock_);
+    if (imu_yaw_.size() < 2) {
+      return false;
+    }
+    const auto * before = static_cast<const std::pair<double, double> *>(nullptr);
+    const auto * after = static_cast<const std::pair<double, double> *>(nullptr);
+    for (const auto & sample : imu_yaw_) {
+      if (sample.first <= stamp) {
+        before = &sample;
+      } else {
+        after = &sample;
+        break;
+      }
+    }
+    if (before == nullptr || after == nullptr || after->first - before->first > 0.12) {
+      return false;
+    }
+    const double span = after->first - before->first;
+    const double ratio = span > 1e-9 ? (stamp - before->first) / span : 0.0;
+    double step = after->second - before->second;
+    while (step > M_PI) {step -= 2.0 * M_PI;}
+    while (step < -M_PI) {step += 2.0 * M_PI;}
+    out = before->second + ratio * step;
+    return true;
+  }
+
+  void on_imu(const sensor_msgs::msg::Imu & message)
+  {
+    const auto & q = message.orientation;
+    const double yaw = std::atan2(
+      2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    std::lock_guard<std::mutex> guard(imu_lock_);
+    imu_yaw_.emplace_back(
+      message.header.stamp.sec + message.header.stamp.nanosec * 1e-9, yaw);
+    while (imu_yaw_.size() > 600) {
+      imu_yaw_.pop_front();
+    }
+  }
+
   void publish(
     const std::string & name, const sensor_msgs::msg::Image & message,
     const cv::Size & frame,
@@ -1482,6 +1890,23 @@ private:
   double refill_ratio_;
   bool warm_start_;
   bool predict_by_plane_ = false;
+  bool predict_from_motion_ = false;
+  std::string step_reference_;
+  double step_search_slack_ = 0.08;
+  double step_tolerance_deg_ = 0.3;
+  bool motion_warp_ = false;
+  double motion_warp_min_step_ = 0.12;
+  std::unordered_map<std::string, GroundModel> models_;
+  // The step the reference camera last measured, shared with the others. The
+  // rig is rigid, so one number serves every camera on it.
+  std::mutex step_lock_;
+  double shared_step_ = 0.0;
+  bool step_ready_ = false;
+  // Heading from the instrument, so the turn in the homography is measured
+  // rather than solved for.
+  std::mutex imu_lock_;
+  std::deque<std::pair<double, double>> imu_yaw_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_;
   bool seed_new_from_cell_ = false;
   float seed_min_flow_ = 8.0f;
   bool use_cuda_ = false;
