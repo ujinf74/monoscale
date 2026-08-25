@@ -423,6 +423,25 @@ struct EstimatorSettings
   // apart and averaging the two answers. Their points are already in base_link
   // and describe the same hop, so this is the fusion the geometry allows.
   bool fuse_camera_points = false;
+
+  // One solve for the hop, over everything that saw it.
+  //
+  // The two solvers this replaces are the same equation. The two-frame fallback
+  // votes h = p - R(dyaw) q with p the feature's own previous ground position;
+  // the anchor alignment votes h = R(-yaw) (W - t) - R(dyaw) q with W the
+  // anchor's world position. Both are `h = reference - R(dyaw) q`, and the only
+  // difference is whether the reference is one sighting or the average of many.
+  // **The anchor map is not a second estimator. It is a better p.**
+  //
+  // Written as one vote list this stops being a choice. Today a camera holding
+  // twenty anchored features against a minimum of twenty-four throws all twenty
+  // away and falls back; here they simply vote alongside the pairs, weighted by
+  // how well each reference is known.
+  bool unified_solve = false;
+  // What an averaged reference is worth against a single sighting, before the
+  // anchor's own observation count is applied.
+  double unified_anchor_weight = 1.0;
+  bool unified_exclusive = false;
   // Whether the anchor alignment estimates the heading itself when a filter
   // exists that could consume one. It only ever did because such a filter
   // implies a gyro bias state, and a bias is only observable against an
@@ -672,6 +691,10 @@ struct Diagnostics
   // Off-ground points triangulated so far, and how many are live now.
   int64_t offground_anchors = 0;
   int64_t offground_live = 0;
+  // Votes the unified solve took, and how many of them came from the map
+  // rather than from the feature's own previous sighting.
+  int64_t unified_votes = 0;
+  int64_t unified_from_map = 0;
   int64_t zupt_holds = 0;
   int64_t obstacles_unavailable = 0;
   // Temporary instrumentation: where the slip obstacle path loses its

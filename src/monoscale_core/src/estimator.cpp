@@ -204,6 +204,7 @@ struct Estimator::Solved
   // apart and averaged. Only filled when that is asked for.
   Points2 pair_previous;
   Points2 pair_current;
+  Identities pair_ids;
   double spread = 0.0;
   // How well this camera pinned the heading down, when it was asked to solve
   // for one. Infinite when it was not.
@@ -1275,16 +1276,18 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     usable.push_back(i);
   }
 
-  if (settings_.fuse_camera_points) {
+  if (settings_.fuse_camera_points || settings_.unified_solve) {
     const Eigen::Index kept = static_cast<Eigen::Index>(usable.size());
     solved.pair_previous.resize(kept, 2);
     solved.pair_current.resize(kept, 2);
+    solved.pair_ids.resize(kept);
     for (Eigen::Index i = 0; i < kept; ++i) {
       const Eigen::Index at = usable[static_cast<size_t>(i)];
       solved.pair_previous(i, 0) = solved.previous_ground(at, 0);
       solved.pair_previous(i, 1) = solved.previous_ground(at, 1);
       solved.pair_current(i, 0) = solved.current_ground(at, 0);
       solved.pair_current(i, 1) = solved.current_ground(at, 1);
+      solved.pair_ids(i) = track_ids(at);
     }
   }
 
@@ -1919,6 +1922,124 @@ void Estimator::process_pair()
     fusion_weights.clear();
   }
   auto motion = fuse_planar_motions(motions, fusion_weights);
+
+  // One solve over every reference there is.
+  //
+  // Each feature votes h = reference - R(dyaw) q. The reference is the anchor
+  // map's averaged world position where the map knows the feature, and the
+  // feature's own previous ground position where it does not -- the same
+  // equation either way, so both go in one list and one consensus decides.
+  // Both cameras are in that list too: the body is rigid and the hop is one
+  // hop, so there is nothing to fuse afterwards.
+  if (settings_.unified_solve && yaw_delta.has_value() && dt > 1e-4) {
+    Eigen::Index total = 0;
+    for (const auto & entry : solved) {
+      if (entry.has_value()) {
+        total += entry->pair_ids.size();
+      }
+    }
+    if (total >= settings_.ground_min_inliers) {
+      // One reference type for the whole hop, decided before any vote is cast.
+      // A pair says what the hop was; an anchor says what the hop plus the
+      // accumulated drift was. Two cameras can disagree about which they have,
+      // but the consensus cannot hold both, so the choice belongs to the hop.
+      bool take_map = false;
+      if (settings_.unified_exclusive) {
+        int64_t anchored_total = 0;
+        for (size_t c = 0; c < solved.size(); ++c) {
+          if (!solved[c].has_value() || solved[c]->pair_ids.size() == 0) {
+            continue;
+          }
+          Points2 peek;
+          Weights seen;
+          anchors_->anchor_view(cameras_[c]->source, solved[c]->pair_ids, peek, seen);
+          if (seen.size() == solved[c]->pair_ids.size()) {
+            for (Eigen::Index i = 0; i < seen.size(); ++i) {
+              anchored_total += seen(i) > 0.0 ? 1 : 0;
+            }
+          }
+        }
+        take_map = anchored_total >= settings_.ground_min_inliers;
+      }
+      Points2 reference(total, 2);
+      Points2 observed(total, 2);
+      Weights vote_weights(total);
+      const double cp = std::cos(pose_.yaw);
+      const double sp = std::sin(pose_.yaw);
+      Eigen::Index at = 0;
+      int64_t from_map = 0;
+      for (size_t c = 0; c < solved.size(); ++c) {
+        if (!solved[c].has_value() || solved[c]->pair_ids.size() == 0) {
+          continue;
+        }
+        const auto & entry = *solved[c];
+        const Eigen::Index rows = entry.pair_ids.size();
+        Points2 world;
+        Weights known;
+        {
+          Stopwatch lookup(diagnostics_, "lookup");
+          anchors_->anchor_view(cameras_[c]->source, entry.pair_ids, world, known);
+        }
+        bool have = world.rows() == rows && known.size() == rows;
+        // A pair's reference is a direct observation in the previous body
+        // frame, so it carries no accumulated error. An anchor's is a world
+        // position brought into that frame through the previous pose, so it
+        // carries whatever that pose has drifted. The two measure different
+        // things -- a hop, and a hop plus the correction for the drift.
+        if (settings_.unified_exclusive && !take_map) {
+          have = false;
+        }
+        for (Eigen::Index i = 0; i < rows; ++i) {
+          // An anchor answers with a world position; bring it into the frame
+          // the previous sighting would have been expressed in, and the two
+          // references become interchangeable.
+          const bool anchored_here = have && known(i) > 0.0;
+          if (settings_.unified_exclusive && have && !anchored_here) {
+            continue;   // this camera is answering from the map this hop
+          }
+          if (anchored_here) {
+            const double wx = world(i, 0) - pose_.x;
+            const double wy = world(i, 1) - pose_.y;
+            reference(at, 0) = cp * wx + sp * wy;
+            reference(at, 1) = -sp * wx + cp * wy;
+            vote_weights(at) = settings_.unified_anchor_weight * known(i);
+            ++from_map;
+          } else {
+            reference(at, 0) = entry.pair_previous(i, 0);
+            reference(at, 1) = entry.pair_previous(i, 1);
+            vote_weights(at) = 1.0;
+          }
+          observed(at, 0) = entry.pair_current(i, 0);
+          observed(at, 1) = entry.pair_current(i, 1);
+          ++at;
+        }
+      }
+      if (at < total) {
+        reference.conservativeResize(at, 2);
+        observed.conservativeResize(at, 2);
+        vote_weights.conservativeResize(at);
+        total = at;
+      }
+      const double unified_gate = settings_.ground_ransac_threshold_m +
+        settings_.ground_rotation_threshold_m * std::abs(*yaw_delta);
+      const auto pooled = estimate_planar_motion_with_yaw(
+        reference, observed, *yaw_delta, unified_gate,
+        settings_.ground_min_inliers, settings_.ground_pair_softness_m,
+        vote_weights, settings_.ground_pair_passes);
+      if (pooled.has_value()) {
+        if (!motion.has_value()) {
+          motion = pooled->motion;
+        } else {
+          motion->x = pooled->motion.x;
+          motion->y = pooled->motion.y;
+          motion->inliers = pooled->motion.inliers;
+        }
+        diagnostics_.unified_votes += total;
+        diagnostics_.unified_from_map += from_map;
+        aligned_from_map = aligned_from_map || from_map > 0;
+      }
+    }
+  }
   // Or one solve over everything both cameras saw. The average above treats
   // each camera's answer as a measurement and weighs them; this treats the
   // ground itself as the measurement, which is what it is. The body is rigid,

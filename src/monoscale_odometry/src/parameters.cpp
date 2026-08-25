@@ -308,6 +308,9 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.ground_pair_softness_m = declare_double("ground_pair_softness_m", 0.0);
   settings.softness_from_residual = declare_double("softness_from_residual", 0.0);
   settings.fuse_camera_points = declare_bool("fuse_camera_points", false);
+  settings.unified_solve = declare_bool("unified_solve", false);
+  settings.unified_anchor_weight = declare_double("unified_anchor_weight", 1.0);
+  settings.unified_exclusive = declare_bool("unified_exclusive", false);
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
   settings.solve_max_pixel_flow = declare_double("solve_max_pixel_flow", 0.0);
   settings.solve_min_pixel_flow = declare_double("solve_min_pixel_flow", 0.0);
