@@ -434,7 +434,19 @@
     # 0.1185 and the two together 0.1098, but both take the repeat spread of
     # one identical drive from 1.20x to 4.5x -- buying the mean with the
     # repeatability, which is the trade this set has refused before.
-    curvature_scale_gain: 0.067
+    # 0.067 until 08-25. It was fitted before the attitude filter's tau and the
+    # two softness widths were corrected, and it is a yaw-dependent term, so it
+    # had been absorbing some of what those were getting wrong. Re-swept on the
+    # corrected stack:
+    #
+    #   gain    0.000  0.033  0.067  0.085  0.100  0.115  0.130  0.150
+    #   mean    .2124  .2040  .1946  .1912  .1895  .1910  .1908  .1936
+    #   SD      .1701  .1670  .1628  .1597  .1588  .1589  .1579  .1573
+    #   repeat   2.17   2.17   2.17   2.01   2.00   2.00   1.99   1.98
+    #
+    # 0.085-0.130 is a flat basin, so 0.100 is not a fitted point, and it is the
+    # rare change that takes mean, SD and repeat spread together.
+    curvature_scale_gain: 0.100
     ground_range_scale_front: 1.0039
     ground_range_scale_rear: 1.0060
     # Roll and pitch from the IMU, feeding the ground projection. The gain
