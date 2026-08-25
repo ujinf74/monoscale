@@ -319,6 +319,10 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.offground_max_residual_m = declare_double("offground_max_residual_m", 0.10);
   settings.offground_max_observations = declare_int("offground_max_observations", 12);
   settings.offground_weight = declare_double("offground_weight", 1.0);
+  settings.offground_residual_range_m =
+    declare_double("offground_residual_range_m", 5.0);
+  settings.offground_refresh_frames =
+    declare_int("offground_refresh_frames", 0);
   settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);

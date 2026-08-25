@@ -352,7 +352,13 @@ std::optional<AnchorAlignment> align_to_anchors(
   double ambiguity = 0.0,
   // Reject modes further than this from the inertial expectation. 0 disables.
   const Eigen::Vector2d * inertial_hop = nullptr,
-  double inertial_gate = 0.0);
+  double inertial_gate = 0.0,
+  // Per point, how much wider than the configured gate and softness this
+  // residual is allowed to be. Empty means one for everything. A bearing
+  // measurement's metric error scales with its range, so a landmark twenty
+  // metres out needs ten times the tolerance of one at two to be judged on the
+  // same angle.
+  const Weights & residual_scale = Weights());
 
 struct CameraTranslation
 {

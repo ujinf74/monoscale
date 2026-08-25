@@ -106,6 +106,7 @@ struct Estimator::Camera
     Eigen::Vector3d world = Eigen::Vector3d::Zero();
     bool solved = false;
     int64_t seen = 0;
+    int64_t fixed = 0;
   };
   std::unordered_map<int64_t, Offground> offground;
   int64_t offground_frame = 0;
@@ -780,7 +781,18 @@ void Estimator::record_offground(Camera & camera)
     auto & track = camera.offground[identity];
     track.seen = camera.offground_frame;
     if (track.solved) {
-      continue;
+      // A point fixed from one stretch of pose and read against another is an
+      // anchor that carries the drift between them. The ground anchors do not
+      // have the problem because they are averaged over every sighting; these
+      // are triangulated once, so they have to be triangulated again.
+      if (settings_.offground_refresh_frames <= 0 ||
+        camera.offground_frame - track.fixed < settings_.offground_refresh_frames)
+      {
+        continue;
+      }
+      track.solved = false;
+      track.centres.clear();
+      track.bearings.clear();
     }
     // Keep the oldest -- it is half the baseline -- and drop from just after it.
     if (track.centres.size() >= cap) {
@@ -836,6 +848,7 @@ void Estimator::record_offground(Camera & camera)
     }
     track.world = point;
     track.solved = true;
+    track.fixed = camera.offground_frame;
     track.centres.clear();
     track.bearings.clear();
     ++diagnostics_.offground_anchors;
@@ -1309,6 +1322,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     }
     Points2 world;
     Weights weights;
+    Weights scale;
     {
       Stopwatch lookup(diagnostics_, "lookup");
       anchors_->anchor_view(camera.source, selected_ids, world, weights);
@@ -1354,6 +1368,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       std::vector<Eigen::Index> extra;
       std::vector<Eigen::Vector2d> extra_body;
       std::vector<Eigen::Vector2d> extra_world;
+      std::vector<double> extra_range;
       extra.reserve(static_cast<size_t>(count));
       for (Eigen::Index i = 0; i < count; ++i) {
         const auto found = camera.offground.find(track_ids(i));
@@ -1373,12 +1388,16 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         extra.push_back(i);
         extra_body.emplace_back(placed.x(), placed.y());
         extra_world.emplace_back(point.x(), point.y());
+        extra_range.push_back(range);
       }
       const Eigen::Index added = static_cast<Eigen::Index>(extra.size());
       if (added > 0) {
         camera_offground_[camera.source] += static_cast<double>(added);
         body.conservativeResize(chosen + added, 2);
         world.conservativeResize(chosen + added, 2);
+        // The ground points keep the configured gate; these are judged on the
+        // same angle instead, which at their range is a wider distance.
+        scale.setOnes(chosen + added);
         const bool carry = weights.size() == chosen;
         if (carry) {
           weights.conservativeResize(chosen + added);
@@ -1388,6 +1407,9 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
           body(chosen + i, 1) = extra_body[static_cast<size_t>(i)].y();
           world(chosen + i, 0) = extra_world[static_cast<size_t>(i)].x();
           world(chosen + i, 1) = extra_world[static_cast<size_t>(i)].y();
+          scale(chosen + i) = std::max(
+            extra_range[static_cast<size_t>(i)] / settings_.offground_residual_range_m,
+            1.0);
           if (carry) {
             weights(chosen + i) = settings_.offground_weight;
           }
@@ -1425,7 +1447,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         ? &*camera.last_translation : nullptr,
         settings_.align_restarts, settings_.align_ambiguity_ratio,
         gate_centre.has_value() ? &*gate_centre : nullptr,
-        settings_.inertial_gate_m);
+        settings_.inertial_gate_m, scale);
     }
     if (aligned.has_value()) {
       camera.last_translation = aligned->translation;

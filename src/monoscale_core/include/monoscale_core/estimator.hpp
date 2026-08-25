@@ -462,6 +462,13 @@ struct EstimatorSettings
   // What one of these is worth against a ground anchor, which carries its own
   // sighting count. A triangulated point is measured to sit 10-70x looser.
   double offground_weight = 1.0;
+  // The range at which an off-ground anchor is judged on the same footing as a
+  // ground one. Its residual scales with range, so the gate has to as well.
+  double offground_residual_range_m = 5.0;
+  // How often a triangulated point is thrown away and rebuilt from fresh
+  // bearings. Zero never rebuilds, which lets it carry whatever the pose has
+  // drifted since it was fixed.
+  int offground_refresh_frames = 0;
   double curvature_scale_gain = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;

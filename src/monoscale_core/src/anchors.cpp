@@ -429,7 +429,8 @@ std::optional<AnchorAlignment> align_to_anchors(
   double yaw, double threshold, int min_inliers, bool refine_yaw,
   const Eigen::Vector2d & origin, double radial_min_range, double softness,
   const Eigen::Vector2d * translation_prior, int restarts, double ambiguity,
-  const Eigen::Vector2d * inertial_hop, double inertial_gate)
+  const Eigen::Vector2d * inertial_hop, double inertial_gate,
+  const Weights & residual_scale)
 {
   const Eigen::Index count = body_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || world_points.rows() != count) {
@@ -437,6 +438,19 @@ std::optional<AnchorAlignment> align_to_anchors(
   }
   const bool weighted = weights_in.size() == count;
   const auto weight_of = [&](Eigen::Index i) {return weighted ? weights_in(i) : 1.0;};
+  // How wide this point's residual is allowed to be, relative to the rest.
+  //
+  // The gate and the Gaussian below are in metres and the measurement is an
+  // angle. For a point on the road that is nearly the same thing -- the band
+  // is a few metres deep, so every ground residual is amplified by about the
+  // same factor. For a point that is not on the road it is not: the same
+  // bearing error puts a 20 m landmark ten times further out of place than a
+  // 2 m one, so a metre-wide gate silently discards exactly the distant,
+  // long-lived structure it was worth adding.
+  const bool scaled = residual_scale.size() == count;
+  const auto scale_of = [&](Eigen::Index i) {
+      return scaled ? std::max(residual_scale(i), 1e-3) : 1.0;
+    };
 
   double applied = std::numeric_limits<double>::infinity();
   Eigen::Vector2d centre = Eigen::Vector2d::Zero();
@@ -495,11 +509,12 @@ std::optional<AnchorAlignment> align_to_anchors(
                 const double dx = votes(i, 0) - seed.x();
                 const double dy = votes(i, 1) - seed.y();
                 const double distance = dx * dx + dy * dy;
+                const double widen = scale_of(i) * scale_of(i);
                 double r;
                 if (soft_squared > 0.0) {
-                  r = std::exp(-distance / soft_squared);
+                  r = std::exp(-distance / (soft_squared * widen));
                 } else {
-                  r = distance <= threshold_squared ? 1.0 : 0.0;
+                  r = distance <= threshold_squared * widen ? 1.0 : 0.0;
                 }
                 const double w = weight_of(i) * r;
                 total += w;
@@ -515,9 +530,10 @@ std::optional<AnchorAlignment> align_to_anchors(
               const double dx = votes(i, 0) - seed.x();
               const double dy = votes(i, 1) - seed.y();
               const double distance = dx * dx + dy * dy;
+              const double widen = scale_of(i) * scale_of(i);
               const double r = soft_squared > 0.0
-                ? std::exp(-distance / soft_squared)
-                : (distance <= threshold_squared ? 1.0 : 0.0);
+                ? std::exp(-distance / (soft_squared * widen))
+                : (distance <= threshold_squared * widen ? 1.0 : 0.0);
               score += weight_of(i) * r;
             }
             return std::make_pair(seed, score);
