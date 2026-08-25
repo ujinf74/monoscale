@@ -551,6 +551,35 @@
     # Reaching for solve_max_frames instead does not work: 20 or 12 change how
     # much of the drive falls inside the scored window (gt 20.0 m -> 21.8) and
     # the rows stop being comparable.
+    #
+    # The paragraph above is what 3.0 was reasoned from, and it was never
+    # written down -- the code default ran. Set explicitly at 12.0 on 08-25.
+    # The measurements above were taken at processing_width 2560, where the
+    # tracker was not actually downscaling and a pixel meant something else;
+    # at 640 the same parallax is a quarter of the pixels.
+    #
+    #   px      2.0    3.0    4.5    6.0    8.0   10.0   11.0   12.0
+    #   mean  .1905  .1895  .1880  .1872  .1886  .1962  .1791  .1807
+    #   SD    .1652  .1588  .1521  .1507  .1549  .1842  .1381  .1390
+    #   MAX   .6583  .6369  .6159  .6061  .6247  .7337  .5540  .5522
+    #
+    #   px     13.0   14.0   15.0   16.0   18.0   26.0
+    #   mean  .1807  .1802  .1943  .1971  .1999  .2233
+    #   SD    .1390  .1340  .1795  .1850  .1505  .1341
+    #   MAX   .5522  .5350  .7140  .7347  .6169  .4994
+    #
+    # A longer trigger is a longer baseline, which is the direction
+    # solve_min_frames already argues for: the plane fit is conditioned by how
+    # far the ground moved, and at 3 px it moves less than the inlier gate.
+    # Seven of eleven drives improve, led by 8 m/s at -13%; park and curve_s10
+    # pay 2-5%. Repeat spread is unchanged at 2.00 -> 2.05.
+    #
+    # The basin is 11-14 and the walls are sharp -- 10 and 15 are 9% worse,
+    # which is a solve landing on frame N or N+1. So this was checked against
+    # two orthogonal settings rather than taken on the sweep alone: at the old
+    # curvature gain it wins 0.1946 -> 0.1813, and at the old softness widths
+    # 0.2237 -> 0.2114. The win is not an artefact of the rest of the file.
+    solve_trigger_disparity_px: 12.0
     # 1.0 was set against 20 Hz frames, where it caps the vehicle at 20 m/s.
     # The solve is triggered by accumulated parallax rather than by frame, so
     # at 60 Hz one solve closes several frames and the interval it covers is
