@@ -27,7 +27,7 @@
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 
 #include "monoscale_core/estimator.hpp"
 #include "monoscale_odometry/parameters.hpp"
@@ -196,7 +196,7 @@ double stamp_of(const std_msgs::msg::Header & header)
 
 // The tracker's flat layout:
 //   [stamp, count, width, height, id, prev_x, prev_y, cur_x, cur_y, ...]
-bool parse_tracks(const std_msgs::msg::Float32MultiArray & message, monoscale::TrackFrame & out)
+bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::TrackFrame & out)
 {
   const auto & data = message.data;
   if (data.size() < 4) {
@@ -313,7 +313,7 @@ int main(int argc, char ** argv)
     const auto track = track_topics.find(message->topic_name);
     if (track != track_topics.end()) {
       monoscale::TrackFrame frame;
-      if (parse_tracks(deserialize<std_msgs::msg::Float32MultiArray>(serialized), frame)) {
+      if (parse_tracks(deserialize<std_msgs::msg::Float64MultiArray>(serialized), frame)) {
         estimator.ingest_tracks(track->second, frame);
       }
     } else if (message->topic_name == configuration.topics.imu) {
@@ -813,11 +813,11 @@ int main(int argc, char ** argv)
   const auto & diagnostics = estimator.diagnostics();
   std::printf(
     "pairs=%ld solves=%ld estimates=%zu failures=%ld (nosolve=%ld trans=%ld yaw=%ld) "
-    "coasted=%ld anchors=%d map_frames=%ld evicted=%ld "
+    "coasted=%ld yaw_misses=%ld anchors=%d map_frames=%ld evicted=%ld "
     "link[n=%ld gap=%.4fm range=%.2fm gap/range=%.5f]\n",
     diagnostics.pairs_seen, diagnostics.frames_processed, estimates.size(),
     diagnostics.motion_failures, diagnostics.fail_no_solve, diagnostics.fail_translation,
-    diagnostics.fail_yaw, diagnostics.coasted, diagnostics.anchors,
+    diagnostics.fail_yaw, diagnostics.coasted, diagnostics.imu_yaw_misses, diagnostics.anchors,
     diagnostics.map_aligned_frames, diagnostics.frames_evicted,
     diagnostics.anchors_adopted, diagnostics.link_gap_m, diagnostics.link_range_m,
     diagnostics.link_gap_per_m);

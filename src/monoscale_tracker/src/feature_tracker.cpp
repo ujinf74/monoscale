@@ -12,8 +12,19 @@
 // gives the answer its meaning -- ground projection, the anchor map, the
 // registration -- stays where it is.
 //
-// Published layout, one message per camera, flat float32:
+// Published layout, one message per camera, flat float64:
 //   [stamp_sec, count, width, height, id0, prev_x0, prev_y0, cur_x0, cur_y0, ...]
+//
+// float64, not float32. Two things in here are integers that do not survive a
+// 24 bit mantissa. A Unix timestamp of 1.79e9 quantises to about 106 seconds,
+// which collapses every frame of a live run onto the same instant and takes
+// dt, the frame pairing and the IMU interpolation with it -- invisible offline
+// only because the bags carry simulation stamps of a few tens of seconds.
+// Feature identities are the other: at road speed this tracker mints half a
+// million of them a minute, and past 2^24 consecutive integers land on the
+// same float, which the identity matcher assumes cannot happen. A 53 bit
+// mantissa holds both with room to spare, at twice the bytes on a link that
+// carries 2.4 MB/s.
 // Identities persist for as long as a feature is followed, which is what lets
 // the estimator match a sighting against the anchor it built earlier.
 //
@@ -37,7 +48,7 @@
 #include <opencv2/video/tracking.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
 #include <opencv2/core/cuda.hpp>
@@ -438,7 +449,7 @@ public:
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
       states_[name].target = max_features_;
-      publishers_[name] = create_publisher<std_msgs::msg::Float32MultiArray>(
+      publishers_[name] = create_publisher<std_msgs::msg::Float64MultiArray>(
         "/vision/tracks/" + name, output_qos);
       // Each camera needs its own callback group. Subscriptions left in the
       // node's default group are mutually exclusive with each other, so a
@@ -1327,7 +1338,7 @@ private:
     const std::vector<cv::Point2f> & current_points,
     const std::vector<int64_t> & identities)
   {
-    std_msgs::msg::Float32MultiArray out;
+    std_msgs::msg::Float64MultiArray out;
     out.data.reserve(4 + identities.size() * 5);
     out.data.push_back(
       static_cast<float>(message.header.stamp.sec) +
@@ -1362,9 +1373,10 @@ private:
   int road_max_age_ = 0;
   double road_epsilon_ = 1.0e-4;
   // Virtual road features live in their own identity range so they can never
-  // collide with a corner's. Float32 carries integers exactly to 2^24, and the
-  // message is float32.
-  static constexpr int64_t kRoadIdentityBase = 1 << 22;
+  // collide with a corner's. 2^40 is far above anything the corner counter can
+  // reach -- it mints of the order of a million an hour -- and far below the
+  // 2^53 the float64 message carries exactly.
+  static constexpr int64_t kRoadIdentityBase = 1LL << 40;
   int64_t road_next_identity_ = kRoadIdentityBase;
   int max_features_;
   double quality_level_ = 0.01;
@@ -1416,7 +1428,7 @@ private:
   std::map<std::string, long> published_;
   std::vector<rclcpp::CallbackGroup::SharedPtr> groups_;
   std::map<std::string, TrackState> states_;
-  std::map<std::string, rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr>
+  std::map<std::string, rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr>
   publishers_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subscriptions_;
 };
