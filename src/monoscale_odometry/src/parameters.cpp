@@ -160,6 +160,7 @@ Configuration declare_and_read(rclcpp::Node & node)
     // CameraSettings carries which cameras that was measured to be.
     camera.learn_mounting_pitch =
       node.declare_parameter<bool>(name + ".learn_mounting_pitch", false);
+    camera.fusion_weight = node.declare_parameter<double>(name + ".fusion_weight", 0.0);
 
     camera.k = matrix_of(k);
     camera.distortion = coefficients_of(d);
@@ -201,6 +202,17 @@ Configuration declare_and_read(rclcpp::Node & node)
   // it shipped switched off and stayed that way. Parameter files that still
   // carry the key load unchanged; the value is simply not read.
   settings.ground_ransac_threshold_m = declare_double("ground_ransac_threshold_m", 0.12);
+  settings.ground_align_softness_m = declare_double("ground_align_softness_m", 0.0);
+  settings.solve_max_distance_m = declare_double("solve_max_distance_m", 0.0);
+  settings.anchor_max_range_m = declare_double("anchor_max_range_m", 0.0);
+  settings.nonholonomic_lateral = declare_double("nonholonomic_lateral", 0.0);
+  settings.imu_scale_gain = declare_double("imu_scale_gain", 0.0);
+  settings.imu_scale_min_hop_m = declare_double("imu_scale_min_hop_m", 0.05);
+  settings.inertial_gate_m = declare_double("inertial_gate_m", 0.0);
+  settings.range_scale_gain = declare_double("range_scale_gain", 0.0);
+  settings.align_seed_from_last_hop = declare_bool("align_seed_from_last_hop", false);
+  settings.align_restarts = declare_int("align_restarts", 1);
+  settings.align_ambiguity_ratio = declare_double("align_ambiguity_ratio", 0.0);
   settings.ground_min_inliers = declare_int("ground_min_inliers", 24);
   settings.max_scale_error = declare_double("max_scale_error", 0.08);
   settings.max_translation_per_frame_m = declare_double("max_translation_per_frame_m", 1.0);
@@ -266,6 +278,44 @@ Configuration declare_and_read(rclcpp::Node & node)
   // 60 Hz, it stops telling a long-lived landmark apart from a fresh one.
   settings.anchor_max_observations = declare_int("anchor_max_observations", 20);
   settings.anchor_select_by_consistency = declare_bool("anchor_select_by_consistency", true);
+  settings.anchor_initial_variance = declare_double("anchor_initial_variance", 0.04);
+  settings.anchor_max_variance = declare_double("anchor_max_variance", 0.09);
+  settings.anchor_trial_observations = declare_int("anchor_trial_observations", 4);
+  settings.anchor_min_update_gain = declare_double("anchor_min_update_gain", 0.0);
+  settings.anchor_link_radius_m = declare_double("anchor_link_radius_m", 0.0);
+  settings.anchor_link_measure_only = declare_bool("anchor_link_measure_only", false);
+  settings.anchor_link_adopter_writes = declare_bool("anchor_link_adopter_writes", false);
+  settings.anchor_link_rebind_grace = declare_int("anchor_link_rebind_grace", 1);
+  settings.anchor_evict_by_age = declare_bool("anchor_evict_by_age", false);
+  settings.anchor_evict_for_new = declare_bool("anchor_evict_for_new", false);
+  settings.epipolar_weight = declare_double("epipolar_weight", 0.0);
+  settings.epipolar_softness_rad = declare_double("epipolar_softness_rad", 0.02);
+  settings.epipolar_min_hop_m = declare_double("epipolar_min_hop_m", 0.0);
+  settings.epipolar_non_ground_only = declare_bool("epipolar_non_ground_only", true);
+  settings.camera_split_lever = declare_double("camera_split_lever", 0.0);
+  settings.road_point_weight = declare_double("road_point_weight", 1.0);
+  settings.anchor_information_power = declare_double("anchor_information_power", 0.0);
+  settings.anchor_weight_by_information = declare_bool("anchor_weight_by_information", false);
+  settings.level_frame_origin = declare_bool("level_frame_origin", true);
+  settings.range_weight_power = declare_double("range_weight_power", 0.0);
+  settings.pixel_region_x0 = declare_double("pixel_region_x0", 0.0);
+  settings.pixel_region_y0 = declare_double("pixel_region_y0", 0.0);
+  settings.pixel_region_x1 = declare_double("pixel_region_x1", 0.0);
+  settings.pixel_region_y1 = declare_double("pixel_region_y1", 0.0);
+  settings.vision_only_pose = declare_bool("vision_only_pose", false);
+  settings.ground_rotation_threshold_m = declare_double("ground_rotation_threshold_m", 0.0);
+  settings.ground_pair_passes = declare_int("ground_pair_passes", 1);
+  settings.ground_pair_softness_m = declare_double("ground_pair_softness_m", 0.0);
+  settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
+  settings.vision_scale = declare_double("vision_scale", 1.0);
+  settings.map_solve_weight = declare_double("map_solve_weight", 1.0);
+  settings.anchor_divergence_gain = declare_double("anchor_divergence_gain", 0.0);
+  settings.epipolar_reject_deg = declare_double("epipolar_reject_deg", 0.0);
+  settings.epipolar_trust_deg = declare_double("epipolar_trust_deg", 0.0);
+  settings.imu_translation_base_from_imu = vector_of(
+    node.declare_parameter<std::vector<double>>(
+      "imu_translation_base_from_imu", std::vector<double>{0.0, 0.0, 0.0}));
+  settings.imu_angular_accel_tau_sec = declare_double("imu_angular_accel_tau_sec", 0.0);
   settings.anchor_seed_travel_m = declare_double("anchor_seed_travel_m", 0.0);
 
   settings.frame_decimation = std::max(declare_int("frame_decimation", 1), 1);

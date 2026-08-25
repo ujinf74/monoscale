@@ -9,6 +9,8 @@
 namespace monoscale
 {
 
+bool g_level_frame_origin = true;
+
 namespace
 {
 
@@ -178,6 +180,11 @@ void pixels_to_ground(
   }
 
   Eigen::Vector3d normal(0.0, 0.0, 1.0);
+  // The camera's own position, in whichever frame the points come out in.
+  Eigen::Vector3d reference = origin;
+  if (tilt != nullptr && g_level_frame_origin) {
+    reference = (*tilt) * origin;
+  }
   if (tilt != nullptr) {
     // The ground stays level in the world while the body tilts, so in body
     // coordinates the plane's normal is the world vertical seen from here.
@@ -204,8 +211,8 @@ void pixels_to_ground(
         point = (*tilt) * point;
       }
     }
-    const double dx = point.x() - origin.x();
-    const double dy = point.y() - origin.y();
+    const double dx = point.x() - reference.x();
+    const double dy = point.y() - reference.y();
     const double distance = std::hypot(dx, dy);
     ground_out(i, 0) = point.x();
     ground_out(i, 1) = point.y();
@@ -272,8 +279,10 @@ std::optional<MotionEstimate> estimate_planar_motion(
 
 std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
   const Points2 & previous_points, const Points2 & current_points, double yaw,
-  double ransac_threshold, int min_inliers)
+  double ransac_threshold, int min_inliers, double softness, const Weights & weights,
+  int passes)
 {
+  const bool weighted = weights.size() == previous_points.rows();
   const Eigen::Index count = previous_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || current_points.rows() != count) {
     return std::nullopt;
@@ -349,35 +358,78 @@ std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
   MotionEstimate result;
   result.inliers.resize(count);
   int inliers = 0;
+  double total = 0.0;
   double sum_x = 0.0;
   double sum_y = 0.0;
+  // Reweighted more than once, the way the anchor alignment already is. This
+  // path answers most solves and settled for a median followed by a single
+  // weighted mean; the anchor path takes three passes because one pass leaves
+  // the centre wherever the median put it.
+  // Weighted inside the gate rather than counted alike. A point's apparent
+  // displacement carries its own range error, and range error grows with
+  // range, so the far votes read long. Counting every survivor equally makes
+  // the estimate a step function of the threshold, and through a turn the
+  // votes spread wider -- which is why the two-frame path reads +1.3% at a
+  // 0.04 m gate and +6.2% at 0.30 through a parking manoeuvre while the
+  // anchor path, which has been weighted since the same fix was made there,
+  // stays near +0.7%.
+  const double soft_squared = 2.0 * softness * softness;
+  for (int pass = 0; pass < std::max(passes, 1); ++pass) {
+  inliers = 0;
+  total = 0.0;
+  sum_x = 0.0;
+  sum_y = 0.0;
   for (Eigen::Index i = 0; i < count; ++i) {
     const double dx = offsets(i, 0) - translation.x();
     const double dy = offsets(i, 1) - translation.y();
-    const bool kept = dx * dx + dy * dy <= threshold_squared;
+    const double distance = dx * dx + dy * dy;
+    const bool kept = distance <= threshold_squared;
     result.inliers(i) = kept;
     if (kept) {
       ++inliers;
-      sum_x += offsets(i, 0);
-      sum_y += offsets(i, 1);
+      double weight = soft_squared > 0.0 ? std::exp(-distance / soft_squared) : 1.0;
+      // A ground point's position error is its bearing error multiplied by
+      // (R^2 + h^2) / h, so the far ones are worth quadratically less. They
+      // have always been counted the same as the near ones.
+      if (weighted) {
+        weight *= weights(i);
+      }
+      total += weight;
+      sum_x += weight * offsets(i, 0);
+      sum_y += weight * offsets(i, 1);
     }
   }
-  if (inliers < min_inliers) {
-    return std::nullopt;
+    if (inliers < min_inliers || !(total > 0.0)) {
+      return std::nullopt;
+    }
+    const Eigen::Vector2d moved(sum_x / total, sum_y / total);
+    const double step = (moved - translation).norm();
+    translation = moved;
+    if (step < 1e-6) {
+      break;
+    }
   }
   result.motion = PlanarMotion{
-    sum_x / inliers, sum_y / inliers, yaw, inliers, 1.0};
+    translation.x(), translation.y(), yaw, inliers, 1.0};
   return result;
 }
 
-std::optional<PlanarMotion> fuse_planar_motions(const std::vector<PlanarMotion> & motions)
+std::optional<PlanarMotion> fuse_planar_motions(
+  const std::vector<PlanarMotion> & motions, const std::vector<double> & weights)
 {
   if (motions.empty()) {
     return std::nullopt;
   }
+  const bool given = weights.size() == motions.size();
+  const auto weight_of = [&](size_t i) {
+      return given ? weights[i] : static_cast<double>(std::max(motions[i].inliers, 1));
+    };
   double total = 0.0;
-  for (const auto & motion : motions) {
-    total += std::max(motion.inliers, 1);
+  for (size_t i = 0; i < motions.size(); ++i) {
+    total += weight_of(i);
+  }
+  if (!(total > 0.0)) {
+    return std::nullopt;
   }
   double x = 0.0;
   double y = 0.0;
@@ -385,8 +437,9 @@ std::optional<PlanarMotion> fuse_planar_motions(const std::vector<PlanarMotion> 
   double cosine = 0.0;
   double scale = 0.0;
   int inliers = 0;
-  for (const auto & motion : motions) {
-    const double weight = std::max(motion.inliers, 1) / total;
+  for (size_t i = 0; i < motions.size(); ++i) {
+    const auto & motion = motions[i];
+    const double weight = weight_of(i) / total;
     x += weight * motion.x;
     y += weight * motion.y;
     sine += weight * std::sin(motion.yaw);
@@ -597,6 +650,116 @@ PlanarMotion rescale_motion(const PlanarMotion & motion, double ratio)
   carried.inliers = motion.inliers;
   carried.scale = motion.scale;
   return carried;
+}
+
+std::optional<Eigen::Vector2d> epipolar_bearing(
+  const Points2 & previous_pixels, const Points2 & current_pixels, const Mask & use,
+  const CameraModel & model, double yaw_delta, double softness, int min_points)
+{
+  const Eigen::Index count = previous_pixels.rows();
+  if (current_pixels.rows() != count || use.size() != count) {
+    return std::nullopt;
+  }
+  std::vector<Eigen::Index> chosen;
+  chosen.reserve(static_cast<size_t>(count));
+  for (Eigen::Index i = 0; i < count; ++i) {
+    if (use(i)) {
+      chosen.push_back(i);
+    }
+  }
+  if (static_cast<int>(chosen.size()) < min_points) {
+    return std::nullopt;
+  }
+
+  const Eigen::Index taken = static_cast<Eigen::Index>(chosen.size());
+  Points2 previous(taken, 2);
+  Points2 current(taken, 2);
+  for (Eigen::Index i = 0; i < taken; ++i) {
+    previous.row(i) = previous_pixels.row(chosen[static_cast<size_t>(i)]);
+    current.row(i) = current_pixels.row(chosen[static_cast<size_t>(i)]);
+  }
+  // Rays, not pixels. The fisheye has to be read as the projection it is
+  // before inv(K) means anything -- the same trap pixels_to_ground documents.
+  const Points2 previous_pinhole = undistort_pixels(previous, model);
+  const Points2 current_pinhole = undistort_pixels(current, model);
+
+  // A point at rest in the world, seen from body frames 1 and 2:
+  //   X2 = Rz(-dyaw) (X1 - d)
+  // Carried into the camera, X2c = R X1c + t with
+  //   R = Rcb Rz(-dyaw) Rbc,   t = -R Rcb (d + k)
+  // where k = (Rz(dyaw) - I) tbc is what the mount alone contributes when the
+  // vehicle turns. Only the bearing of (d + k) survives here, which is why the
+  // lever arm is the caller's problem and not this function's.
+  const Eigen::Matrix3d & base_from_camera = model.rotation_base_from_camera;
+  const Eigen::Matrix3d camera_from_base = base_from_camera.transpose();
+  const double cosine = std::cos(yaw_delta);
+  const double sine = std::sin(yaw_delta);
+  Eigen::Matrix3d yawed = Eigen::Matrix3d::Identity();
+  yawed(0, 0) = cosine;
+  yawed(0, 1) = sine;
+  yawed(1, 0) = -sine;
+  yawed(1, 1) = cosine;
+  const Eigen::Matrix3d rotation = camera_from_base * yawed * base_from_camera;
+  const Eigen::Matrix3d basis = rotation * camera_from_base;
+  const Eigen::Vector3d forward = basis.col(0);
+  const Eigen::Vector3d left = basis.col(1);
+
+  // x2'[t]x R x1 = 0 with t = basis * (mx, my, 0) is linear in (mx, my),
+  // because x2'[g]x r is the triple product g . (r x x2).
+  Eigen::Matrix<double, Eigen::Dynamic, 2> rows(taken, 2);
+  Eigen::VectorXd lengths(taken);
+  for (Eigen::Index i = 0; i < taken; ++i) {
+    Eigen::Vector3d first = model.k_inverse *
+      Eigen::Vector3d(previous_pinhole(i, 0), previous_pinhole(i, 1), 1.0);
+    Eigen::Vector3d second = model.k_inverse *
+      Eigen::Vector3d(current_pinhole(i, 0), current_pinhole(i, 1), 1.0);
+    first.normalize();
+    second.normalize();
+    const Eigen::Vector3d moment = (rotation * first).cross(second);
+    rows(i, 0) = forward.dot(moment);
+    rows(i, 1) = left.dot(moment);
+    lengths(i) = rows.row(i).norm();
+  }
+
+  // Rows are left unnormalised on purpose: a row's length is the parallax the
+  // feature actually shows, so a feature that barely moved weighs little
+  // instead of having its noise divided up to full strength. The residual is
+  // normalised, because there the length is exactly what must not matter.
+  Eigen::Vector2d bearing = Eigen::Vector2d::Zero();
+  Eigen::VectorXd weights = Eigen::VectorXd::Ones(taken);
+  const double soft_squared = 2.0 * softness * softness;
+  for (int pass = 0; pass < 3; ++pass) {
+    Eigen::Matrix2d scatter = Eigen::Matrix2d::Zero();
+    for (Eigen::Index i = 0; i < taken; ++i) {
+      scatter += weights(i) * rows.row(i).transpose() * rows.row(i);
+    }
+    const double trace = scatter(0, 0) + scatter(1, 1);
+    const double gap = std::sqrt(
+      std::pow(scatter(0, 0) - scatter(1, 1), 2) + 4.0 * scatter(0, 1) * scatter(0, 1));
+    if (!std::isfinite(gap) || trace <= 0.0) {
+      return std::nullopt;
+    }
+    const double smallest = 0.5 * (trace - gap);
+    const Eigen::Vector2d first(scatter(0, 1), smallest - scatter(0, 0));
+    const Eigen::Vector2d second(smallest - scatter(1, 1), scatter(0, 1));
+    const Eigen::Vector2d picked = first.norm() >= second.norm() ? first : second;
+    if (picked.norm() < 1e-12) {
+      return std::nullopt;
+    }
+    bearing = picked.normalized();
+    if (soft_squared <= 0.0) {
+      break;
+    }
+    for (Eigen::Index i = 0; i < taken; ++i) {
+      const double residual = lengths(i) > 1e-12
+        ? std::abs(rows.row(i).dot(bearing)) / lengths(i) : 1.0;
+      weights(i) = std::exp(-residual * residual / soft_squared);
+    }
+  }
+  if (!bearing.allFinite()) {
+    return std::nullopt;
+  }
+  return bearing;
 }
 
 }  // namespace monoscale

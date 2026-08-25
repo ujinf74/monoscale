@@ -8,9 +8,10 @@
 namespace monoscale
 {
 
-GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings)
-: settings_(settings)
+GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings, int sources)
+: settings_(settings), sources_(std::max(sources, 1))
 {
+  by_id_.resize(static_cast<size_t>(sources_));
   const int capacity = std::max(settings_.max_anchors, 1) + 1;
   position_.setZero(capacity, 2);
   observation_.setZero(capacity);
@@ -18,35 +19,133 @@ GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings)
   seen_.setZero(capacity);
   information_.setZero(capacity);
   identifier_.setConstant(capacity, -1);
+  owner_.setConstant(capacity, sources_, -1);
+  founder_.setConstant(capacity, -1);
+  founded_path_.setZero(capacity);
   free_.reserve(static_cast<size_t>(capacity));
   for (int slot = capacity - 1; slot >= 0; --slot) {
     free_.push_back(slot);
   }
-  by_id_.assign(4096, -1);
+  for (auto & table : by_id_) {
+    table.assign(4096, -1);
+  }
 }
 
-int64_t GroundAnchorMap::slot_of(int64_t identity) const
+int64_t GroundAnchorMap::slot_of(int source, int64_t identity) const
 {
-  if (identity < 0 || identity >= static_cast<int64_t>(by_id_.size())) {
+  if (source < 0 || source >= sources_) {
     return -1;
   }
-  return by_id_[static_cast<size_t>(identity)];
+  const auto & table = by_id_[static_cast<size_t>(source)];
+  if (identity < 0 || identity >= static_cast<int64_t>(table.size())) {
+    return -1;
+  }
+  return table[static_cast<size_t>(identity)];
 }
 
-void GroundAnchorMap::grow_table(int64_t highest)
+int64_t GroundAnchorMap::cell_of(double x, double y) const
 {
-  if (highest < static_cast<int64_t>(by_id_.size())) {
+  const double size = std::max(settings_.link_radius_m, 1e-3);
+  const int64_t cx = static_cast<int64_t>(std::floor(x / size));
+  const int64_t cy = static_cast<int64_t>(std::floor(y / size));
+  // Cantor-style mix; the map is sparse so collisions only cost a comparison.
+  return (cx << 32) ^ (cy & 0xffffffffLL);
+}
+
+void GroundAnchorMap::grid_insert(int64_t slot)
+{
+  if (settings_.link_radius_m <= 0.0) {
+    return;
+  }
+  grid_[cell_of(position_(slot, 0), position_(slot, 1))].push_back(slot);
+}
+
+void GroundAnchorMap::grid_erase(int64_t slot)
+{
+  if (settings_.link_radius_m <= 0.0) {
+    return;
+  }
+  const auto found = grid_.find(cell_of(position_(slot, 0), position_(slot, 1)));
+  if (found == grid_.end()) {
+    return;
+  }
+  auto & bucket = found->second;
+  for (size_t i = 0; i < bucket.size(); ++i) {
+    if (bucket[i] == slot) {
+      bucket[i] = bucket.back();
+      bucket.pop_back();
+      break;
+    }
+  }
+}
+
+int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
+{
+  if (settings_.link_radius_m <= 0.0) {
+    return -1;
+  }
+  const double size = std::max(settings_.link_radius_m, 1e-3);
+  const double limit = settings_.link_radius_m * settings_.link_radius_m;
+  const int64_t cx = static_cast<int64_t>(std::floor(x / size));
+  const int64_t cy = static_cast<int64_t>(std::floor(y / size));
+  int64_t best = -1;
+  double best_distance = limit;
+  for (int64_t dy = -1; dy <= 1; ++dy) {
+    for (int64_t dx = -1; dx <= 1; ++dx) {
+      const auto found = grid_.find(((cx + dx) << 32) ^ ((cy + dy) & 0xffffffffLL));
+      if (found == grid_.end()) {
+        continue;
+      }
+      for (const int64_t slot : found->second) {
+        if (identifier_(slot) < 0) {
+          continue;
+        }
+        // An anchor this camera already wrote to *this frame* is spoken for --
+        // taking it would fold two live features into one. One it owns from an
+        // earlier frame is a different matter: that track has since been lost
+        // and re-detected under a new identity, and rebinding is exactly what
+        // reconnects them. Refusing that was costing more than the
+        // cross-camera case it was written for.
+        // "Not seen this frame" is not the same as "gone". A feature that
+        // blinks out for a frame or two is still being tracked, and taking its
+        // anchor leaves it with none when it comes back. Only rebind an anchor
+        // this source has not touched for a while.
+        if (owner_(slot, source) >= 0 &&
+          frame_ - seen_(slot) < settings_.link_rebind_grace_frames)
+        {
+          continue;
+        }
+        const double ex = position_(slot, 0) - x;
+        const double ey = position_(slot, 1) - y;
+        const double distance = ex * ex + ey * ey;
+        if (distance < best_distance) {
+          best_distance = distance;
+          best = slot;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+void GroundAnchorMap::grow_table(int source, int64_t highest)
+{
+  auto & by_id_source = by_id_[static_cast<size_t>(source)];
+  if (highest < static_cast<int64_t>(by_id_source.size())) {
     return;
   }
   // Geometric, and never below the identity that asked for it, so a whole
   // drive costs a handful of reallocations.
-  const size_t size = std::max(2 * by_id_.size(), static_cast<size_t>(highest) + 1);
-  by_id_.resize(size, -1);
+  const size_t size =
+    std::max(2 * by_id_source.size(), static_cast<size_t>(highest) + 1);
+  by_id_source.resize(size, -1);
 }
 
 double GroundAnchorMap::weight_at(int64_t slot) const
 {
-  const double count = static_cast<double>(
+  const double count = settings_.weight_by_information
+    ? information_(slot)
+    : static_cast<double>(
     std::min<int64_t>(observation_(slot), settings_.max_observations));
   if (!settings_.select_by_consistency) {
     return count;
@@ -54,21 +153,21 @@ double GroundAnchorMap::weight_at(int64_t slot) const
   return count / std::max(variance_(slot), 1e-4);
 }
 
-void GroundAnchorMap::anchored(const Identities & ids, Mask & out) const
+void GroundAnchorMap::anchored(int source, const Identities & ids, Mask & out) const
 {
   out.resize(ids.size());
   for (Eigen::Index i = 0; i < ids.size(); ++i) {
-    out(i) = slot_of(ids(i)) >= 0;
+    out(i) = slot_of(source, ids(i)) >= 0;
   }
 }
 
 void GroundAnchorMap::anchor_view(
-  const Identities & ids, Points2 & world_out, Weights & weights_out) const
+  int source, const Identities & ids, Points2 & world_out, Weights & weights_out) const
 {
   world_out.resize(ids.size(), 2);
   weights_out.resize(ids.size());
   for (Eigen::Index i = 0; i < ids.size(); ++i) {
-    const int64_t slot = slot_of(ids(i));
+    const int64_t slot = slot_of(source, ids(i));
     if (slot < 0) {
       world_out(i, 0) = 0.0;
       world_out(i, 1) = 0.0;
@@ -82,10 +181,9 @@ void GroundAnchorMap::anchor_view(
 }
 
 void GroundAnchorMap::update(
-  const Identities & ids, const Points2 & world_points, bool allow_new,
+  int source, const Identities & ids, const Points2 & world_points, bool allow_new,
   const Weights & information)
 {
-  ++frame_;
   const Eigen::Index count = ids.size();
   const bool weighted = information.size() == count;
 
@@ -97,11 +195,59 @@ void GroundAnchorMap::update(
     if (!std::isfinite(x) || !std::isfinite(y)) {
       continue;
     }
-    const int64_t slot = slot_of(ids(i));
+    int64_t slot = slot_of(source, ids(i));
     if (slot < 0) {
-      if (allow_new) {
-        fresh.push_back(i);
+      // A camera meeting ground another camera already anchored adopts that
+      // anchor instead of founding a rival one in the same place.
+      const int64_t adopted = adoptable(source, x, y);
+      if (adopted >= 0) {
+        // The crossing, read as a length. Positive along-track means this
+        // camera puts the ground further on than the anchor does, which is a
+        // pose that ran long over the stretch between the two sightings.
+        const double travel = path_ - founded_path_(adopted);
+        if (travel > 1.0) {
+          const double along = (x - position_(adopted, 0)) * std::cos(yaw_) +
+            (y - position_(adopted, 1)) * std::sin(yaw_);
+          along_ += along;
+          gap_travel_ += travel;
+          travel_squared_ += travel * travel;
+          cross_ += along * travel;
+          ++crossings_;
+        }
       }
+      if (adopted >= 0 && !settings_.link_measure_only) {
+        grow_table(source, ids(i));
+        // Release whatever identity this source had bound here before.
+        auto & table = by_id_[static_cast<size_t>(source)];
+        const int64_t previous = owner_(adopted, source);
+        if (previous >= 0 && previous < static_cast<int64_t>(table.size())) {
+          table[static_cast<size_t>(previous)] = -1;
+        }
+        table[static_cast<size_t>(ids(i))] = adopted;
+        owner_(adopted, source) = ids(i);
+        // What the two cameras disagreed by, and how that compares with how
+        // far away the point was.
+        const double gap = std::hypot(x - position_(adopted, 0), y - position_(adopted, 1));
+        const double range = weighted
+          ? 1.0 / std::sqrt(std::max(information(i), 1e-9)) : 0.0;
+        link_gap_ += gap;
+        link_range_ += range;
+        link_ratio_ += range > 1e-6 ? gap / range : 0.0;
+        ++adopted_;
+        slot = adopted;
+      } else {
+        if (allow_new) {
+          fresh.push_back(i);
+        }
+        continue;
+      }
+    }
+    // A camera that merely adopted this anchor reads it and keeps it alive,
+    // but does not move it: the disagreement is the pose's to answer for.
+    if (!settings_.link_adopter_writes && founder_(slot) >= 0 &&
+      founder_(slot) != static_cast<int64_t>(source))
+    {
+      seen_(slot) = frame_;
       continue;
     }
     const int64_t counted = observation_(slot);
@@ -115,25 +261,60 @@ void GroundAnchorMap::update(
       const double total = information_(slot) + worth;
       gain = worth / total;
       information_(slot) = total;
+      // Hold the window finite. The sightings are not independent -- each one
+      // is written in the world frame the estimate had just settled on -- so
+      // averaging more of them does not keep buying precision, it only stops
+      // the anchor from ever moving again.
+      if (settings_.min_update_gain > 0.0 && gain < settings_.min_update_gain) {
+        gain = settings_.min_update_gain;
+        information_(slot) = worth / gain;
+      }
     }
     const double dx = x - position_(slot, 0);
     const double dy = y - position_(slot, 1);
     const double residual = dx * dx + dy * dy;
     variance_(slot) += gain * (residual - variance_(slot));
+    grid_erase(slot);
     position_(slot, 0) += gain * dx;
     position_(slot, 1) += gain * dy;
+    grid_insert(slot);
     observation_(slot) = counted + 1;
     seen_(slot) = frame_;
   }
 
-  // Then births, up to whatever room the free list has.
+  // Then births. A full map has no free slots and nothing forces it to make
+  // any: prune only evicts what is stale or over capacity, and at exactly
+  // capacity it is neither. So the map fills once, early, and thereafter the
+  // ground in front of the vehicle cannot get in -- measured, only 14-37% of
+  // the points a solve could use had an anchor. Make room for what is arriving
+  // by giving up what was seen longest ago; it is behind the vehicle and
+  // cannot be registered against again.
+  if (settings_.evict_for_new && allow_new && fresh.size() > free_.size()) {
+    const size_t needed = fresh.size() - free_.size();
+    std::vector<std::pair<int64_t, int64_t>> oldest;
+    oldest.reserve(static_cast<size_t>(live_));
+    for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
+      if (identifier_(slot) >= 0 && seen_(slot) != frame_) {
+        oldest.emplace_back(seen_(slot), slot);
+      }
+    }
+    const size_t give = std::min(needed, oldest.size());
+    if (give > 0) {
+      std::nth_element(
+        oldest.begin(), oldest.begin() + static_cast<std::ptrdiff_t>(give), oldest.end(),
+        [](const auto & a, const auto & b) {return a.first < b.first;});
+      for (size_t n = 0; n < give; ++n) {
+        forget(oldest[n].second);
+      }
+    }
+  }
   const size_t room = std::min(fresh.size(), free_.size());
   if (room > 0) {
     int64_t highest = 0;
     for (size_t n = 0; n < room; ++n) {
       highest = std::max(highest, ids(fresh[n]));
     }
-    grow_table(highest);
+    grow_table(source, highest);
     for (size_t n = 0; n < room; ++n) {
       const Eigen::Index i = fresh[n];
       const int64_t slot = free_.back();
@@ -145,7 +326,14 @@ void GroundAnchorMap::update(
       seen_(slot) = frame_;
       identifier_(slot) = ids(i);
       information_(slot) = weighted ? std::max(information(i), 1e-9) : 1.0;
-      by_id_[static_cast<size_t>(ids(i))] = slot;
+      for (int other = 0; other < sources_; ++other) {
+        owner_(slot, other) = -1;
+      }
+      owner_(slot, source) = ids(i);
+      founder_(slot) = source;
+      founded_path_(slot) = path_;
+      by_id_[static_cast<size_t>(source)][static_cast<size_t>(ids(i))] = slot;
+      grid_insert(slot);
       ++live_;
     }
   }
@@ -154,10 +342,17 @@ void GroundAnchorMap::update(
 
 void GroundAnchorMap::forget(int64_t slot)
 {
-  const int64_t gone = identifier_(slot);
-  if (gone >= 0 && gone < static_cast<int64_t>(by_id_.size())) {
-    by_id_[static_cast<size_t>(gone)] = -1;
+  // Every source that had bound an identity to this slot loses it.
+  for (int source = 0; source < sources_; ++source) {
+    const int64_t gone = owner_(slot, source);
+    auto & table = by_id_[static_cast<size_t>(source)];
+    if (gone >= 0 && gone < static_cast<int64_t>(table.size())) {
+      table[static_cast<size_t>(gone)] = -1;
+    }
+    owner_(slot, source) = -1;
   }
+  grid_erase(slot);
+  founder_(slot) = -1;
   identifier_(slot) = -1;
   observation_(slot) = 0;
   free_.push_back(slot);
@@ -189,12 +384,22 @@ void GroundAnchorMap::prune()
   if (surplus <= 0) {
     return;
   }
-  // Drop the least trustworthy first; they carry the least history.
+  // What to give up when the map is full.
+  //
+  // Dropping the least trustworthy keeps the best-observed anchors, which
+  // sounds right and is measurably wrong: those are the ones seen longest ago,
+  // so the map fills with ground the vehicle has driven past while the ground
+  // in front of it cannot get a slot. Measured, only 14-37% of the points a
+  // solve could use had an anchor at all. Scoring by when an anchor was last
+  // seen evicts the past instead, which is the half that can no longer be
+  // registered against.
   std::vector<std::pair<double, int64_t>> scored;
   scored.reserve(static_cast<size_t>(live_));
   for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
     if (identifier_(slot) >= 0) {
-      scored.emplace_back(weight_at(slot), slot);
+      scored.emplace_back(
+        settings_.evict_by_age ? static_cast<double>(seen_(slot)) : weight_at(slot),
+        slot);
     }
   }
   std::nth_element(
@@ -207,7 +412,7 @@ void GroundAnchorMap::prune()
 
 std::optional<Eigen::Vector2d> GroundAnchorMap::position_of(int64_t identity) const
 {
-  const int64_t slot = slot_of(identity);
+  const int64_t slot = slot_of(0, identity);
   if (slot < 0) {
     return std::nullopt;
   }
@@ -216,7 +421,7 @@ std::optional<Eigen::Vector2d> GroundAnchorMap::position_of(int64_t identity) co
 
 std::optional<int> GroundAnchorMap::observations_of(int64_t identity) const
 {
-  const int64_t slot = slot_of(identity);
+  const int64_t slot = slot_of(0, identity);
   if (slot < 0) {
     return std::nullopt;
   }
@@ -225,7 +430,7 @@ std::optional<int> GroundAnchorMap::observations_of(int64_t identity) const
 
 std::optional<double> GroundAnchorMap::variance_of(int64_t identity) const
 {
-  const int64_t slot = slot_of(identity);
+  const int64_t slot = slot_of(0, identity);
   if (slot < 0) {
     return std::nullopt;
   }
@@ -234,7 +439,7 @@ std::optional<double> GroundAnchorMap::variance_of(int64_t identity) const
 
 std::optional<double> GroundAnchorMap::weight_of(int64_t identity) const
 {
-  const int64_t slot = slot_of(identity);
+  const int64_t slot = slot_of(0, identity);
   if (slot < 0) {
     return std::nullopt;
   }
@@ -244,7 +449,9 @@ std::optional<double> GroundAnchorMap::weight_of(int64_t identity) const
 std::optional<AnchorAlignment> align_to_anchors(
   const Points2 & body_points, const Points2 & world_points, const Weights & weights_in,
   double yaw, double threshold, int min_inliers, bool refine_yaw,
-  const Eigen::Vector2d & origin, double radial_min_range)
+  const Eigen::Vector2d & origin, double radial_min_range, double softness,
+  const Eigen::Vector2d * translation_prior, int restarts, double ambiguity,
+  const Eigen::Vector2d * inertial_hop, double inertial_gate)
 {
   const Eigen::Index count = body_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || world_points.rows() != count) {
@@ -257,8 +464,14 @@ std::optional<AnchorAlignment> align_to_anchors(
   Eigen::Vector2d centre = Eigen::Vector2d::Zero();
   bool have_centre = false;
   std::vector<char> inliers(static_cast<size_t>(count), 0);
+  // How much each point counts towards the fit. A hard gate makes the estimate
+  // a step function of the threshold, which is why sweeping it moves the score
+  // in jumps rather than smoothly; a Gaussian falloff of the same width lets a
+  // point at the edge count for what it is worth instead of all or nothing.
+  std::vector<double> robust(static_cast<size_t>(count), 1.0);
   Points2 votes(count, 2);
   const double threshold_squared = threshold * threshold;
+  const double soft_squared = softness > 0.0 ? 2.0 * softness * softness : 0.0;
 
   for (int iteration = 0; iteration < 4; ++iteration) {
     const double c = std::cos(yaw);
@@ -287,6 +500,119 @@ std::optional<AnchorAlignment> align_to_anchors(
           return 0.5 * (lower + upper);
         };
       centre = Eigen::Vector2d(median(xs), median(ys));
+
+      // The median is one starting point, and a reweighted mean only ever
+      // walks downhill from where it starts. When the hop is short the votes
+      // spread wider than the hop itself, the median lands near zero, and the
+      // iteration settles on "did not move" -- which is a real local optimum,
+      // just not the right one. Starting the same iteration from several votes
+      // and keeping whichever attracts the most support finds the mode the
+      // data actually has, rather than the one nearest the median.
+      if (restarts > 1 && count > 2) {
+        const auto settle = [&](Eigen::Vector2d seed) {
+            for (int pass = 0; pass < 3; ++pass) {
+              double total = 0.0;
+              Eigen::Vector2d sum = Eigen::Vector2d::Zero();
+              for (Eigen::Index i = 0; i < count; ++i) {
+                const double dx = votes(i, 0) - seed.x();
+                const double dy = votes(i, 1) - seed.y();
+                const double distance = dx * dx + dy * dy;
+                double r;
+                if (soft_squared > 0.0) {
+                  r = std::exp(-distance / soft_squared);
+                } else {
+                  r = distance <= threshold_squared ? 1.0 : 0.0;
+                }
+                const double w = weight_of(i) * r;
+                total += w;
+                sum += w * Eigen::Vector2d(votes(i, 0), votes(i, 1));
+              }
+              if (total <= 0.0) {
+                return std::make_pair(seed, 0.0);
+              }
+              seed = sum / total;
+            }
+            double score = 0.0;
+            for (Eigen::Index i = 0; i < count; ++i) {
+              const double dx = votes(i, 0) - seed.x();
+              const double dy = votes(i, 1) - seed.y();
+              const double distance = dx * dx + dy * dy;
+              const double r = soft_squared > 0.0
+                ? std::exp(-distance / soft_squared)
+                : (distance <= threshold_squared ? 1.0 : 0.0);
+              score += weight_of(i) * r;
+            }
+            return std::make_pair(seed, score);
+          };
+        // A mode further from the inertial expectation than the gate allows is
+        // not a translation this vehicle can have made in this interval. The
+        // commonest such mode is the one at zero: when the hop is short the
+        // votes spread wider than it, and "did not move" collects as much
+        // weight as the truth. The accelerometer is a poor guide to where the
+        // answer is and an excellent one to where it is not.
+        const auto admissible = [&](const Eigen::Vector2d & where) {
+            if (inertial_hop == nullptr || inertial_gate <= 0.0) {
+              return true;
+            }
+            return (where - *inertial_hop).norm() <= inertial_gate;
+          };
+        auto best = settle(centre);
+        if (!admissible(best.first)) {
+          best.second = -1.0;
+        }
+        // The previous hop is one more place to look, not a place to be
+        // dragged to: it competes on the same score as every other start, so
+        // it wins only where the data agrees with it.
+        if (translation_prior != nullptr) {
+          const auto seeded = settle(*translation_prior);
+          if (seeded.second > best.second) {
+            best = seeded;
+          }
+        }
+        // Evenly spaced votes, so the choice is deterministic and spans the
+        // spread rather than clustering wherever the list happens to start.
+        const Eigen::Index stride = std::max<Eigen::Index>(1, count / (restarts - 1));
+        std::vector<std::pair<Eigen::Vector2d, double>> found;
+        found.push_back(best);
+        for (Eigen::Index i = 0; i < count; i += stride) {
+          auto candidate = settle(Eigen::Vector2d(votes(i, 0), votes(i, 1)));
+          if (!admissible(candidate.first)) {
+            candidate.second = -1.0;
+          }
+          found.push_back(candidate);
+          if (candidate.second > best.second) {
+            best = candidate;
+          }
+        }
+        if (best.second < 0.0) {
+          // Every mode was outside the gate. Nothing here is worth believing.
+          return std::nullopt;
+        }
+        centre = best.first;
+        have_centre = true;
+
+        // Is the winner actually the answer, or just the first of several the
+        // data supports equally? When the hop is short every mode attracts
+        // about the same weight, and picking one of them is guessing. The
+        // runner-up here is the best mode that is somewhere else, so the ratio
+        // says how much the data prefers this translation to a different one.
+        // Below the threshold the solve is refused and the filter coasts,
+        // which is cheaper than a confident wrong hop.
+        if (ambiguity > 0.0) {
+          double rival = 0.0;
+          const double separation = std::max(threshold, 1e-6);
+          for (const auto & entry : found) {
+            if ((entry.first - centre).norm() > separation) {
+              rival = std::max(rival, entry.second);
+            }
+          }
+          if (rival > 0.0 && best.second < ambiguity * rival) {
+            return std::nullopt;
+          }
+        }
+      } else if (translation_prior != nullptr) {
+        centre = *translation_prior;
+      }
       have_centre = true;
     }
 
@@ -298,8 +624,11 @@ std::optional<AnchorAlignment> align_to_anchors(
       for (Eigen::Index i = 0; i < count; ++i) {
         const double dx = votes(i, 0) - centre.x();
         const double dy = votes(i, 1) - centre.y();
-        const bool inside = dx * dx + dy * dy <= threshold_squared;
+        const double distance = dx * dx + dy * dy;
+        const bool inside = distance <= threshold_squared;
         inliers[static_cast<size_t>(i)] = inside ? 1 : 0;
+        robust[static_cast<size_t>(i)] = soft_squared > 0.0
+          ? std::exp(-distance / soft_squared) : (inside ? 1.0 : 0.0);
         kept += inside ? 1 : 0;
       }
       if (kept < min_inliers) {
@@ -308,10 +637,11 @@ std::optional<AnchorAlignment> align_to_anchors(
       double total = 0.0;
       Eigen::Vector2d sum = Eigen::Vector2d::Zero();
       for (Eigen::Index i = 0; i < count; ++i) {
-        if (!inliers[static_cast<size_t>(i)]) {
+        const double r = robust[static_cast<size_t>(i)];
+        if (r <= 0.0) {
           continue;
         }
-        const double w = weight_of(i);
+        const double w = weight_of(i) * r;
         total += w;
         sum.x() += w * votes(i, 0);
         sum.y() += w * votes(i, 1);
@@ -335,10 +665,11 @@ std::optional<AnchorAlignment> align_to_anchors(
     Eigen::Vector2d body_centre = Eigen::Vector2d::Zero();
     Eigen::Vector2d world_centre = Eigen::Vector2d::Zero();
     for (Eigen::Index i = 0; i < count; ++i) {
-      if (!inliers[static_cast<size_t>(i)]) {
+      const double r = robust[static_cast<size_t>(i)];
+      if (r <= 0.0) {
         continue;
       }
-      const double w = weight_of(i);
+      const double w = weight_of(i) * r;
       total += w;
       body_centre += w * Eigen::Vector2d(body_points(i, 0), body_points(i, 1));
       world_centre += w * Eigen::Vector2d(world_points(i, 0), world_points(i, 1));
@@ -352,10 +683,11 @@ std::optional<AnchorAlignment> align_to_anchors(
     double fit_sum = 0.0;
     double kept = 0.0;
     for (Eigen::Index i = 0; i < count; ++i) {
-      if (!inliers[static_cast<size_t>(i)]) {
+      const double r = robust[static_cast<size_t>(i)];
+      if (r <= 0.0) {
         continue;
       }
-      const double w = weight_of(i);
+      const double w = weight_of(i) * r;
       const double bx = body_points(i, 0) - body_centre.x();
       const double by = body_points(i, 1) - body_centre.y();
       const double tx = world_points(i, 0) - world_centre.x();
@@ -365,8 +697,8 @@ std::optional<AnchorAlignment> align_to_anchors(
       lever_sum += w * (bx * bx + by * by);
       const double rx = votes(i, 0) - centre.x();
       const double ry = votes(i, 1) - centre.y();
-      fit_sum += rx * rx + ry * ry;
-      kept += 1.0;
+      fit_sum += r * (rx * rx + ry * ry);
+      kept += r;
     }
     if (std::abs(cross) < 1e-12 && std::abs(dot) < 1e-12) {
       break;

@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -44,6 +45,50 @@ struct AnchorSettings
   // Off, an anchor is trusted for having been seen often, which was the
   // original rule. On, it also has to keep landing in the same place.
   bool select_by_consistency = true;
+  // Floor under the precision-weighted gain, which is what bounds the anchor's
+  // effective averaging window. Without it `information_` accumulates without
+  // limit, the gain decays to zero, and an anchor stops following its own
+  // sightings: whatever pose error it was born with is frozen in, and a later,
+  // better estimate cannot wash it out. 0 keeps the unbounded mean.
+  double min_update_gain = 0.0;
+  // How close a sighting must land to an existing anchor for a camera that has
+  // not seen it before to adopt it rather than found its own. This is what
+  // makes the map shared in fact and not just in storage: the front camera
+  // drives over ground the rear one sees 4.5 m later, and without this the
+  // second sighting starts a second anchor carrying whatever pose error the
+  // estimate had at that moment. 0 keeps each camera to its own anchors.
+  double link_radius_m = 0.0;
+  // Frames an anchor must go untouched by a source before that source may
+  // rebind it to a different identity.
+  int64_t link_rebind_grace_frames = 1;
+  // When full, evict whatever was seen longest ago rather than whatever is
+  // least well observed.
+  bool evict_by_age = false;
+  // Evict the longest-unseen anchors to seat features arriving now.
+  bool evict_for_new = false;
+  // Whether an adopting camera may move the anchor it adopted. Off, only the
+  // camera that founded it writes to it, and to everyone else it is a fixed
+  // landmark. That is the whole point of sharing: the gap between where the
+  // second camera sees the ground and where the first one put it is a
+  // measurement of how far the pose has drifted since, and the registration
+  // spends it on the pose. Let the adopter write and the same gap is spent
+  // moving the map instead, which is drift laundered into the landmark.
+  bool link_adopter_writes = false;
+  // Look for the crossing and record it, but do not bind it. Adoption itself
+  // was measured and lost; the measurement it makes possible is separate.
+  // Weigh an anchor in the registration by what is known about its position
+  // rather than by how many times it was seen.
+  //
+  // `weight_at` has always returned the observation count. The map computes a
+  // proper information for every sighting -- (h / (R^2 + h^2))^2, the inverse
+  // variance the geometry implies -- averages the anchor's position with it,
+  // and then throws it away at the one place it decides the pose. A near
+  // anchor seen three times weighs less than a far one seen ten, which is
+  // backwards: the registration residual grows sevenfold from the 1-2 m ring
+  // to the 4-5 m one. `min_update_gain` already bounds how far the accumulated
+  // information can run, so using it here is bounded too.
+  bool weight_by_information = false;
+  bool link_measure_only = false;
 };
 
 // World positions of ground features, refined over the frames they survive.
@@ -56,20 +101,68 @@ struct AnchorSettings
 class GroundAnchorMap
 {
 public:
-  explicit GroundAnchorMap(const AnchorSettings & settings = AnchorSettings());
+  // `sources` is how many cameras write into this map. One map shared by all
+  // of them is the point: the front camera drives over ground the rear one
+  // sees 4.5 m later, and with a map each that second sighting founded a
+  // second anchor instead of refining the first.
+  explicit GroundAnchorMap(
+    const AnchorSettings & settings = AnchorSettings(), int sources = 1);
 
   // How many anchors currently hold a position.
   int size() const {return live_;}
   int64_t frame() const {return frame_;}
   int64_t discarded() const {return discarded_;}
+  // How many times a camera adopted an anchor another camera had founded.
+  int64_t adopted() const {return adopted_;}
+  // Mean gap between where a camera saw the ground and where the anchor it
+  // adopted already sat, and that same gap divided by the sighting's range.
+  // A scale error grows with range so the second stays flat; a translation
+  // error does not so the first stays flat. That is how they are told apart.
+  double link_gap_m() const {return adopted_ > 0 ? link_gap_ / adopted_ : 0.0;}
+  double link_gap_per_m() const {return adopted_ > 0 ? link_ratio_ / adopted_ : 0.0;}
+  double link_range_m() const {return adopted_ > 0 ? link_range_ / adopted_ : 0.0;}
+  // The crossing read as a length. The rear camera meets ground the front one
+  // anchored some metres back, and the along-track part of their disagreement
+  // is the pose error accumulated over exactly that stretch -- a scale
+  // measurement over a four metre baseline instead of a 1.5 m sighting.
+  int64_t crossings() const {return crossings_;}
+  double crossing_along_m() const {return crossings_ > 0 ? along_ / crossings_ : 0.0;}
+  double crossing_travel_m() const {return crossings_ > 0 ? gap_travel_ / crossings_ : 0.0;}
+  // Least squares of the along-track gap on how far the vehicle came between
+  // the two sightings. The **slope** is the scale error; the **intercept** is
+  // the standing difference between the two cameras' projections, which does
+  // not grow with distance and would otherwise be read as scale.
+  double crossing_slope() const
+  {
+    const double n = static_cast<double>(crossings_);
+    const double det = n * travel_squared_ - gap_travel_ * gap_travel_;
+    return std::abs(det) > 1e-9 ? (n * cross_ - gap_travel_ * along_) / det : 0.0;
+  }
+  double crossing_intercept() const
+  {
+    const double n = static_cast<double>(crossings_);
+    const double det = n * travel_squared_ - gap_travel_ * gap_travel_;
+    return std::abs(det) > 1e-9
+           ? (travel_squared_ * along_ - gap_travel_ * cross_) / det : 0.0;
+  }
+  // Where the vehicle is, so a crossing can be resolved along its heading and
+  // dated by how far it has come.
+  void set_frame_pose(double path, double yaw) {path_ = path; yaw_ = yaw;}
 
   // Mask of which ids already have a world position.
-  void anchored(const Identities & ids, Mask & out) const;
+  void anchored(int source, const Identities & ids, Mask & out) const;
+  // Single-source shorthand, which is what a one-camera map is.
+  void anchored(const Identities & ids, Mask & out) const {anchored(0, ids, out);}
 
   // World positions and weights together, from one lookup. The solve wants
   // both for the same features, and asking twice means searching the index
   // twice for an answer that could not have changed in between.
-  void anchor_view(const Identities & ids, Points2 & world_out, Weights & weights_out) const;
+  void anchor_view(
+    int source, const Identities & ids, Points2 & world_out, Weights & weights_out) const;
+  void anchor_view(const Identities & ids, Points2 & world_out, Weights & weights_out) const
+  {
+    anchor_view(0, ids, world_out, weights_out);
+  }
 
   // Fold in this frame's sightings.
   //
@@ -86,9 +179,20 @@ public:
   // features that displacement does not cancel: it reads as a rotation, and the
   // ground solve asks for 2.7 mrad of heading that is not there. Weighted by
   // precision it asks for 0.24. Pass an empty vector to weight equally.
+  // Move the map on by one frame. Ageing is per frame, not per camera, so
+  // this is called once even though every camera then writes into the map.
+  void advance() {++frame_;}
+
+  void update(
+    int source, const Identities & ids, const Points2 & world_points, bool allow_new,
+    const Weights & information);
   void update(
     const Identities & ids, const Points2 & world_points, bool allow_new,
-    const Weights & information);
+    const Weights & information)
+  {
+    advance();
+    update(0, ids, world_points, allow_new, information);
+  }
 
   // Position of one anchor, for tests and diagnostics.
   std::optional<Eigen::Vector2d> position_of(int64_t identity) const;
@@ -98,8 +202,13 @@ public:
   std::optional<double> weight_of(int64_t identity) const;
 
 private:
-  int64_t slot_of(int64_t identity) const;
-  void grow_table(int64_t highest);
+  int64_t slot_of(int source, int64_t identity) const;
+  int64_t cell_of(double x, double y) const;
+  void grid_insert(int64_t slot);
+  void grid_erase(int64_t slot);
+  // Nearest anchor within link_radius_m that this source has not bound yet.
+  int64_t adoptable(int source, double x, double y) const;
+  void grow_table(int source, int64_t highest);
   double weight_at(int64_t slot) const;
   void forget(int64_t slot);
   void prune();
@@ -114,11 +223,35 @@ private:
   Eigen::VectorXd information_;
   Eigen::Matrix<int64_t, Eigen::Dynamic, 1> identifier_;
   std::vector<int64_t> free_;
-  // Slot of each identity, indexed by the identity, -1 where unknown.
-  std::vector<int64_t> by_id_;
+  // Slot of each identity, per source, indexed by the identity, -1 where
+  // unknown. Track identities restart per camera, so one table each.
+  std::vector<std::vector<int64_t>> by_id_;
+  // Which identity each source has bound to a slot, -1 where none. A slot may
+  // carry one per source: that is what makes it a shared landmark rather than
+  // two anchors in the same place.
+  Eigen::Matrix<int64_t, Eigen::Dynamic, Eigen::Dynamic> owner_;
+  // Which source founded each slot; only it may move the anchor.
+  Eigen::Matrix<int64_t, Eigen::Dynamic, 1> founder_;
+  int sources_ = 1;
+  // Coarse spatial index over live anchors, one bucket per link-radius cell.
+  std::unordered_map<int64_t, std::vector<int64_t>> grid_;
   int live_ = 0;
   int64_t frame_ = 0;
   int64_t discarded_ = 0;
+  int64_t adopted_ = 0;
+  double link_gap_ = 0.0;
+  double link_ratio_ = 0.0;
+  double link_range_ = 0.0;
+  double along_ = 0.0;
+  double gap_travel_ = 0.0;
+  double travel_squared_ = 0.0;
+  double cross_ = 0.0;
+  int64_t crossings_ = 0;
+  double path_ = 0.0;
+  double yaw_ = 0.0;
+  // Path length when each anchor was founded, so a crossing knows how far the
+  // vehicle came between the two sightings.
+  Eigen::VectorXd founded_path_;
 };
 
 struct AnchorAlignment
@@ -196,7 +329,24 @@ std::optional<AnchorAlignment> align_to_anchors(
   const Points2 & body_points, const Points2 & world_points, const Weights & weights,
   double yaw, double threshold, int min_inliers, bool refine_yaw,
   const Eigen::Vector2d & origin = Eigen::Vector2d::Zero(),
-  double radial_min_range = 0.0);
+  double radial_min_range = 0.0,
+  // Width of the Gaussian that replaces the hard inlier gate, in metres.
+  // 0 keeps the gate. See the note in the implementation.
+  double softness = 0.0,
+  // Where to start the search. Without one the fit begins at the median vote,
+  // which at low speed sits near zero simply because most of the hop is
+  // smaller than the residuals around it -- and an iteration started there
+  // settles into "did not move". Seeded with the previous hop, the same data
+  // settles on the answer next to it instead.
+  const Eigen::Vector2d * translation_prior = nullptr,
+  // How many starting points the mode search tries. 1 keeps the median only.
+  int restarts = 1,
+  // Refuse the solve unless the winning mode beats the best rival mode by
+  // this factor. 0 accepts whatever wins.
+  double ambiguity = 0.0,
+  // Reject modes further than this from the inertial expectation. 0 disables.
+  const Eigen::Vector2d * inertial_hop = nullptr,
+  double inertial_gate = 0.0);
 
 struct CameraTranslation
 {

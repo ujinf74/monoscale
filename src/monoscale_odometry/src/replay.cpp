@@ -233,7 +233,11 @@ int main(int argc, char ** argv)
   std::string truth_topic = "/carla/ground_truth/pose";
   std::string label;
   std::string tum_directory;
-  double distance = 34.0;
+  // Score the whole drive. This was 34.0, which fitted the approach bags
+  // (24-32 m) and silently truncated anything longer: a 110 m straight scored
+  // its first 34 m and reported that as the drive. The cut is still available
+  // as --distance for comparing against a shorter recording.
+  double distance = 0.0;
   double segment = 1.0;
   double tolerance = 0.05;
   double wheel_base = 2.8192;
@@ -300,6 +304,7 @@ int main(int argc, char ** argv)
   reader.open(bag);
 
   std::vector<Sample> estimates;
+  std::vector<monoscale::Update> hops;
   std::vector<Sample> truth;
   while (reader.has_next()) {
     const auto message = reader.read_next();
@@ -358,6 +363,9 @@ int main(int argc, char ** argv)
     }
 
     for (const auto & update : estimator.take_updates()) {
+      if (update.hops_valid && update.previous_stamp > 0.0) {
+        hops.push_back(update);
+      }
       if (!update.pose_valid) {
         continue;
       }
@@ -367,7 +375,379 @@ int main(int argc, char ** argv)
   }
   rclcpp::shutdown();
 
+  // Each camera's hop against the hop the vehicle actually made. Nothing else
+  // in the stack measures a camera against anything but the other camera.
+  if (!hops.empty() && truth.size() > 2) {
+    const auto at = [&truth](double stamp) {
+        size_t i = 0;
+        while (i + 2 < truth.size() && truth[i + 1].stamp < stamp) {
+          ++i;
+        }
+        const double span = truth[i + 1].stamp - truth[i].stamp;
+        const double t = span > 1e-9
+          ? std::clamp((stamp - truth[i].stamp) / span, 0.0, 1.0) : 0.0;
+        Sample out{};
+        out.stamp = stamp;
+        out.x = truth[i].x + t * (truth[i + 1].x - truth[i].x);
+        out.y = truth[i].y + t * (truth[i + 1].y - truth[i].y);
+        out.yaw = truth[i].yaw + t * wrap_pi(truth[i + 1].yaw - truth[i].yaw);
+        return out;
+      };
+    const size_t cameras = hops.front().camera_hops.size();
+    std::vector<double> sum(cameras + 1, 0.0);
+    std::vector<double> square(cameras + 1, 0.0);
+    std::vector<int64_t> seen(cameras + 1, 0);
+    std::vector<double> cross(cameras, 0.0);
+    std::vector<double> pair_a(cameras, 0.0);
+    std::vector<double> pair_b(cameras, 0.0);
+    int64_t paired = 0;
+    double travelled = 0.0;
+    double cross_sum = 0.0;
+    double cross_square = 0.0;
+    double world_along = 0.0;
+    double world_along_y = 0.0;
+    double world_across_x = 0.0;
+    double world_across_y = 0.0;
+    double world_error_x = 0.0;
+    double world_error_y = 0.0;
+    double applied_along = 0.0;
+    int64_t applied_n = 0;
+    int64_t coasted = 0;
+    double lever_xy = 0.0;
+    double lever_xx = 0.0;
+    double rect_xy = 0.0;
+    double rect_xx = 0.0;
+    for (const auto & hop : hops) {
+      if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
+        continue;
+      }
+      const Sample before = at(hop.previous_stamp);
+      const Sample after = at(hop.stamp);
+      const Sample step = relative_pose(before, after);
+      const double length = std::hypot(step.x, step.y);
+      // Two centimetres, not epsilon. A hop of half a millimetre divides a
+      // millimetre of error into a four-figure percentage, and the parking
+      // drives are full of them.
+      if (length < 0.02) {
+        continue;
+      }
+      travelled += length;
+      const double ux = step.x / length;
+      const double uy = step.y / length;
+      // Error along the direction the vehicle actually went, as a fraction of
+      // how far it went. Cross track is left out on purpose: the scale is what
+      // this estimator gets wrong.
+      // The applied hop, not the one the cameras voted for.
+      const Eigen::Vector2d moved = hop.applied_valid ? hop.applied_hop : hop.fused_hop;
+      const auto along = [&](const Eigen::Vector2d & v) {
+          return (v.x() * ux + v.y() * uy - length) / length;
+        };
+      // Sideways of where the vehicle actually went. On a straight this
+      // averages out; on a weave it does not, because the path's direction
+      // turns underneath it and the error is carried into the world frame
+      // pointing somewhere new each time.
+      const auto across = [&](const Eigen::Vector2d & v) {
+          return (-v.x() * uy + v.y() * ux) / length;
+        };
+      std::vector<double> errors(cameras, std::numeric_limits<double>::quiet_NaN());
+      for (size_t i = 0; i < cameras; ++i) {
+        if (!hop.camera_hops[i].allFinite()) {
+          continue;
+        }
+        errors[i] = along(hop.camera_hops[i]);
+        sum[i] += errors[i];
+        square[i] += errors[i] * errors[i];
+        ++seen[i];
+      }
+      const double fused = along(moved);
+      sum[cameras] += fused;
+      square[cameras] += fused * fused;
+      ++seen[cameras];
+      const double sideways = across(moved);
+      cross_sum += sideways;
+      cross_square += sideways * sideways;
+      // Cross error in metres against the signed turn. The slope is a length:
+      // it is the lever arm of whatever point the estimator is really tracking
+      // against the one the truth is quoted at, because a point offset by e
+      // from the rear axle carries a sideslip of e*omega/v.
+      lever_xy += (sideways * length) * step.yaw;
+      lever_xx += step.yaw * step.yaw;
+      // And against the unsigned turn, which a sideslip cannot produce.
+      const double turn = std::abs(step.yaw);
+      rect_xy += (sideways * length) * turn;
+      rect_xx += turn * turn;
+      // What the error actually costs the pose. The hop error is a vector in
+      // the earlier body frame; carrying it into the world needs that frame's
+      // heading, and only then do the along and across parts stop being about
+      // this hop and start being about the map.
+      if (hop.coasted) {
+        ++coasted;
+      }
+      applied_along += (moved.x() * ux + moved.y() * uy - length) / length;
+      ++applied_n;
+      const double ex = moved.x() - step.x;
+      const double ey = moved.y() - step.y;
+      const double heading = before.yaw;
+      const double cw = std::cos(heading);
+      const double sw = std::sin(heading);
+      world_error_x += cw * ex - sw * ey;
+      world_error_y += sw * ex + cw * ey;
+      // Split the same vector by what it was in the body frame, so the two
+      // contributions can be compared as world displacements.
+      const double along_x = fused * length * ux;
+      const double along_y = fused * length * uy;
+      world_along += cw * along_x - sw * along_y;
+      world_along_y += sw * along_x + cw * along_y;
+      const double across_x = -sideways * length * uy;
+      const double across_y = sideways * length * ux;
+      world_across_x += cw * across_x - sw * across_y;
+      world_across_y += sw * across_x + cw * across_y;
+      if (cameras >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1])) {
+        cross[0] += errors[0] * errors[1];
+        pair_a[0] += errors[0] * errors[0];
+        pair_b[0] += errors[1] * errors[1];
+        ++paired;
+      }
+    }
+    // The same hops split by whether the vehicle was turning. The drives that
+    // turn read long and the drives that do not read short, so the two want
+    // separating before anything is concluded about scale.
+    {
+      double straight_sum = 0.0;
+      double turning_sum = 0.0;
+      int64_t straight_n = 0;
+      int64_t turning_n = 0;
+      double turning_rate = 0.0;
+      for (const auto & hop : hops) {
+        if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
+          continue;
+        }
+        const Sample step = relative_pose(at(hop.previous_stamp), at(hop.stamp));
+        const double length = std::hypot(step.x, step.y);
+        if (length < 0.02) {
+          continue;
+        }
+        const double error =
+          (hop.fused_hop.x() * step.x / length + hop.fused_hop.y() * step.y / length -
+          length) / length;
+        // Radians per metre, so the split is about the path's curvature rather
+        // than about how fast the drive happened to be going.
+        const double curvature = std::abs(step.yaw) / length;
+        if (curvature < 0.01) {
+          straight_sum += error;
+          ++straight_n;
+        } else {
+          turning_sum += error;
+          turning_rate += curvature;
+          ++turning_n;
+        }
+      }
+      if (straight_n > 0 || turning_n > 0) {
+        std::printf(
+          "  곡률별 융합 편향: 직진 %+.2f%% (n=%ld)   선회 %+.2f%% (n=%ld, 평균 %.3f rad/m)\n",
+          straight_n > 0 ? 100.0 * straight_sum / straight_n : 0.0, straight_n,
+          turning_n > 0 ? 100.0 * turning_sum / turning_n : 0.0, turning_n,
+          turning_n > 0 ? turning_rate / turning_n : 0.0);
+      }
+      // The shape of it, and whether the turn's direction matters. A lever arm
+      // would flip sign with the turn; a rectification would not.
+      constexpr int kBands = 6;
+      const double edges[kBands] = {0.0, 0.02, 0.05, 0.10, 0.20, 0.40};
+      double band_sum[kBands] = {};
+      double band_yaw[kBands] = {};
+      int64_t band_n[kBands] = {};
+      double left_sum = 0.0;
+      double right_sum = 0.0;
+      double left_yaw = 0.0;
+      double right_yaw = 0.0;
+      int64_t left_n = 0;
+      int64_t right_n = 0;
+      std::vector<double> per_camera_sum(4, 0.0);
+      std::vector<int64_t> per_camera_n(4, 0);
+      for (const auto & hop : hops) {
+        if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
+          continue;
+        }
+        const Sample step = relative_pose(at(hop.previous_stamp), at(hop.stamp));
+        const double length = std::hypot(step.x, step.y);
+        if (length < 0.02) {
+          continue;
+        }
+        const double ux = step.x / length;
+        const double uy = step.y / length;
+        const double error =
+          (hop.fused_hop.x() * ux + hop.fused_hop.y() * uy - length) / length;
+        const double curvature = std::abs(step.yaw) / length;
+        int band = 0;
+        for (int b = kBands - 1; b >= 0; --b) {
+          if (curvature >= edges[b]) {
+            band = b;
+            break;
+          }
+        }
+        band_sum[band] += error;
+        band_yaw[band] += curvature;
+        ++band_n[band];
+        if (curvature >= 0.05) {
+          if (step.yaw > 0.0) {
+            left_sum += error;
+            left_yaw += curvature;
+            ++left_n;
+          } else {
+            right_sum += error;
+            right_yaw += curvature;
+            ++right_n;
+          }
+          for (size_t c = 0; c < hop.camera_hops.size() && c < 2; ++c) {
+            if (hop.camera_hops[c].allFinite()) {
+              per_camera_sum[c] +=
+                (hop.camera_hops[c].x() * ux + hop.camera_hops[c].y() * uy - length) / length;
+              ++per_camera_n[c];
+            }
+          }
+        }
+      }
+      std::printf("  곡률 구간별 편향:");
+      for (int b = 0; b < kBands; ++b) {
+        if (band_n[b] < 10) {
+          continue;
+        }
+        std::printf(
+          "  %.3f:%+.2f%%(%ld)", band_yaw[b] / band_n[b],
+          100.0 * band_sum[b] / band_n[b], band_n[b]);
+      }
+      std::printf("\n");
+      if (left_n >= 10 || right_n >= 10) {
+        std::printf(
+          "  선회 방향별: 좌 %+.2f%% (n=%ld, %.3f)  우 %+.2f%% (n=%ld, %.3f)"
+          "  | 선회구간 카메라 front %+.2f%% rear %+.2f%%\n",
+          left_n > 0 ? 100.0 * left_sum / left_n : 0.0, left_n,
+          left_n > 0 ? left_yaw / left_n : 0.0,
+          right_n > 0 ? 100.0 * right_sum / right_n : 0.0, right_n,
+          right_n > 0 ? right_yaw / right_n : 0.0,
+          per_camera_n[0] > 0 ? 100.0 * per_camera_sum[0] / per_camera_n[0] : 0.0,
+          per_camera_n[1] > 0 ? 100.0 * per_camera_sum[1] / per_camera_n[1] : 0.0);
+      }
+    }
+    std::printf("hop 대 진값 (진행 방향, 홉 길이 대비):\n");
+    for (size_t i = 0; i <= cameras; ++i) {
+      if (seen[i] == 0) {
+        continue;
+      }
+      const double n = static_cast<double>(seen[i]);
+      const double mean = sum[i] / n;
+      const double rms = std::sqrt(square[i] / n);
+      const double noise = std::sqrt(std::max(rms * rms - mean * mean, 0.0));
+      std::printf(
+        "  %-7s n=%5ld  bias=%+7.2f%%  noise=%6.2f%%  rms=%6.2f%%\n",
+        i == cameras ? "fused" : (i == 0 ? "front" : "rear"), seen[i],
+        100.0 * mean, 100.0 * noise, 100.0 * rms);
+    }
+    // The same numbers per ten metres of true travel. The whole-drive figure
+    // says the two cameras end up mirroring each other; this says where in the
+    // drive they start to, which is the only place a cause can be.
+    if (cameras >= 2) {
+      struct Bin
+      {
+        double travel = 0.0;
+        double a = 0.0;
+        double b = 0.0;
+        double aa = 0.0;
+        double bb = 0.0;
+        double ab = 0.0;
+        int64_t map0 = 0;
+        int64_t map1 = 0;
+        int64_t n = 0;
+      };
+      std::vector<Bin> bins;
+      double run = 0.0;
+      for (const auto & hop : hops) {
+        if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
+          continue;
+        }
+        const Sample step = relative_pose(at(hop.previous_stamp), at(hop.stamp));
+        const double length = std::hypot(step.x, step.y);
+        if (length < 0.02 || !hop.camera_hops[0].allFinite() ||
+          !hop.camera_hops[1].allFinite())
+        {
+          continue;
+        }
+        const double ux = step.x / length;
+        const double uy = step.y / length;
+        const double e0 =
+          (hop.camera_hops[0].x() * ux + hop.camera_hops[0].y() * uy - length) / length;
+        const double e1 =
+          (hop.camera_hops[1].x() * ux + hop.camera_hops[1].y() * uy - length) / length;
+        if (bins.empty() || run >= 10.0) {
+          bins.emplace_back();
+          run = 0.0;
+        }
+        run += length;
+        Bin & bin = bins.back();
+        bin.travel += length;
+        bin.a += e0;
+        bin.b += e1;
+        bin.aa += e0 * e0;
+        bin.bb += e1 * e1;
+        bin.ab += e0 * e1;
+        if (hop.camera_from_map.size() >= 2) {
+          bin.map0 += hop.camera_from_map[0];
+          bin.map1 += hop.camera_from_map[1];
+        }
+        ++bin.n;
+      }
+      if (bins.size() >= 3) {
+        std::printf("  10 m 구간별 front편향/rear편향 | 맵사용률 front/rear:\n   ");
+        for (const auto & bin : bins) {
+          if (bin.n < 5) {
+            continue;
+          }
+          const double n = static_cast<double>(bin.n);
+          const double ma = bin.a / n;
+          const double mb = bin.b / n;
+          const double va = bin.aa / n - ma * ma;
+          const double vb = bin.bb / n - mb * mb;
+          const double cov = bin.ab / n - ma * mb;
+          (void)va;
+          (void)vb;
+          (void)cov;
+          std::printf(
+            " %+.0f/%+.0f|%.0f/%.0f", 100.0 * ma, 100.0 * mb,
+            100.0 * bin.map0 / n, 100.0 * bin.map1 / n);
+        }
+        std::printf("\n");
+      }
+    }
+    if (seen[cameras] > 0) {
+      const double n = static_cast<double>(seen[cameras]);
+      const double mean = cross_sum / n;
+      const double rms = std::sqrt(cross_square / n);
+      std::printf(
+        "  fused 횡: bias=%+.2f%% noise=%.2f%%  | 누적 %.3f m (진행분 %.3f, 횡분 %.3f)"
+        "  coasted %ld/%ld\n",
+        100.0 * mean, 100.0 * std::sqrt(std::max(rms * rms - mean * mean, 0.0)),
+        std::hypot(world_error_x, world_error_y),
+        std::hypot(world_along, world_along_y),
+        std::hypot(world_across_x, world_across_y), coasted, applied_n);
+      std::printf(
+        "  횡오차 회귀: 부호있는 요 -> %+.4f m (레버암),  |요| -> %+.4f m\n",
+        lever_xx > 1e-12 ? lever_xy / lever_xx : 0.0,
+        rect_xx > 1e-12 ? rect_xy / rect_xx : 0.0);
+    }
+    if (paired > 0 && pair_a[0] > 0.0 && pair_b[0] > 0.0) {
+      std::printf(
+        "  두 카메라 오차 상관 r=%+.3f (n=%ld), 평균 홉 %.3f m\n",
+        cross[0] / std::sqrt(pair_a[0] * pair_b[0]), paired,
+        travelled / std::max<int64_t>(seen[cameras], 1));
+    }
+  }
+
   TrajectoryMetrics metrics(segment);
+  double along_error = 0.0;
+  double along_square = 0.0;
+  double cross_error = 0.0;
+  double cross_square = 0.0;
+  int64_t error_count = 0;
   std::vector<std::pair<Sample, Sample>> rows;
   if (!estimates.empty() && !truth.empty()) {
     size_t index = 0;
@@ -393,6 +773,22 @@ int main(int argc, char ** argv)
       const Sample aligned =
         compose_pose(origin_estimate, relative_pose(origin_truth, truth[nearest]));
       metrics.add(estimate, aligned);
+      // The position error split along the direction the vehicle is pointing
+      // and across it. ate_rmse is the two in quadrature, so this says which of
+      // them it is made of.
+      {
+        const double ex = estimate.x - aligned.x;
+        const double ey = estimate.y - aligned.y;
+        const double ch = std::cos(aligned.yaw);
+        const double sh = std::sin(aligned.yaw);
+        const double a = ex * ch + ey * sh;
+        const double c = -ex * sh + ey * ch;
+        along_error += a;
+        along_square += a * a;
+        cross_error += c;
+        cross_square += c * c;
+        ++error_count;
+      }
       rows.emplace_back(estimate, aligned);
       if (distance > 0.0 && metrics.truth_distance() >= distance) {
         break;
@@ -401,14 +797,80 @@ int main(int argc, char ** argv)
   }
 
   metrics.report(label.empty() ? bag : label);
+  if (error_count > 0) {
+    const double n = static_cast<double>(error_count);
+    const double am = along_error / n;
+    const double cm = cross_error / n;
+    const double ar = std::sqrt(along_square / n);
+    const double cr = std::sqrt(cross_square / n);
+    std::printf(
+      "위치오차 분해: 종 rms=%.4f sd=%.4f mean=%+.4f | 횡 rms=%.4f sd=%.4f mean=%+.4f"
+      "  (합성 %.4f, n=%ld)\n",
+      ar, std::sqrt(std::max(ar * ar - am * am, 0.0)), am,
+      cr, std::sqrt(std::max(cr * cr - cm * cm, 0.0)), cm,
+      std::hypot(ar, cr), error_count);
+  }
   const auto & diagnostics = estimator.diagnostics();
   std::printf(
     "pairs=%ld solves=%ld estimates=%zu failures=%ld (nosolve=%ld trans=%ld yaw=%ld) "
-    "coasted=%ld anchors=%d map_frames=%ld evicted=%ld\n",
+    "coasted=%ld anchors=%d map_frames=%ld evicted=%ld "
+    "link[n=%ld gap=%.4fm range=%.2fm gap/range=%.5f]\n",
     diagnostics.pairs_seen, diagnostics.frames_processed, estimates.size(),
     diagnostics.motion_failures, diagnostics.fail_no_solve, diagnostics.fail_translation,
     diagnostics.fail_yaw, diagnostics.coasted, diagnostics.anchors,
-    diagnostics.map_aligned_frames, diagnostics.frames_evicted);
+    diagnostics.map_aligned_frames, diagnostics.frames_evicted,
+    diagnostics.anchors_adopted, diagnostics.link_gap_m, diagnostics.link_range_m,
+    diagnostics.link_gap_per_m);
+  if (diagnostics.camera_travel.size() >= 2) {
+    const double a = diagnostics.camera_travel[0];
+    const double b = diagnostics.camera_travel[1];
+    std::printf(
+      "camera travel: %.2f m vs %.2f m  ratio %.5f\n", a, b, b > 1e-9 ? a / b : 0.0);
+  }
+  for (size_t i = 0; i < diagnostics.camera_solves.size(); ++i) {
+    const double n = static_cast<double>(std::max<int64_t>(diagnostics.camera_solves[i], 1));
+    std::printf(
+      "  camera[%zu]: solves=%ld anchored=%ld travel=%.2fm inliers=%.0f spread=%.4f"
+      "  usable=%.0f known=%.0f (%.0f%%) bearing=%.1fdeg scale=%.4f\n",
+      i, diagnostics.camera_solves[i], diagnostics.camera_anchored[i],
+      diagnostics.camera_travel[i], diagnostics.camera_inliers[i] / n,
+      diagnostics.camera_spread[i] / n,
+      i < diagnostics.camera_usable.size() && diagnostics.camera_looks[i] > 0
+      ? diagnostics.camera_usable[i] / diagnostics.camera_looks[i] : 0.0,
+      i < diagnostics.camera_known.size() && diagnostics.camera_looks[i] > 0
+      ? diagnostics.camera_known[i] / diagnostics.camera_looks[i] : 0.0,
+      i < diagnostics.camera_usable.size() && diagnostics.camera_usable[i] > 0
+      ? 100.0 * diagnostics.camera_known[i] / diagnostics.camera_usable[i] : 0.0,
+      i < diagnostics.camera_bearing.size() ? diagnostics.camera_bearing[i] : -1.0,
+      i < diagnostics.camera_scale.size() ? diagnostics.camera_scale[i] : -1.0);
+  }
+  if (diagnostics.travel_bins.size() >= 3) {
+    // A split that is a calibration reads the same in every stretch; one that
+    // accumulates does not. Measured: str_v3 holds 0.98 the whole way while
+    // str_v2 runs 1.09 to 1.95, so this one is a divergence, not a mount.
+    std::printf("  10 m 구간별 카메라 비: ");
+    const size_t group =
+      (diagnostics.travel_bins.size() + 11) / 12;
+    double front = 0.0;
+    double rear = 0.0;
+    for (size_t i = 0; i < diagnostics.travel_bins.size(); ++i) {
+      front += diagnostics.travel_bins[i](1);
+      rear += diagnostics.travel_bins[i](2);
+      if ((i + 1) % group == 0 || i + 1 == diagnostics.travel_bins.size()) {
+        std::printf("%.3f ", rear > 1e-9 ? front / rear : -1.0);
+        front = 0.0;
+        rear = 0.0;
+      }
+    }
+    std::printf("\n");
+  }
+  if (diagnostics.crossings > 0) {
+    std::printf(
+      "카메라 교차: n=%ld  along=%+.4f m  baseline=%.2f m  기울기->scale %.4f  절편=%+.4f m\n",
+      diagnostics.crossings, diagnostics.crossing_along_m,
+      diagnostics.crossing_travel_m, diagnostics.crossing_scale,
+      diagnostics.crossing_offset_m);
+  }
   std::string stages;
   for (const auto & [name, seconds] : diagnostics.stage_seconds) {
     if (seconds <= 0.0) {

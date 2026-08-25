@@ -392,3 +392,80 @@ TEST(Geometry, TheInlierCountSurvivesTheRescale)
   EXPECT_EQ(monoscale::rescale_motion(motion, 1.7).inliers, 137);
   EXPECT_DOUBLE_EQ(monoscale::rescale_motion(motion, 1.7).scale, 0.5);
 }
+
+namespace
+{
+
+// Project a point given in the earlier body frame, after the body has moved by
+// (`shift`, `yaw`). The earlier frame is the case shift = 0, yaw = 0.
+Eigen::Vector2d project_from(
+  const Eigen::Vector3d & point, const CameraModel & model, const Eigen::Vector2d & shift,
+  double yaw)
+{
+  Eigen::Matrix3d yawed = Eigen::Matrix3d::Identity();
+  yawed.topLeftCorner<2, 2>() = rotation_2d(-yaw);
+  const Eigen::Vector3d moved =
+    yawed * (point - Eigen::Vector3d(shift.x(), shift.y(), 0.0));
+  const Eigen::Vector3d camera =
+    model.rotation_base_from_camera.transpose() * (moved - model.translation_base_from_camera);
+  const Eigen::Vector3d pixel = model.k * camera;
+  return Eigen::Vector2d(pixel.x() / pixel.z(), pixel.y() / pixel.z());
+}
+
+}  // namespace
+
+TEST(Geometry, EpipolarBearingRecoversTranslationDirectionFromOffGroundPoints)
+{
+  // Mounted forward of the axle and above it, so the lever arm contributes a
+  // real term the moment the vehicle turns.
+  const CameraModel model = monoscale::make_camera_model(
+    intrinsics(300.0, 320.0, 240.0), forward_optical(), Eigen::Vector3d(1.5, 0.0, 1.2));
+
+  // Points at assorted heights and ranges. A single plane would still be
+  // solvable here -- the rotation is known -- but the point of the constraint
+  // is the structure the ground solve cannot use.
+  std::vector<Eigen::Vector3d> world;
+  for (int i = 0; i < 24; ++i) {
+    const double along = 6.0 + 0.9 * (i % 7);
+    const double across = -4.0 + 0.7 * (i % 11);
+    const double up = 0.2 + 0.45 * (i % 5);
+    world.emplace_back(along, across, up);
+  }
+
+  for (const double yaw : {0.0, 0.05, -0.08}) {
+    const Eigen::Vector2d shift(0.42, 0.09);
+
+    Points2 previous(static_cast<Eigen::Index>(world.size()), 2);
+    Points2 current(static_cast<Eigen::Index>(world.size()), 2);
+    for (size_t i = 0; i < world.size(); ++i) {
+      const Eigen::Index row = static_cast<Eigen::Index>(i);
+      previous.row(row) = project_from(world[i], model, Eigen::Vector2d::Zero(), 0.0);
+      current.row(row) = project_from(world[i], model, shift, yaw);
+    }
+    const Mask use = Mask::Constant(static_cast<Eigen::Index>(world.size()), true);
+
+    const auto bearing = monoscale::epipolar_bearing(previous, current, use, model, yaw, 0.02, 6);
+    ASSERT_TRUE(bearing.has_value()) << "yaw " << yaw;
+
+    // What the constraint sees is the camera's own displacement, which is the
+    // body's plus what the mount swings through.
+    const Eigen::Vector2d lever =
+      (rotation_2d(yaw) - Eigen::Matrix2d::Identity()) * model.translation_base_from_camera.head<2>();
+    const Eigen::Vector2d expected = (shift + lever).normalized();
+    const double aligned = bearing->dot(expected);
+    EXPECT_NEAR(std::abs(aligned), 1.0, 1e-6) << "yaw " << yaw;
+  }
+}
+
+TEST(Geometry, EpipolarBearingNeedsEnoughPoints)
+{
+  const CameraModel model = monoscale::make_camera_model(
+    intrinsics(300.0, 320.0, 240.0), forward_optical(), Eigen::Vector3d(1.5, 0.0, 1.2));
+  Points2 previous(3, 2);
+  Points2 current(3, 2);
+  previous << 300.0, 200.0, 340.0, 210.0, 320.0, 260.0;
+  current << 302.0, 201.0, 343.0, 212.0, 323.0, 263.0;
+  const Mask use = Mask::Constant(3, true);
+  EXPECT_FALSE(
+    monoscale::epipolar_bearing(previous, current, use, model, 0.0, 0.02, 6).has_value());
+}

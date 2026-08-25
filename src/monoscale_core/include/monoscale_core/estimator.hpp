@@ -80,6 +80,9 @@ struct CameraSettings
   // measured about. Excluding it from the regression is not enough; it would
   // have to leave the solve, and the band it uses was chosen on drift.
   bool learn_mounting_pitch = false;
+  // What this camera counts for when the cameras are combined. 0 on any of
+  // them falls back to inlier counts for all.
+  double fusion_weight = 0.0;
   // Calibration, as CameraInfo would report it, at the resolution it describes.
   Eigen::Matrix3d k = Eigen::Matrix3d::Identity();
   Eigen::VectorXd distortion;
@@ -101,6 +104,27 @@ struct EstimatorSettings
 
   double ground_max_distance_m = 25.0;
   double ground_ransac_threshold_m = 0.12;
+  double ground_align_softness_m = 0.0;
+  // Far limit for points entering the pose solve. 0 uses ground_max_distance_m.
+  double solve_max_distance_m = 0.0;
+  // Far limit for sightings that may enter the anchor map. 0 means no limit
+  // beyond the ground band itself.
+  double anchor_max_range_m = 0.0;
+  // How hard to pull a hop's lateral component towards the non-holonomic
+  // constraint. 0 leaves it free, 1 removes it entirely.
+  double nonholonomic_lateral = 0.0;
+  // How fast the ground scale follows the inertial filter's innovation.
+  double imu_scale_gain = 0.0;
+  // Hops shorter than this carry more noise than signal in that ratio.
+  double imu_scale_min_hop_m = 0.05;
+  // How far a translation may sit from what inertial propagation expects.
+  double inertial_gate_m = 0.0;
+  // How fast the per-camera range scale follows the measured radial residual.
+  double range_scale_gain = 0.0;
+  // Seed the anchor alignment with the previous hop instead of the median vote.
+  bool align_seed_from_last_hop = false;
+  int align_restarts = 1;
+  double align_ambiguity_ratio = 0.0;
   int ground_min_inliers = 24;
   double max_scale_error = 0.08;
   double max_translation_per_frame_m = 1.0;
@@ -247,6 +271,151 @@ struct EstimatorSettings
   int anchor_max_age_frames = 120;
   double anchor_update_gain = 0.0;
   int anchor_max_observations = 20;
+  // The anchor map's own quality gates. These existed in AnchorSettings from
+  // the start but were never forwarded, so no configuration could reach them
+  // and the hardcoded defaults were the only values ever measured.
+  double anchor_initial_variance = 0.04;
+  double anchor_max_variance = 0.09;
+  int anchor_trial_observations = 4;
+  double anchor_min_update_gain = 0.0;
+  double anchor_link_radius_m = 0.0;
+  bool anchor_link_adopter_writes = false;
+  int anchor_link_rebind_grace = 1;
+  bool anchor_evict_by_age = false;
+  bool anchor_evict_for_new = false;
+  bool anchor_link_measure_only = false;
+  // Steering the hop with off-ground structure. The ground solve fixes how far
+  // the vehicle went; this says which way, from features that carry no height.
+  // Weight is the fraction of the correction taken, 0 leaves the solve alone.
+  double epipolar_weight = 0.0;
+  double epipolar_softness_rad = 0.02;
+  double epipolar_min_hop_m = 0.0;
+  // Where the IMU is bolted, from base_link, in the base frame. An IMU off the
+  // origin does not measure what the origin does: it also picks up alpha x r
+  // as the vehicle's yaw rate changes and omega x (omega x r) as it turns.
+  // Zero leaves the samples exactly as they arrive. The instrument's axes are
+  // taken to be the base frame's -- the rig mounts it with no rotation, and a
+  // rotated one would have to be turned before any of this applies.
+  Eigen::Vector3d imu_translation_base_from_imu = Eigen::Vector3d::Zero();
+  // Angular acceleration has to be differentiated from the gyro, and
+  // differentiating amplifies exactly the noise the gyro has most of. This
+  // low-passes it; 0 takes the raw difference.
+  double imu_angular_accel_tau_sec = 0.0;
+  bool epipolar_non_ground_only = true;
+  // Throw the solve away when the two disagree by more than this many degrees.
+  // The bearing is too coarse to steer by, but a solve the off-ground
+  // structure flatly contradicts is a solve worth not having.
+  // How much of a camera's standing disagreement with the fused pose to take
+  // back out of the hop its map reports. 0 leaves the correction whole.
+  // What a camera counts for when its hop came off the anchor map, against
+  // one that fell back to comparing two frames.
+  //
+  // These are not the same quantity. The map path reports `placed - pose_`,
+  // which carries a correction for whatever error the pose had already
+  // accumulated; the fallback reports a plain displacement, which carries
+  // none. Averaging them as equals applies the correction at half strength and
+  // drags the camera that had no map. Measured, the drives split exactly in
+  // the stretches where one camera has the map and the other does not.
+  // Metres of hop to give back per radian of turn, and a flat scale on top.
+  //
+  // Measured per solve against truth: hops on a straight read 0.1 to 0.5% short
+  // while hops through a manoeuvre read 0.7 to 0.8% long, and the sign flips
+  // inside a single drive. That is about a percentage point per 0.15 rad/m of
+  // curvature. It is a common mode error -- both cameras share it -- which is
+  // the one kind this two-camera structure cannot cancel for itself.
+  // The same Gaussian the anchor alignment uses, for the two frame fallback.
+  // Extra metres of inlier gate per radian the vehicle turns over a hop.
+  //
+  // A ground point at range R sweeps R*dyaw when the vehicle rotates, so any
+  // error in its range or in the yaw is multiplied by the turn -- the votes
+  // spread wider through a manoeuvre than they ever do on a straight. A gate
+  // sized for the straight then throws away good points exactly when there are
+  // fewest of them. Measured, the curved drives want 0.16-0.24 m where the
+  // straight ones want 0.06-0.10.
+  // Move the pose by what the cameras solved, leaving the filter to run
+  // alongside without writing the hop. Diagnostic: it answers whether a drive's
+  // error is the vision's or the filter's, which nothing else can.
+  // How much of the lateral error the camera split predicts to take back out.
+  //
+  // Each camera's range scale error acts about its own lens, not about
+  // base_link, so a scale error eps on a camera mounted at x contributes
+  // eps * dyaw * x SIDEWAYS whenever the vehicle turns. The front lens sits at
+  // +3.694 and the rear at -0.82, and the two cameras' scale errors are equal
+  // and opposite -- so the along-track parts cancel, as they always have, and
+  // the lateral parts ADD. It is invisible on a straight and accumulates
+  // through a manoeuvre, which is exactly where this estimator is worst.
+  //
+  // Everything in it is observable: eps_i is how far camera i's hop reads
+  // against the fused one, x_i is the mount, and the weights are the fusion's
+  // own. 1.0 subtracts the whole prediction.
+  double camera_split_lever = 0.0;
+  // Restrict the solve to a rectangle of the frame, in fractions of width and
+  // height. Diagnostic: if the projection from pixels to metres were exact,
+  // every region of the image would produce the same hop. Where they differ,
+  // the difference is a map of the model's error. x1 <= x0 leaves it off.
+  // How hard to discount a ground point for being far away.
+  //
+  // Measured on this rig: restricting the solve to a 1 m ring, the registration
+  // residual runs 0.0053 m at 1-2 m and 0.0379 m at 4-5 m -- a factor of seven
+  // -- and all four rings imply the same 1.5-2.2 mrad of bearing error, which
+  // at 640 px is half a pixel. So the residual is one pixel-level error
+  // amplified by range, exactly as (R^2 + h^2) / h says it should be, and the
+  // solve has been averaging near and far points alike. Weight is
+  // (R^2 + h^2)^-power: 0 is the old uniform behaviour, 2 is the inverse
+  // variance the geometry implies.
+  // What one road-warp point counts for against one corner.
+  //
+  // The tracker can carry a handful of points on a photometric fit of the road
+  // region instead of on per-corner flow, and marks them with identities at or
+  // above `kRoadIdentity`. Compared like for like -- 150 corners against 150
+  // corners plus the warp -- the warp's points register with a spread of
+  // 0.0026 m against the corners' 0.0083, so their inverse variance is about
+  // ten times higher. That ratio is the weight; the number of points is only
+  // what it takes to define the warp. Replicating a grid to buy weight instead
+  // would be forging it.
+  double road_point_weight = 1.0;
+  // Restore the old inverse-square weighting of anchor sightings, as a power
+  // on range. 0 uses the geometry instead, which is the default and the
+  // correct model -- see `update_anchors`.
+  double anchor_information_power = 0.0;
+  // Weigh anchors in the registration by information rather than sightings.
+  bool anchor_weight_by_information = false;
+
+  // Measure a ground point's distance from the camera, and hand the anchor
+  // alignment the mount, in the same frame the points are in.
+  //
+  // `pixels_to_ground` rotates the intersection into the level frame and then
+  // subtracted the camera's position in the BODY frame from it. That is only
+  // harmless while the body is level, and it is not: curve_s10 rolls 5.4
+  // degrees at p95, where 0.89 m of camera height is 78 mm against a 114 mm
+  // hop. The claim in vision_fisheye.param.yaml that this vehicle "barely
+  // tilts -- 0.1 degrees" is wrong by fifty times.
+  //
+  // Set false to restore the mixed frames. The eleven drive set cannot judge
+  // this on its own: seven drives move by under a millimetre because they have
+  // no roll to speak of, and the mean is decided by curve_s05, which moves
+  // under every perturbation tried. Applied because it is right.
+  bool level_frame_origin = true;
+  double range_weight_power = 0.0;
+  double pixel_region_x0 = 0.0;
+  double pixel_region_y0 = 0.0;
+  double pixel_region_x1 = 0.0;
+  double pixel_region_y1 = 0.0;
+  bool vision_only_pose = false;
+  double ground_rotation_threshold_m = 0.0;
+  // How many reweighting passes the two-frame fallback runs. The anchor
+  // alignment takes three; this path took one.
+  int ground_pair_passes = 1;
+  double ground_pair_softness_m = 0.0;
+  double curvature_scale_gain = 0.0;
+  double vision_scale = 1.0;
+  double map_solve_weight = 1.0;
+  double anchor_divergence_gain = 0.0;
+  double epipolar_reject_deg = 0.0;
+  // Or keep the solve and trust it less: a camera whose ground answer the
+  // off-ground structure half-agrees with weighs proportionally less when the
+  // two cameras are combined. Soft has beaten hard everywhere else here.
+  double epipolar_trust_deg = 0.0;
   bool anchor_select_by_consistency = true;
   double anchor_seed_travel_m = 0.0;
 
@@ -346,6 +515,11 @@ struct EstimatorSettings
 // One hop as the front end followed it. Pixels are in the frame the tracker
 // processed, whose size travels with them so the intrinsics can be brought to
 // the same coordinates.
+// Identities at or above this are carried by the tracker's photometric road
+// fit rather than by per-corner flow. Float32 holds integers exactly to 2^24
+// and the track message is float32, so the range is safe to reserve.
+constexpr int64_t kRoadIdentity = 1 << 22;
+
 struct TrackFrame
 {
   double stamp = 0.0;
@@ -395,6 +569,27 @@ struct Update
   // is knowingly standing still while the car is not.
   bool pose_valid = false;
   std::vector<LabelledPoint> points;
+  // What each camera made of this hop, in the body frame of the pose held at
+  // `previous_stamp`, and what they fused to before any filter touched it.
+  //
+  // This is the only per-solve quantity that can be laid beside ground truth.
+  // Everything else the estimator says about a camera is measured against the
+  // other camera or against itself, and a self-referential measurement cannot
+  // tell a bias from a disagreement.
+  double previous_stamp = 0.0;
+  bool hops_valid = false;
+  Eigen::Vector2d fused_hop = Eigen::Vector2d::Zero();
+  // Not finite where that camera did not answer this pair.
+  std::vector<Eigen::Vector2d> camera_hops;
+  // 1 where that camera's hop came from the anchor map rather than the two
+  // frame fallback.
+  std::vector<uint8_t> camera_from_map;
+  // What the pose was actually moved by, after the filters and the rejection
+  // gate have had it. `fused_hop` is what the cameras said; this is what the
+  // map got. They are not the same quantity and only this one moves the pose.
+  Eigen::Vector2d applied_hop = Eigen::Vector2d::Zero();
+  bool applied_valid = false;
+  bool coasted = false;
 };
 
 struct Diagnostics
@@ -413,6 +608,18 @@ struct Diagnostics
   int64_t map_aligned_frames = 0;
   int64_t zupt_holds = 0;
   int64_t obstacles_unavailable = 0;
+  // Temporary instrumentation: where the slip obstacle path loses its
+  // candidates. Live runs produce no obstacle points at all and the gates are
+  // only distinguishable by counting them.
+  int64_t obstacle_usable = 0;
+  int64_t obstacle_ready = 0;
+  int64_t obstacle_no_slip = 0;
+  int64_t obstacle_out_of_band = 0;
+  int64_t obstacle_points = 0;
+  int64_t anchors_adopted = 0;
+  double link_gap_m = 0.0;
+  double link_gap_per_m = 0.0;
+  double link_range_m = 0.0;
   // How each camera's ground projection leans, averaged over the solves it
   // answered. This is the mounting pitch and nothing else -- AnchorAlignment
   // carries why the height cannot appear here. Per camera because they are
@@ -451,6 +658,32 @@ struct Diagnostics
   double worst_rejected = 0.0;
   double worst_allowance = 0.0;
   double camera_disagreement = 0.0;
+  // Distance each camera believes the vehicle has travelled, in order.
+  std::vector<double> camera_travel;
+  std::vector<int64_t> camera_solves;
+  std::vector<double> camera_inliers;
+  std::vector<double> camera_spread;
+  std::vector<double> camera_usable;
+  std::vector<double> camera_known;
+  std::vector<int64_t> camera_looks;
+  // Mean angle, in degrees, between the hop the ground solved and the bearing
+  // off-ground features voted for.
+  std::vector<double> camera_bearing;
+  int64_t crossings = 0;
+  double crossing_along_m = 0.0;
+  double crossing_travel_m = 0.0;
+  double crossing_scale = 0.0;
+  double crossing_offset_m = 0.0;
+  // Each camera's hop projected on the fused hop, over the fused path length.
+  std::vector<double> camera_scale;
+  // The same, but per ten metres of path rather than per solve: the fused
+  // distance and what each camera contributed along it. The running totals
+  // cannot say whether the split is there from the first metre or grows over
+  // the drive, and those are different faults. Binned by distance because
+  // `report()` copies this whole struct under the estimator's lock, so a
+  // per-solve trace would grow without bound behind that lock.
+  std::vector<Eigen::Vector3d> travel_bins;
+  std::vector<int64_t> camera_anchored;
   // How far the most-moved ground points shifted on the last solve, in pixels.
   // The mean is useless here: ground features sit anywhere from half a metre to
   // twelve away and pixel shift falls with the square of that, so the far ones
@@ -496,6 +729,15 @@ private:
   void try_process_pairs();
   bool ready_to_solve() const;
   void process_pair();
+  // Rotate a solved hop onto the bearing off-ground features agree with,
+  // keeping the length the ground gave it.
+  void steer_by_epipolar(
+    const Camera & camera, Solved & solved, const Points2 & previous_pixels,
+    const Points2 & current_pixels);
+
+  // The acceleration base_link would have felt, given what the IMU felt.
+  ImuSample shift_imu_to_base(const ImuSample & measured);
+
   std::optional<Solved> solve_camera(
     Camera & camera, std::optional<double> yaw_delta, std::optional<double> yaw_guess);
   void remember_solve_pixels(Camera & camera);
@@ -514,6 +756,27 @@ private:
 
   EstimatorSettings settings_;
   std::vector<std::unique_ptr<Camera>> cameras_;
+  // One ground map for every camera. See GroundAnchorMap's note on sources.
+  std::unique_ptr<GroundAnchorMap> anchors_;
+  std::vector<double> camera_travel_;
+  // Ground scale correction learned against inertial propagation.
+  double imu_scale_ = 1.0;
+  std::optional<Eigen::Vector2d> expected_hop_;
+  std::vector<int64_t> camera_solves_;
+  std::vector<double> camera_inliers_;
+  std::vector<double> camera_spread_;
+  std::vector<double> camera_usable_;
+  std::vector<double> camera_known_;
+  std::vector<int64_t> camera_looks_;
+  std::vector<double> camera_bearing_;
+  std::vector<double> camera_projected_;
+  std::vector<Eigen::Vector2d> last_camera_hops_;
+  std::vector<uint8_t> last_from_map_;
+  Eigen::Vector2d last_fused_hop_ = Eigen::Vector2d::Zero();
+  bool last_hops_valid_ = false;
+  double fused_path_ = 0.0;
+  std::vector<int64_t> camera_bearings_;
+  std::vector<int64_t> camera_anchored_;
 
   Pose2 pose_;
   int frames_since_solve_ = 0;
@@ -564,6 +827,9 @@ private:
   // The instrument's heading when the run started. The filter works in the
   // estimator's frame, which begins at zero, so the reported heading only
   // means anything as a difference from where it began.
+  Eigen::Vector3d imu_rate_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d imu_angular_ = Eigen::Vector3d::Zero();
+  std::optional<double> imu_rate_stamp_;
   std::optional<double> imu_yaw_datum_;
 
   std::unique_ptr<AttitudeFilter> attitude_;

@@ -105,6 +105,14 @@ Eigen::Matrix3d intrinsic_from_fov(int width, int height, double horizontal_fov_
 // residual already zero. The result is identical and the iteration is not.
 Points2 undistort_pixels(const Points2 & pixels, const CameraModel & model);
 
+// When true, `pixels_to_ground` carries the camera's own position into the
+// level frame before it measures how far a ground point is from it, and
+// reports that position so the caller can use the same frame. It used to
+// compare a level-frame point against a body-frame origin, which is only
+// harmless while the body is level: 0.89 m of camera height at the 5.4 degrees
+// of roll measured on curve_s10 is 78 mm, against a 114 mm hop.
+extern bool g_level_frame_origin;
+
 // Ground intersections of the rays through `pixels`, and which are usable.
 //
 // `min_distance` exists because pixel motion goes as the inverse of range: the
@@ -150,9 +158,19 @@ std::optional<MotionEstimate> estimate_planar_motion(
 // robust average: each correspondence votes for one translation.
 std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
   const Points2 & previous_points, const Points2 & current_points, double yaw,
-  double ransac_threshold, int min_inliers);
+  double ransac_threshold, int min_inliers, double softness = 0.0,
+  const Weights & weights = Weights(), int passes = 1);
 
-std::optional<PlanarMotion> fuse_planar_motions(const std::vector<PlanarMotion> & motions);
+// Combine what several cameras made of the same hop.
+//
+// `weights` empty means weigh by inlier count, which is what this always did.
+// Supplying them matters because the cameras are not independent: a body pitch
+// error scales the forward camera's ground ranges down and the rearward one's
+// up, by (R^2 + h^2) / (h R) each. The average cancels that error only when
+// the weights sit in the inverse ratio of those sensitivities, and inlier
+// counts have no reason to.
+std::optional<PlanarMotion> fuse_planar_motions(
+  const std::vector<PlanarMotion> & motions, const std::vector<double> & weights = {});
 
 // Triangulate the same features seen from two poses, in the base frame of the
 // earlier one. Used for obstacles, never for the pose.
@@ -173,6 +191,29 @@ Points2 project_ground_to_pixels(const Points2 & points_xy, const CameraModel & 
 // on a straight 46 m run at 2 m/s, dropping this took drift from 3.3% to 21.7%.
 std::optional<Points2> predict_ground_pixels(
   const Points2 & pixels, const CameraModel & model, const PlanarMotion & motion);
+
+// Which way the camera moved, from features that are not on the ground.
+//
+// The ground solve reads scale off the plane, so its answer is only ever as
+// good as the plane it assumed. Features off the plane -- buildings, poles,
+// other vehicles -- carry no height and cannot give scale, but they do say
+// which *direction* the camera went, and they say it without reference to any
+// plane at all. That makes it an independent check on the half of the hop the
+// ground is worst at.
+//
+// The epipolar constraint normally leaves five unknowns. Here the rotation is
+// already known from the gyro and the motion is planar, so the translation has
+// one degree of freedom -- its bearing -- and x2'[t]xR x1 = 0 collapses to a
+// 2x2 homogeneous system whose smallest eigenvector is the answer. No RANSAC,
+// no five point solver, no triangulation.
+//
+// Returns the unit bearing of the CAMERA's displacement in the earlier body
+// frame, up to sign: the epipolar constraint cannot tell forward from reverse
+// and the caller resolves it. `softness` reweights by angular residual, the
+// same Gaussian the ground alignment uses.
+std::optional<Eigen::Vector2d> epipolar_bearing(
+  const Points2 & previous_pixels, const Points2 & current_pixels, const Mask & use,
+  const CameraModel & model, double yaw_delta, double softness, int min_points);
 
 Points3 transform_points_to_world(const Points3 & points, const Pose2 & pose);
 
