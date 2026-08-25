@@ -306,6 +306,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.ground_rotation_threshold_m = declare_double("ground_rotation_threshold_m", 0.0);
   settings.ground_pair_passes = declare_int("ground_pair_passes", 1);
   settings.ground_pair_softness_m = declare_double("ground_pair_softness_m", 0.0);
+  settings.softness_from_residual = declare_double("softness_from_residual", 0.0);
   settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);

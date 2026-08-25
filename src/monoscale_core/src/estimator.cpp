@@ -95,6 +95,10 @@ struct Estimator::Camera
   }
 
   CameraSettings settings;
+  // What the ground residual has actually been running at, for the paths that
+  // weight by it. Zero until the first solve reports one, so the configured
+  // constant covers the warm-up.
+  double residual_scale = 0.0;
   // As the calibration reports it, at its own resolution.
   CameraModel calibration;
   int calibration_width = 0;
@@ -890,6 +894,18 @@ void Estimator::steer_by_epipolar(
   motion.y += share * (steered.y() - motion.y);
 }
 
+// The Gaussian weight's width is a residual scale, so it can be measured
+// rather than configured. What the constant cannot be is right for every
+// drive: the residual runs 0.012 m on a clean straight and 0.089 m through a
+// parking manoeuvre, and it differs by two between the two cameras of one rig.
+double Estimator::softness_for(const Camera & camera, double configured) const
+{
+  if (settings_.softness_from_residual <= 0.0 || camera.residual_scale <= 0.0) {
+    return configured;
+  }
+  return settings_.softness_from_residual * camera.residual_scale;
+}
+
 std::optional<Estimator::Solved> Estimator::solve_camera(
   Camera & camera, std::optional<double> yaw_delta, std::optional<double> yaw_guess)
 {
@@ -1128,7 +1144,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         settings_.ground_min_inliers,
         heading_.enabled() || msckf_filter_ != nullptr || spatial_filter_ != nullptr,
         lens, settings_.radial_min_range_m,
-        settings_.ground_align_softness_m,
+        softness_for(camera, settings_.ground_align_softness_m),
         settings_.align_seed_from_last_hop && camera.last_translation.has_value()
         ? &*camera.last_translation : nullptr,
         settings_.align_restarts, settings_.align_ambiguity_ratio,
@@ -1242,7 +1258,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   }
   const auto estimate = estimate_planar_motion_with_yaw(
     previous_ground, current_ground, *yaw_delta, gate,
-    settings_.ground_min_inliers, settings_.ground_pair_softness_m, pair_weights,
+    settings_.ground_min_inliers, softness_for(camera, settings_.ground_pair_softness_m),
+    pair_weights,
     settings_.ground_pair_passes);
   if (estimate.has_value()) {
     solved.motion = estimate->motion;
@@ -1267,6 +1284,16 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     }
     solved.spread = kept > 0 ? std::sqrt(squared / kept) : 0.0;
     steer_by_epipolar(camera, solved, previous_pixels, current_pixels);
+  }
+
+  // A running mean, not the last value: solves come in at ten to fifty a
+  // second and one bad hop should not resize the weight. The inliers this is
+  // measured over are chosen by the hard gate, not by the softness, so
+  // narrowing the weight cannot narrow its own evidence.
+  if (solved.spread > 0.0) {
+    camera.residual_scale = camera.residual_scale > 0.0
+      ? camera.residual_scale + (solved.spread - camera.residual_scale) / 32.0
+      : solved.spread;
   }
 
   remember_solve_pixels(camera);

@@ -407,6 +407,18 @@ struct EstimatorSettings
   // alignment takes three; this path took one.
   int ground_pair_passes = 1;
   double ground_pair_softness_m = 0.0;
+  // Multiplier on the measured ground residual, replacing the two constants
+  // above when non-zero. The reasoning was that they are widths of a Gaussian
+  // over a residual, so the residual is the thing to set them from, and it
+  // varies seven times across these drives -- 0.012 m on a clean straight,
+  // 0.089 through a parking manoeuvre -- which no constant can follow.
+  //
+  // Measured, and it loses. Multipliers 1.0 / 1.5 / 2.0 / 3.0 score 0.2477 /
+  // 0.2201 / 0.2074 / 0.2044 against 0.1951 for the tuned constants, and the
+  // repeat spread it was meant to bring down goes to 2.05-4.70x against 2.17.
+  // Sharing one scale between the cameras instead of one each is worse again
+  // (0.2135 at 2.0), so it is not the two-camera weighting. Left at 0.
+  double softness_from_residual = 0.0;
   double curvature_scale_gain = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;
@@ -846,6 +858,7 @@ private:
   // accelerometer alone and drift without bound, so asking the wrong one is
   // asking an open integrator.
   std::optional<Eigen::Vector2d> fused_world_velocity() const;
+  double softness_for(const Camera & camera, double configured) const;
   // The last accelerometer reading believable enough to propagate on.
   std::optional<Eigen::Vector3d> last_specific_force_;
   double hop_residual_squared_ = 0.0;

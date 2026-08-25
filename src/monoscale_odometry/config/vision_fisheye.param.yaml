@@ -251,7 +251,41 @@
     # still needed -- widening it to 0.20 under the same softness costs 0.239 --
     # so this is a soft weight inside a hard bound, not a replacement for it.
     ground_ransac_threshold_m: 0.10
-    ground_align_softness_m: 0.055
+    #
+    # 0.055 until 08-25, when the residual it is a width over was finally
+    # measured rather than fitted. monoscale_replay reports it per camera:
+    #
+    #   nv2 .013/.020  nv3 .012/.017  nv4 .013/.018  ns15 .016/.024
+    #   ns4 .015/.018  s8  .042/.029  park .022/.028 pobst .052/.089
+    #   cs05 .020/.027 cs10 .021/.028 cs20 .018/.035
+    #
+    # So the weight was two to five times wider than the errors it weighs.
+    # Sweeping it down agrees with the measurement, and so does the fallback's
+    # (see ground_pair_softness_m); together, align/pair:
+    #
+    #   .055/.080  .040/.060  .030/.045  .025/.030  .020/.020
+    #   mean .2237     .2039      .1951      .1913      .1976
+    #   SD   .1755     .1733      .1633      .1592      .1551
+    #   MAX  .6912     .6848      .6369      .6251      .6200
+    #   rep   1.71x     1.98x      2.17x      2.41x      2.52x
+    #
+    # This is the one change in the session where the two criteria disagree.
+    # Mean, SD across the eleven drives, and the worst case all improve; the
+    # repeat spread of three recordings of one drive gets worse, in absolute
+    # metres as well as in ratio (0.052 -> 0.080 m), and two of that trio are
+    # worse outright. A narrower Gaussian is a smaller effective sample: more
+    # accurate on average, more variable run to run.
+    #
+    # Taken because the mean and the across-drive spread are what a general
+    # stack is judged on, and because the measurement says the old value was
+    # wrong rather than merely different. Seven of eleven drives improve, led
+    # by the slow drive (-68%) and 4 m/s (-33%).
+    #
+    # Making it follow the measured residual online rather than picking a
+    # better constant was implemented and lost -- see softness_from_residual in
+    # estimator.hpp. The residual varies seven times across these drives, so a
+    # constant cannot be right for all of them, and yet tracking it is worse.
+    ground_align_softness_m: 0.030
 
     # How many starting points the alignment's mode search tries.
     #
@@ -352,7 +386,11 @@
     # 0.1318 -> 0.1306 and MAX 0.4460 -> 0.4481. 0.080 rather than the anchor
     # path's 0.055, which reaches the same mean with a worse SD, MAX and repeat
     # spread once the curved drives are in the set.
-    ground_pair_softness_m: 0.080
+    # 0.080 until 08-25. Same reasoning and same measurement as
+    # ground_align_softness_m, which carries the table; this path's residual is
+    # the larger of the two reported per drive, so it keeps the wider of the
+    # pair at half again the anchor path's.
+    ground_pair_softness_m: 0.045
     # Metres of hop given back per radian of turn.
     #
     # It acts on the **common** mode, which is what matters: both cameras share
