@@ -410,7 +410,44 @@
     # take 2.2 m off a road-speed drive.
     anchor_max_age_frames: 250
 
-    attitude_tau_sec: 60.0
+    # 60.0 until 08-25, and wrong by four times. It was chosen on ATE, which is
+    # a noisy downstream proxy; the recorded truth pose carries roll and pitch,
+    # so the filter can be scored on the thing it estimates instead. Combined
+    # roll+pitch RMS error against truth over all eleven drives:
+    #
+    #   tau      0.5    2.0    5.0    8.0   15.0   30.0   60.0    inf
+    #   error   0.80   0.51   0.39   0.40   0.45   0.58   0.69   0.87
+    #
+    # At 60 the correction is so slow the gyro is effectively running open, and
+    # the filter reports tilt the vehicle does not have: on the flat straights
+    # the true roll is 0.00 deg and it reports 0.07-0.58, which is noise
+    # injected straight into the ground projection. Turning the whole
+    # correction off (attitude_from_imu false) scores 0.2427 against 0.2457,
+    # i.e. as implemented it was break-even -- that is what a correction whose
+    # own error exceeds its signal is worth.
+    #
+    # ATE agrees, and picks a slightly longer tau than the truth error does:
+    #
+    #   tau      3.0    5.0    8.0   10.0   12.0   15.0   20.0   30.0   60.0
+    #   mean   0.2445 0.2380 0.2278 0.2230 0.2224 0.2237 0.2239 0.2313 0.2457
+    #   repeat  1.36   1.47   1.61   1.64   1.65   1.71   1.95   2.02   2.16
+    #
+    # 10-20 is a flat basin, so 15 is not a fitted point. It takes the mean to
+    # 0.2237 (-9%), the repeat spread of three recordings of one drive from
+    # 2.16x to 1.71x, and SD to 0.1755; eight of eleven drives improve, led by
+    # the curves (s10 -31%, s05 -20%, s20 -18%). MAX pays 1.5% on the 8 m/s
+    # drive, and the slow drive and clean park pay 21% and 15% -- both are
+    # manoeuvres where the true tilt is real and a slower filter tracked its
+    # mean better.
+    attitude_tau_sec: 15.0
+    # Left at 0.3. The gate is on the magnitude of the specific force, and for
+    # a lateral acceleration the magnitude only grows as a^2/2g while the
+    # apparent vertical tilts by atan(a/g) -- so 0.3 admits 2.43 m/s2, which is
+    # 13.9 deg of false roll. Tightening it is monotonically worse anyway
+    # (0.15/0.08/0.04/0.02 give 0.2465/0.2486/0.2504/0.2500) because it starves
+    # the correction faster than it protects it, and against the truth pose the
+    # whole 0.1-1.2 range scores within 0.02 deg at any tau. The gate is not
+    # where this filter is losing.
     attitude_gravity_tolerance: 0.3
     camera_workers: 1
     # How much the ground has to move before a solve is worth attempting.
