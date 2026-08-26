@@ -411,7 +411,16 @@
     # Flat from 15 to 40 (0.1620-0.1625). 15 is the conservative end: at 40 a
     # parking hop would open the gate to 0.7 m, which is wider than the band
     # the points come from.
-    ground_rotation_threshold_m: 15.0
+    #
+    # 15 -> 0 on 2026-08-26, and it is the clearest case of a measured win that
+    # the stack outgrew. The gate had to widen with the turn because the
+    # residuals widened with the turn -- and the reason they did was the
+    # common-mode pitch error, which scales every range in the frame and shows
+    # up hardest where the geometry is changing. With the attitude bias state
+    # carrying that, the residuals no longer widen, and all this does is admit
+    # points that should be rejected. Re-swept: 0 / 8 / 15 / 30 give ATE 0.0952
+    # / 0.0997 / 0.0993 / 0.1015 and RPE10 0.690 / 0.722 / 0.723 / 0.730.
+    ground_rotation_threshold_m: 0.0
     # The same Gaussian weight the anchor alignment uses, for the two frame
     # fallback that answers whenever the map cannot.
     #
@@ -604,7 +613,16 @@
     # the correction faster than it protects it, and against the truth pose the
     # whole 0.1-1.2 range scores within 0.02 deg at any tau. The gate is not
     # where this filter is losing.
-    attitude_gravity_tolerance: 0.3
+    #
+    # 0.3 -> 0.10 on 2026-08-26. The note above is right that the magnitude gate
+    # is the wrong shape and right that tightening it used to be monotonically
+    # worse (0.15 / 0.08 / 0.04 / 0.02 all cost). What changed is what the trim
+    # is for. It is no longer only pulling the attitude towards gravity; it also
+    # feeds the bias integral, and a bias estimate is worth far more per sample
+    # than a proportional pull, so admitting fewer and cleaner samples now pays
+    # where it did not. Re-swept: 0.05 / 0.10 / 0.30 / 0.60 give ATE 0.1105 /
+    # 0.0996 / 0.0993 / 0.1053, and 0.10 takes the worst drive 0.1697 -> 0.1579.
+    attitude_gravity_tolerance: 0.10
     camera_workers: 1
     # How much the ground has to move before a solve is worth attempting.
     # Declared at 40.0 in odometry_node.py and absent from here until
