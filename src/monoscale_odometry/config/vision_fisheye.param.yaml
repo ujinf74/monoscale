@@ -763,6 +763,30 @@
     # the same process noise per step that 12.0 gave under the old (q*dt)^2
     # form at the simulation's 60 Hz -- sqrt(0.04*60) -- and unlike 12.0 it
     # keeps meaning the same thing when the IMU rate changes.
+    #
+    # 1.55 -> 8.0 on 2026-08-26, and the useful part is that 1.55 had only ever
+    # been swept *downward*. 0.6 and 0.3 were tried and are much worse, which
+    # was read as 1.55 being the optimum; nobody had gone up. 3 / 5 / 8 / 15 /
+    # 40 give ATE 0.1538 / 0.1562 / 0.1496 / 0.1587 / 0.1634 against 0.1764, a
+    # basin wide enough that 8 is not a fitted point.
+    #
+    # It is worth 15% on the mean and 52% on the worst case (0.5138 -> 0.2481),
+    # and nearly all of that is the 8 m/s drive. That is the shape to expect:
+    # process noise has to cover every error the model does not carry, not the
+    # accelerometer's alone, and the unmodelled part grows with speed.
+    #
+    # Measured against truth the instrument itself is far quieter than any of
+    # these -- integrate it over T seconds, compare the velocity change with
+    # truth's, and rms/sqrt(T) reads 0.006 to 0.823 across the eleven drives,
+    # highest on the 8 m/s drive by three to five times. So the *ranking* the
+    # measurement gives is the ranking the sweep wants, and only the scale
+    # disagrees. Read that as the knob naming the wrong quantity: what it sets
+    # is how soon the filter leans on vision, and vision is the better sensor
+    # here by a margin the accelerometer's own noise never described.
+    #
+    # Four drives pay a little (str_4.0, curve_s20, and both parks, 2-27%).
+    # A value that follows speed would take those back; a single number cannot.
+    filter_acceleration_noise: 8.0
     filter_vision_noise: 0.25
     filter_reference_inliers: 300.0
     filter_innovation_gate: 9.0
