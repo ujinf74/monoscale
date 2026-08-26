@@ -683,6 +683,14 @@ int main(int argc, char ** argv)
         int64_t n = 0;
       };
       std::vector<Bin> bins;
+      struct SplitRow
+      {
+        double split;
+        double speed;
+        double turn_rate;
+        double signed_rate;
+      };
+      std::vector<SplitRow> split_rows;
       double run = 0.0;
       for (const auto & hop : hops) {
         if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
@@ -718,6 +726,69 @@ int main(int argc, char ** argv)
           bin.map1 += hop.camera_from_map[1];
         }
         ++bin.n;
+        // What the split is, and what might explain it.
+        //
+        // A pitch error accounts for 67% of it across the eleven drives, so a
+        // third is something else -- and the two drives it fails on are the
+        // fastest and the sharpest turn, which suggests two mechanisms rather
+        // than one residue. A camera sync offset costs speed times the offset,
+        // so it scales with speed; anything about the lever arms or the
+        // rotation scales with yaw rate.
+        const double dt = hop.stamp - hop.previous_stamp;
+        if (dt > 1e-4) {
+          split_rows.push_back(
+            {0.5 * (e0 - e1), length / dt, std::abs(step.yaw) / dt, step.yaw / dt});
+        }
+      }
+      if (!split_rows.empty()) {
+        // Least squares of the split on each candidate alone, so the two can be
+        // told apart by which one carries the variance on which drive.
+        const auto fit = [&split_rows](int which) {
+            double sxx = 0.0;
+            double sxy = 0.0;
+            double sx = 0.0;
+            double sy = 0.0;
+            const double n = static_cast<double>(split_rows.size());
+            for (const auto & r : split_rows) {
+              const double x = which == 0 ? r.speed : (which == 1 ? r.turn_rate : r.signed_rate);
+              sx += x;
+              sy += r.split;
+              sxx += x * x;
+              sxy += x * r.split;
+            }
+            const double denominator = n * sxx - sx * sx;
+            if (std::abs(denominator) < 1e-12) {
+              return std::pair<double, double>{0.0, 0.0};
+            }
+            const double slope = (n * sxy - sx * sy) / denominator;
+            const double intercept = (sy - slope * sx) / n;
+            double residual = 0.0;
+            double total = 0.0;
+            const double mean = sy / n;
+            for (const auto & r : split_rows) {
+              const double x = which == 0 ? r.speed : (which == 1 ? r.turn_rate : r.signed_rate);
+              const double predicted = slope * x + intercept;
+              residual += (r.split - predicted) * (r.split - predicted);
+              total += (r.split - mean) * (r.split - mean);
+            }
+            return std::pair<double, double>{
+              slope, total > 1e-18 ? 1.0 - residual / total : 0.0};
+          };
+        double mean_split = 0.0;
+        for (const auto & r : split_rows) {
+          mean_split += r.split;
+        }
+        mean_split /= static_cast<double>(split_rows.size());
+        const auto by_speed = fit(0);
+        const auto by_rate = fit(1);
+        const auto by_signed = fit(2);
+        std::printf(
+          "  split 평균 %+.2f%%  n=%zu | 속도 기울기 %+.3f%%/(m/s) R2=%.3f"
+          " | |요율| %+.3f%%/(rad/s) R2=%.3f | 부호요율 %+.3f R2=%.3f\n",
+          100.0 * mean_split, split_rows.size(),
+          100.0 * by_speed.first, by_speed.second,
+          100.0 * by_rate.first, by_rate.second,
+          100.0 * by_signed.first, by_signed.second);
       }
       if (bins.size() >= 3) {
         std::printf("  10 m 구간별 front편향/rear편향 | 맵사용률 front/rear:\n   ");
