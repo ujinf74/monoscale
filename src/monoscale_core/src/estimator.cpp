@@ -259,7 +259,6 @@ Estimator::Estimator(const EstimatorSettings & settings)
   int source_index = 0;
   for (const auto & camera : settings.cameras) {
     cameras_.push_back(std::make_unique<Camera>(camera, source_index++));
-    cameras_.back()->mounting_variance = settings.mounting_pitch_variance;
     cameras_.back()->mount_rotation = camera.rotation_base_from_camera;
     // On the model rather than in a global, so two estimators in one process
     // cannot overwrite each other's.
@@ -727,41 +726,6 @@ void Estimator::replay_inertial(
   }
 }
 
-// The lean the alignment left, turned into a mounting pitch.
-//
-// One scalar measurement of one scalar state, so the whole filter is three
-// lines. What it is worth is the measured gain -- 0.0056 of lean per degree --
-// against a noise that is mostly the road rather than the instrument: a real
-// grade tilts the ground under the camera exactly the way a mounting error
-// does, and nothing here can tell them apart within one solve.
-void Estimator::learn_mounting_pitch(Camera & camera, double lean)
-{
-  if (!camera.settings.learn_mounting_pitch || settings_.mounting_pitch_gain == 0.0) {
-    return;
-  }
-  const double noise = settings_.mounting_pitch_noise * settings_.mounting_pitch_noise;
-  const double gain = settings_.mounting_pitch_gain;
-  const double innovation = lean - gain * camera.mounting_pitch;
-  const double block = gain * gain * camera.mounting_variance + noise;
-  if (!(block > 0.0)) {
-    return;
-  }
-  const double k = camera.mounting_variance * gain / block;
-  camera.mounting_pitch += k * innovation;
-  camera.mounting_variance = std::max((1.0 - k * gain) * camera.mounting_variance, 0.0) +
-    settings_.mounting_pitch_walk * settings_.mounting_pitch_walk;
-  if (!settings_.mounting_pitch_apply) {
-    return;
-  }
-  // Onto the mount as it stands, which is the transform tree's when there is
-  // one -- composing onto the parameter default would quietly discard it.
-  camera.calibration.rotation_base_from_camera =
-    Eigen::AngleAxisd(-camera.mounting_pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() *
-    camera.mount_rotation;
-  if (camera.frame_width > 0 && camera.frame_height > 0) {
-    camera.model = frame_model(camera, camera.frame_width, camera.frame_height);
-  }
-}
 
 void Estimator::remember_solve_pixels(Camera & camera)
 {
@@ -792,69 +756,6 @@ void Estimator::remember_solve_pixels(Camera & camera)
   camera.hop_disparity = 0.0;
 }
 
-void Estimator::steer_by_epipolar(
-  const Camera & camera, Solved & solved, const Points2 & previous_pixels,
-  const Points2 & current_pixels)
-{
-  if ((settings_.epipolar_weight <= 0.0 && settings_.epipolar_reject_deg <= 0.0 &&
-    settings_.epipolar_trust_deg <= 0.0) ||
-    !solved.motion.has_value())
-  {
-    return;
-  }
-  PlanarMotion & motion = *solved.motion;
-  const Eigen::Vector2d hop(motion.x, motion.y);
-  if (hop.norm() < settings_.epipolar_min_hop_m) {
-    return;
-  }
-  // Off the ground by default. A point the projection rejected is either too
-  // far, too near, or above the horizon, and the last of those is the whole
-  // point -- it is structure the plane cannot explain, so its parallax says
-  // something the ground solve has not already used.
-  const Mask use = settings_.epipolar_non_ground_only
-    ? Mask(!solved.ground_valid) : Mask::Constant(previous_pixels.rows(), true);
-  const double yaw = motion.yaw;
-  const auto bearing = epipolar_bearing(
-    previous_pixels, current_pixels, use, camera.model, yaw,
-    settings_.epipolar_softness_rad, settings_.ground_min_inliers);
-  if (!bearing.has_value()) {
-    return;
-  }
-  // The constraint sees the camera move, not the axle. Under yaw the mount
-  // swings through an arc of its own, and that part of the bearing is nothing
-  // to do with where the vehicle went.
-  Eigen::Matrix2d turned;
-  turned << std::cos(yaw), -std::sin(yaw), std::sin(yaw), std::cos(yaw);
-  const Eigen::Vector2d lever = (turned - Eigen::Matrix2d::Identity()) *
-    camera.model.translation_base_from_camera.head<2>();
-  const Eigen::Vector2d travelled = hop + lever;
-  const double length = travelled.norm();
-  if (length < 1e-6) {
-    return;
-  }
-  // Sign is the caller's to settle: x2'[t]xR x1 = 0 holds for -t as readily
-  // as for t, so the epipolar geometry cannot tell forward from reverse.
-  const Eigen::Vector2d direction =
-    bearing->dot(travelled) < 0.0 ? Eigen::Vector2d(-*bearing) : *bearing;
-  const double disagreement = std::abs(
-    wrap_pi(std::atan2(direction.y(), direction.x()) -
-    std::atan2(travelled.y(), travelled.x()))) * 180.0 / M_PI;
-  camera_bearing_[camera.source] += disagreement;
-  ++camera_bearings_[camera.source];
-  if (settings_.epipolar_reject_deg > 0.0 && disagreement > settings_.epipolar_reject_deg) {
-    solved.motion.reset();
-    return;
-  }
-  if (settings_.epipolar_trust_deg > 0.0) {
-    const double relative = disagreement / settings_.epipolar_trust_deg;
-    motion.inliers = std::max(
-      1, static_cast<int>(std::lround(motion.inliers * std::exp(-0.5 * relative * relative))));
-  }
-  const Eigen::Vector2d steered = length * direction - lever;
-  const double share = std::clamp(settings_.epipolar_weight, 0.0, 1.0);
-  motion.x += share * (steered.x() - motion.x);
-  motion.y += share * (steered.y() - motion.y);
-}
 
 // The Gaussian weight's width is a residual scale, so it can be measured
 // rather than configured. What the constant cannot be is right for every
@@ -1086,7 +987,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     usable.push_back(i);
   }
 
-  if (settings_.fuse_camera_points || settings_.unified_solve) {
+  if (settings_.fuse_camera_points) {
     const Eigen::Index kept = static_cast<Eigen::Index>(usable.size());
     solved.pair_previous.resize(kept, 2);
     solved.pair_current.resize(kept, 2);
@@ -1199,7 +1100,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
               camera.range_scale_learned * (1.0 + step), 0.9, 1.1);
           }
         }
-        learn_mounting_pitch(camera, aligned->radial_linear);
       }
       // Recorded, not applied. Both cameras see the same heading and each has
       // its own opinion of how far it is out; folding them in one at a time
@@ -1243,7 +1143,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
           solved.motion_inliers(selected[static_cast<size_t>(i)]) = true;
         }
       }
-      steer_by_epipolar(camera, solved, previous_pixels, current_pixels);
       remember_solve_pixels(camera);
       return solved;
     }
@@ -1314,7 +1213,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       ++kept;
     }
     solved.spread = kept > 0 ? std::sqrt(squared / kept) : 0.0;
-    steer_by_epipolar(camera, solved, previous_pixels, current_pixels);
   }
 
   // A running mean, not the last value: solves come in at ten to fifty a
@@ -1485,11 +1383,9 @@ void Estimator::process_pair()
   // solve holds a reference and does not know which one it was handed.
   diagnostics_.radial_linear.assign(count, 0.0);
   diagnostics_.radial_samples.assign(count, 0);
-  diagnostics_.mounting_pitch.assign(count, 0.0);
   for (size_t i = 0; i < count; ++i) {
     const Camera & camera = *cameras_[i];
     diagnostics_.radial_samples[i] = camera.radial_samples;
-    diagnostics_.mounting_pitch[i] = camera.mounting_pitch * 180.0 / M_PI;
     if (camera.radial_samples > 0) {
       const double n = static_cast<double>(camera.radial_samples);
       diagnostics_.radial_linear[i] = camera.radial_linear_sum / n;
@@ -1519,24 +1415,6 @@ void Estimator::process_pair()
           measured = rescale_motion(measured, ratio);
         }
       }
-    }
-    // A car cannot slide sideways. Measured against truth at the rear axle,
-    // the lateral part of a hop is 0.02-0.66 mm where the hop itself is
-    // 22-62 mm -- under 1% even through the parking manoeuvre, and exactly
-    // zero on a straight. The registration solves that component anyway, so
-    // whatever noise lands there is taken for motion. Shrinking it towards the
-    // constraint keeps the arc (a finite hop along a curve does carry a little
-    // lateral, which is why this is a gain and not a projection to zero).
-    if (settings_.nonholonomic_lateral > 0.0) {
-      // Towards the arc's own lateral, not towards zero. A hop along a curve
-      // is a chord, and a chord sits at half the hop's yaw from the body x
-      // axis, so its lateral part is x*tan(dyaw/2) -- squeezing that to zero
-      // sends the vehicle down the tangent instead and buys a systematic error
-      // for a random one. Measured on curve_s05, damping to zero stops helping
-      // at 0.99 with 0.273 m of cross error left, which is what the tangent
-      // costs over 832 hops.
-      const double arc = measured.x * std::tan(0.5 * measured.yaw);
-      measured.y += settings_.nonholonomic_lateral * (arc - measured.y);
     }
     solved[i]->motion = measured;
     motions.push_back(measured);
@@ -1615,123 +1493,6 @@ void Estimator::process_pair()
   auto motion = fuse_planar_motions(motions, fusion_weights);
 
 
-  // One solve over every reference there is.
-  //
-  // Each feature votes h = reference - R(dyaw) q. The reference is the anchor
-  // map's averaged world position where the map knows the feature, and the
-  // feature's own previous ground position where it does not -- the same
-  // equation either way, so both go in one list and one consensus decides.
-  // Both cameras are in that list too: the body is rigid and the hop is one
-  // hop, so there is nothing to fuse afterwards.
-  if (settings_.unified_solve && yaw_delta.has_value() && dt > 1e-4) {
-    Eigen::Index total = 0;
-    for (const auto & entry : solved) {
-      if (entry.has_value()) {
-        total += entry->pair_ids.size();
-      }
-    }
-    if (total >= settings_.ground_min_inliers) {
-      // One reference type for the whole hop, decided before any vote is cast.
-      // A pair says what the hop was; an anchor says what the hop plus the
-      // accumulated drift was. Two cameras can disagree about which they have,
-      // but the consensus cannot hold both, so the choice belongs to the hop.
-      bool take_map = false;
-      if (settings_.unified_exclusive) {
-        int64_t anchored_total = 0;
-        for (size_t c = 0; c < solved.size(); ++c) {
-          if (!solved[c].has_value() || solved[c]->pair_ids.size() == 0) {
-            continue;
-          }
-          Points2 peek;
-          Weights seen;
-          anchors_->anchor_view(cameras_[c]->source, solved[c]->pair_ids, peek, seen);
-          if (seen.size() == solved[c]->pair_ids.size()) {
-            for (Eigen::Index i = 0; i < seen.size(); ++i) {
-              anchored_total += seen(i) > 0.0 ? 1 : 0;
-            }
-          }
-        }
-        take_map = anchored_total >= settings_.ground_min_inliers;
-      }
-      Points2 reference(total, 2);
-      Points2 observed(total, 2);
-      Weights vote_weights(total);
-      const double cp = std::cos(pose_.yaw);
-      const double sp = std::sin(pose_.yaw);
-      Eigen::Index at = 0;
-      int64_t from_map = 0;
-      for (size_t c = 0; c < solved.size(); ++c) {
-        if (!solved[c].has_value() || solved[c]->pair_ids.size() == 0) {
-          continue;
-        }
-        const auto & entry = *solved[c];
-        const Eigen::Index rows = entry.pair_ids.size();
-        Points2 world;
-        Weights known;
-        {
-          Stopwatch lookup(diagnostics_, "lookup");
-          anchors_->anchor_view(cameras_[c]->source, entry.pair_ids, world, known);
-        }
-        bool have = world.rows() == rows && known.size() == rows;
-        // A pair's reference is a direct observation in the previous body
-        // frame, so it carries no accumulated error. An anchor's is a world
-        // position brought into that frame through the previous pose, so it
-        // carries whatever that pose has drifted. The two measure different
-        // things -- a hop, and a hop plus the correction for the drift.
-        if (settings_.unified_exclusive && !take_map) {
-          have = false;
-        }
-        for (Eigen::Index i = 0; i < rows; ++i) {
-          // An anchor answers with a world position; bring it into the frame
-          // the previous sighting would have been expressed in, and the two
-          // references become interchangeable.
-          const bool anchored_here = have && known(i) > 0.0;
-          if (settings_.unified_exclusive && have && !anchored_here) {
-            continue;   // this camera is answering from the map this hop
-          }
-          if (anchored_here) {
-            const double wx = world(i, 0) - pose_.x;
-            const double wy = world(i, 1) - pose_.y;
-            reference(at, 0) = cp * wx + sp * wy;
-            reference(at, 1) = -sp * wx + cp * wy;
-            vote_weights(at) = settings_.unified_anchor_weight * known(i);
-            ++from_map;
-          } else {
-            reference(at, 0) = entry.pair_previous(i, 0);
-            reference(at, 1) = entry.pair_previous(i, 1);
-            vote_weights(at) = 1.0;
-          }
-          observed(at, 0) = entry.pair_current(i, 0);
-          observed(at, 1) = entry.pair_current(i, 1);
-          ++at;
-        }
-      }
-      if (at < total) {
-        reference.conservativeResize(at, 2);
-        observed.conservativeResize(at, 2);
-        vote_weights.conservativeResize(at);
-        total = at;
-      }
-      const double unified_gate = settings_.ground_ransac_threshold_m +
-        settings_.ground_rotation_threshold_m * std::abs(*yaw_delta);
-      const auto pooled = estimate_planar_motion_with_yaw(
-        reference, observed, *yaw_delta, unified_gate,
-        settings_.ground_min_inliers, settings_.ground_pair_softness_m,
-        vote_weights, settings_.ground_pair_passes);
-      if (pooled.has_value()) {
-        if (!motion.has_value()) {
-          motion = pooled->motion;
-        } else {
-          motion->x = pooled->motion.x;
-          motion->y = pooled->motion.y;
-          motion->inliers = pooled->motion.inliers;
-        }
-        diagnostics_.unified_votes += total;
-        diagnostics_.unified_from_map += from_map;
-        aligned_from_map = aligned_from_map || from_map > 0;
-      }
-    }
-  }
   // Or one solve over everything both cameras saw. The average above treats
   // each camera's answer as a measurement and weighs them; this treats the
   // ground itself as the measurement, which is what it is. The body is rigid,

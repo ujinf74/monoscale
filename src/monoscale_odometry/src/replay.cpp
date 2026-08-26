@@ -902,9 +902,8 @@ int main(int argc, char ** argv)
       continue;
     }
     std::printf(
-      "마운팅pitch[%zu]: 기울기=%+.5f 학습=%+.4fdeg n=%ld\n",
-      i, diagnostics.radial_linear[i], diagnostics.mounting_pitch[i],
-      diagnostics.radial_samples[i]);
+      "지면 기울기[%zu]: %+.5f  n=%ld\n",
+      i, diagnostics.radial_linear[i], diagnostics.radial_samples[i]);
   }
   if (diagnostics.levelled > 0) {
     std::printf(

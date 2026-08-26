@@ -158,8 +158,6 @@ Configuration declare_and_read(rclcpp::Node & node)
     // Whether this camera's mounting pitch is learned from the lean its
     // alignment residual leaves. Off unless the observable is there for it --
     // CameraSettings carries which cameras that was measured to be.
-    camera.learn_mounting_pitch =
-      node.declare_parameter<bool>(name + ".learn_mounting_pitch", false);
     camera.fusion_weight = node.declare_parameter<double>(name + ".fusion_weight", 0.0);
 
     camera.k = matrix_of(k);
@@ -205,7 +203,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.ground_align_softness_m = declare_double("ground_align_softness_m", 0.0);
   settings.solve_max_distance_m = declare_double("solve_max_distance_m", 0.0);
   settings.anchor_max_range_m = declare_double("anchor_max_range_m", 0.0);
-  settings.nonholonomic_lateral = declare_double("nonholonomic_lateral", 0.0);
   settings.imu_scale_gain = declare_double("imu_scale_gain", 0.0);
   settings.imu_scale_min_hop_m = declare_double("imu_scale_min_hop_m", 0.05);
   settings.inertial_gate_m = declare_double("inertial_gate_m", 0.0);
@@ -292,10 +289,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_link_rebind_grace = declare_int("anchor_link_rebind_grace", 1);
   settings.anchor_evict_by_age = declare_bool("anchor_evict_by_age", false);
   settings.anchor_evict_for_new = declare_bool("anchor_evict_for_new", false);
-  settings.epipolar_weight = declare_double("epipolar_weight", 0.0);
-  settings.epipolar_softness_rad = declare_double("epipolar_softness_rad", 0.02);
-  settings.epipolar_min_hop_m = declare_double("epipolar_min_hop_m", 0.0);
-  settings.epipolar_non_ground_only = declare_bool("epipolar_non_ground_only", true);
   settings.camera_split_lever = declare_double("camera_split_lever", 0.0);
   settings.road_point_weight = declare_double("road_point_weight", 1.0);
   settings.anchor_information_power = declare_double("anchor_information_power", 0.0);
@@ -312,9 +305,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.ground_pair_softness_m = declare_double("ground_pair_softness_m", 0.0);
   settings.softness_from_residual = declare_double("softness_from_residual", 0.0);
   settings.fuse_camera_points = declare_bool("fuse_camera_points", false);
-  settings.unified_solve = declare_bool("unified_solve", false);
-  settings.unified_anchor_weight = declare_double("unified_anchor_weight", 1.0);
-  settings.unified_exclusive = declare_bool("unified_exclusive", false);
   settings.anchor_drift_variance_per_m =
     declare_double("anchor_drift_variance_per_m", 0.0);
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
@@ -324,8 +314,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);
   settings.anchor_divergence_gain = declare_double("anchor_divergence_gain", 0.0);
-  settings.epipolar_reject_deg = declare_double("epipolar_reject_deg", 0.0);
-  settings.epipolar_trust_deg = declare_double("epipolar_trust_deg", 0.0);
   settings.imu_translation_base_from_imu = vector_of(
     node.declare_parameter<std::vector<double>>(
       "imu_translation_base_from_imu", std::vector<double>{0.0, 0.0, 0.0}));
@@ -430,11 +418,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.radial_min_range_m = declare_double("radial_min_range_m", 1.5);
   // What a mounting pitch error is worth knowing to, how much lean a radian of
   // it produces, and how much of the lean is the road rather than the mounting.
-  settings.mounting_pitch_variance = declare_double("mounting_pitch_variance", 3.0e-4);
-  settings.mounting_pitch_gain = declare_double("mounting_pitch_gain", 0.321);
-  settings.mounting_pitch_noise = declare_double("mounting_pitch_noise", 0.002);
-  settings.mounting_pitch_walk = declare_double("mounting_pitch_walk", 1.0e-4);
-  settings.mounting_pitch_apply = declare_bool("mounting_pitch_apply", false);
   // The six degree of freedom filter's own two numbers, and its gate.
   // Rather than choosing that trade once, watch the ground disagree with the
   // reported heading and loosen it by however one-sided the disagreement is.
