@@ -185,12 +185,8 @@ struct EstimatorSettings
   double anchor_max_variance = 0.09;
   int anchor_trial_observations = 4;
   double anchor_min_update_gain = 0.0;
-  double anchor_link_radius_m = 0.0;
-  bool anchor_link_adopter_writes = false;
-  int anchor_link_rebind_grace = 1;
   bool anchor_evict_by_age = false;
   bool anchor_evict_for_new = false;
-  bool anchor_link_measure_only = false;
   // Where the IMU is bolted, from base_link, in the base frame. An IMU off the
   // origin does not measure what the origin does: it also picks up alpha x r
   // as the vehicle's yaw rate changes and omega x (omega x r) as it turns.
@@ -357,7 +353,6 @@ struct EstimatorSettings
   double curvature_scale_gain = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;
-  double anchor_divergence_gain = 0.0;
   bool anchor_select_by_consistency = true;
   double anchor_seed_travel_m = 0.0;
 
@@ -373,14 +368,6 @@ struct EstimatorSettings
   bool require_map_before_translating = true;
   bool suppress_pose_until_map_ready = true;
 
-  bool zero_velocity_update = false;
-  double zero_velocity_gyro_dps = 0.5;
-  double zero_velocity_accel_mps2 = 0.15;
-  double zero_velocity_speed_mps = 0.8;
-  double zero_velocity_disparity_px = 0.5;
-  double zero_velocity_dropout_mps2 = 0.0;
-  double zero_velocity_quiet_fraction = 1.0;
-  double zupt_velocity_sigma = 0.01;
 
   bool use_inertial_prediction = true;
   bool inertial_use_acceleration = true;
@@ -505,9 +492,6 @@ struct Diagnostics
   int64_t filter_rejections = 0;
   int64_t imu_yaw_misses = 0;
   int64_t map_aligned_frames = 0;
-  // How much structure the unified filter is holding, and how many sightings
-  // it took.
-  int64_t zupt_holds = 0;
   int64_t obstacles_unavailable = 0;
   // Temporary instrumentation: where the slip obstacle path loses its
   // candidates. Live runs produce no obstacle points at all and the gates are
@@ -639,7 +623,6 @@ private:
   Eigen::Vector2d imu_world_velocity(const Eigen::Vector2d & velocity) const;
   std::optional<double> imu_yaw_at(double stamp) const;
   bool imu_still_arriving(double stamp) const;
-  bool is_stationary(double start, double end, double speed) const;
   void update_anchors(const std::vector<std::optional<Solved>> & solved);
   void integrate_points(
     const std::vector<std::optional<Solved>> & solved, const Pose2 & previous_pose,
@@ -680,13 +663,6 @@ private:
   bool map_ready_ = false;
 
   std::deque<std::pair<double, double>> imu_yaw_samples_;
-  struct MotionSample
-  {
-    double stamp;
-    double rate;
-    double force;
-  };
-  std::deque<MotionSample> imu_motion_samples_;
   struct AccelerationSample
   {
     double stamp;

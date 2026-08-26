@@ -283,10 +283,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_max_variance = declare_double("anchor_max_variance", 0.09);
   settings.anchor_trial_observations = declare_int("anchor_trial_observations", 4);
   settings.anchor_min_update_gain = declare_double("anchor_min_update_gain", 0.0);
-  settings.anchor_link_radius_m = declare_double("anchor_link_radius_m", 0.0);
-  settings.anchor_link_measure_only = declare_bool("anchor_link_measure_only", false);
-  settings.anchor_link_adopter_writes = declare_bool("anchor_link_adopter_writes", false);
-  settings.anchor_link_rebind_grace = declare_int("anchor_link_rebind_grace", 1);
   settings.anchor_evict_by_age = declare_bool("anchor_evict_by_age", false);
   settings.anchor_evict_for_new = declare_bool("anchor_evict_for_new", false);
   settings.camera_split_lever = declare_double("camera_split_lever", 0.0);
@@ -313,7 +309,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);
-  settings.anchor_divergence_gain = declare_double("anchor_divergence_gain", 0.0);
   settings.imu_translation_base_from_imu = vector_of(
     node.declare_parameter<std::vector<double>>(
       "imu_translation_base_from_imu", std::vector<double>{0.0, 0.0, 0.0}));
@@ -343,22 +338,14 @@ Configuration declare_and_read(rclcpp::Node & node)
   // texture is never exact and the residual reads as travel. Off: the gain it
   // once appeared to buy was an earlier version suppressing motion that was
   // real.
-  settings.zero_velocity_update = declare_bool("zero_velocity_update", false);
-  settings.zero_velocity_gyro_dps = declare_double("zero_velocity_gyro_dps", 0.5);
-  settings.zero_velocity_accel_mps2 = declare_double("zero_velocity_accel_mps2", 0.15);
   // An accelerometer cannot tell rest from constant velocity: both read gravity
   // and nothing else. Asked on its own it called 144 of 495 solves stationary
   // on a run held at 8 m/s. Vision has to agree.
-  settings.zero_velocity_speed_mps = declare_double("zero_velocity_speed_mps", 0.8);
   // Borrowed from OpenVINS, which asks the images rather than the accelerometer
   // whether the platform is moving.
-  settings.zero_velocity_disparity_px = declare_double("zero_velocity_disparity_px", 0.5);
-  settings.zero_velocity_dropout_mps2 = declare_double("zero_velocity_dropout_mps2", 0.0);
   // How much of the window has to be still. Relaxing this to 0.8 let the check
   // fire five or six times a run instead of one to three, and the extra
   // firings were wrong: ATE went from 0.046-0.055 to 0.067-0.070.
-  settings.zero_velocity_quiet_fraction = declare_double("zero_velocity_quiet_fraction", 1.0);
-  settings.zupt_velocity_sigma = declare_double("zupt_velocity_sigma", 0.01);
 
   settings.use_inertial_prediction = declare_bool("use_inertial_prediction", true);
   settings.inertial_use_acceleration = declare_bool("inertial_use_acceleration", true);

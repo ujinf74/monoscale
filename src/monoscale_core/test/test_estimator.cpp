@@ -328,33 +328,6 @@ TEST(EstimatorDrive, AnInstrumentDropoutDelaysTheMotionRatherThanLosingIt)
   EXPECT_NEAR(gapped.first, clean.first, 0.15);
 }
 
-TEST(EstimatorDrive, StandingStillIsJudgedOnDisparityThatStillExists)
-{
-  // The zero-velocity hold zeroes the translation outright, so what lets it
-  // fire matters. Two things have to agree: the instrument has to look at rest
-  // and the image has to have stopped moving. The synthetic drive reports a
-  // perfectly quiet instrument -- gravity down, no rates -- so a slow drive
-  // passes the inertial half, and only the disparity keeps the hold off.
-  //
-  // Solving a frame remembers it, and remembering it resets the disparity. Read
-  // the disparity after the solves and every camera answers zero, the gate
-  // passes unconditionally, and a vehicle creeping along a car park is told it
-  // did not move.
-  EstimatorSettings settings = deployment_settings();
-  settings.zero_velocity_update = true;
-  Drive drive(settings);
-
-  // 0.5 m/s: under zero_velocity_speed_mps, so the speed gate does not save it.
-  for (int i = 0; i < 300; ++i) {
-    drive.step(0.5, 0.0, 1.0 / 30.0);
-  }
-  ASSERT_GT(drive.estimator.diagnostics().map_aligned_frames, 0);
-
-  EXPECT_EQ(drive.estimator.diagnostics().zupt_holds, 0)
-    << "the image was moving four pixels a frame and it was called stationary";
-  EXPECT_GT(drive.estimator.pose().x, 0.5 * drive.travelled);
-}
-
 TEST(EstimatorDrive, CoastingReadsTheFilterVisionActuallyFeeds)
 {
   // Drive normally until the map answers and the fusion filter has settled,

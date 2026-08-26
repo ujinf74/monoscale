@@ -230,11 +230,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.max_variance = settings.anchor_max_variance;
   anchor_settings.trial_observations = settings.anchor_trial_observations;
   anchor_settings.min_update_gain = settings.anchor_min_update_gain;
-  anchor_settings.link_radius_m = settings.anchor_link_radius_m;
-  anchor_settings.link_measure_only = settings.anchor_link_measure_only;
   anchor_settings.weight_by_information = settings.anchor_weight_by_information;
-  anchor_settings.link_adopter_writes = settings.anchor_link_adopter_writes;
-  anchor_settings.link_rebind_grace_frames = settings.anchor_link_rebind_grace;
   anchor_settings.evict_by_age = settings.anchor_evict_by_age;
   anchor_settings.evict_for_new = settings.anchor_evict_for_new;
   anchor_settings.drift_variance_per_m = settings.anchor_drift_variance_per_m;
@@ -422,14 +418,6 @@ void Estimator::ingest_imu(const ImuSample & measured)
     imu_stamp_ = sample.stamp;
   }
 
-  if (settings_.zero_velocity_update) {
-    imu_motion_samples_.push_back(
-      MotionSample{
-        sample.stamp, sample.angular_velocity.norm(), sample.linear_acceleration.norm()});
-    while (imu_motion_samples_.size() > 4000) {
-      imu_motion_samples_.pop_front();
-    }
-  }
 
   if (settings_.use_inertial_prediction) {
     const auto step = inertial_.add_sample(
@@ -1117,20 +1105,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       solved.yaw_sigma = aligned->yaw_sigma;
       const Pose2 placed{aligned->translation.x(), aligned->translation.y(), heading};
       PlanarMotion motion = relative_motion(pose_, placed);
-      // Take back a share of where this camera's map stood last time. The
-      // difference between `placed - pose_` and `placed - last_placed` is
-      // exactly that standing offset, so a gain of 1 turns the correction into
-      // a plain displacement and 0 leaves it as it was. Measured, the two
-      // cameras' maps walk apart over a drive -- the front/rear ratio runs
-      // 1.09 to 1.95 across the fifths of str_v2 while str_v3 holds 0.98 --
-      // and this is the only path by which that walk reaches the pose.
-      if (settings_.anchor_divergence_gain > 0.0 && had_placed &&
-        camera.last_placed.has_value())
-      {
-        const PlanarMotion standing = relative_motion(pose_, *camera.last_placed);
-        motion.x -= settings_.anchor_divergence_gain * standing.x;
-        motion.y -= settings_.anchor_divergence_gain * standing.y;
-      }
       camera.last_placed = placed;
       camera.placed_fresh = true;
       motion.inliers = static_cast<int>(aligned->inliers.count());
@@ -1229,55 +1203,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   return solved;
 }
 
-bool Estimator::is_stationary(double start, double end, double speed) const
-{
-  // Gravity is the only specific force on a vehicle at rest, so the magnitude
-  // sits at g and the rates sit at zero. Anything driving, however gently,
-  // breaks one of those.
-  if (!settings_.zero_velocity_update || speed > settings_.zero_velocity_speed_mps) {
-    return false;
-  }
-  std::vector<MotionSample> window;
-  for (const auto & sample : imu_motion_samples_) {
-    if (sample.stamp >= start && sample.stamp <= end) {
-      window.push_back(sample);
-    }
-  }
-  if (window.size() < 2) {
-    return false;
-  }
-  // A fraction, not every sample. CARLA injects contact impulses, and all()
-  // hands any one of them a veto over the whole window.
-  std::vector<double> forces;
-  std::vector<double> rates;
-  forces.reserve(window.size());
-  rates.reserve(window.size());
-  for (const auto & sample : window) {
-    forces.push_back(sample.force);
-    rates.push_back(std::abs(sample.rate));
-  }
-  std::sort(forces.begin(), forces.end());
-  std::sort(rates.begin(), rates.end());
-  const double gravity = forces[forces.size() / 2];
-  const double median_rate = rates[rates.size() / 2];
-  const double gyro_limit = settings_.zero_velocity_gyro_dps * M_PI / 180.0;
-
-  if (settings_.zero_velocity_dropout_mps2 > 0.0 &&
-    gravity <= settings_.zero_velocity_dropout_mps2 && median_rate <= gyro_limit)
-  {
-    return true;
-  }
-  int quiet = 0;
-  for (const auto & sample : window) {
-    if (sample.rate <= gyro_limit &&
-      std::abs(sample.force - gravity) <= settings_.zero_velocity_accel_mps2)
-    {
-      ++quiet;
-    }
-  }
-  return quiet >= settings_.zero_velocity_quiet_fraction * window.size() &&
-         std::abs(gravity - 9.81) <= 0.5;
-}
 
 void Estimator::process_pair()
 {
@@ -1643,12 +1568,6 @@ void Estimator::process_pair()
   // Decided before the fusion, not after it. Standing still used to be noticed
   // only once the vision displacement had already gone into the filter, and
   // those are the hops it most needed protecting from.
-  const bool standing = settings_.zero_velocity_update && have_disparity &&
-    hop_disparity <= settings_.zero_velocity_disparity_px &&
-    is_stationary(previous_stamp, current_stamp, vision_speed);
-  if (standing) {
-    ++diagnostics_.zupt_holds;
-  }
 
   const Pose2 previous_pose = pose_;
 
@@ -1684,13 +1603,6 @@ void Estimator::process_pair()
       }
       spread = total > 0.0 ? weighted / total : 0.0;
     }
-    if (standing) {
-      // The measurement is that nothing moved, and it is a better measurement
-      // than the solve.
-      world.setZero();
-      extra = std::pow(settings_.zupt_velocity_sigma * dt, 2);
-      spread = 0.0;
-    }
     // The filter's own innovation is the one scale reference that does not
     // come from the ground plane. `predicted` is where inertial propagation
     // says the vehicle went since the last vision update; `measured` is where
@@ -1703,9 +1615,7 @@ void Estimator::process_pair()
     if (!displacement_filter_->update(world, motion->inliers, extra, spread)) {
       ++diagnostics_.filter_rejections;
     }
-    if (standing) {
-      displacement_filter_->update_zero_velocity(settings_.zupt_velocity_sigma);
-    } else if (learn_scale) {
+    if (learn_scale) {
       const auto & record = displacement_filter_->last_update();
       if (record.has_value() && record->accepted) {
         const double reach = record->predicted.norm();
@@ -1754,12 +1664,6 @@ void Estimator::process_pair()
     }
   }
 
-  if (motion.has_value() && standing) {
-    // Hold the position, keep the heading. A parking manoeuvre stops several
-    // times, so every stop is a chance to stop accumulating.
-    motion->x = 0.0;
-    motion->y = 0.0;
-  }
 
   const bool warming_up = !map_ready_ && !aligned_from_map;
   // The cap is on how far the vehicle can plausibly have moved, so it has to
