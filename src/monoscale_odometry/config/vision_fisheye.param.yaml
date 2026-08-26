@@ -76,7 +76,12 @@
 
     odometry_topic: /localization/kinematic_state
     pose_topic: /current_pose
+    # REP-105. This estimator dead reckons, so its pose is odom->base_link and
+    # it drifts; map->odom is the correction and it has none, so that transform
+    # goes out as identity purely to complete the tree. Point a real localiser
+    # at map->odom and set publish_map_to_odom false, and nothing below changes.
     map_frame: map
+    odom_frame: odom
     base_frame: base_link
     # Both cameras tick on the same 20 Hz schedule, an exact multiple of the
     # 0.01 s simulation step, so a pair is at worst one step apart.

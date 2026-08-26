@@ -27,6 +27,10 @@ struct Topics
   std::string pose = "/current_pose";
   std::string ground_points = "/perception/ground_points";
   std::string map_frame = "map";
+  // REP-105 puts dead reckoning here and localisation above it: odom->base_link
+  // is continuous and drifts, map->odom is the correction and may jump. This
+  // estimator is the first of those, so its pose belongs in odom.
+  std::string odom_frame = "odom";
   std::string base_frame = "base_link";
   std::string track_prefix;
   std::vector<std::string> image_topics;
@@ -34,6 +38,7 @@ struct Topics
 
   bool use_camera_info = true;
   bool publish_tf = true;
+  bool publish_map_to_odom = true;
   bool extrinsics_from_tf = true;
   double tf_lookup_timeout_sec = 5.0;
 

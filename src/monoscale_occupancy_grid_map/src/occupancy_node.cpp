@@ -112,6 +112,7 @@ private:
         message.point_step);
       return;
     }
+    cloud_frame_ = message.header.frame_id;
     const size_t count = message.data.size() / kPointStep;
     std::vector<Row> rows(count);
     std::memcpy(rows.data(), message.data.data(), count * kPointStep);
@@ -170,7 +171,9 @@ private:
     const auto & settings = grid_->settings();
     nav_msgs::msg::OccupancyGrid message;
     message.header.stamp = last_stamp_;
-    message.header.frame_id = map_frame_;
+    // Whatever frame the points arrived in. The grid is an accumulation of
+    // them and cannot be in a better frame than its input.
+    message.header.frame_id = cloud_frame_.empty() ? map_frame_ : cloud_frame_;
     message.info.resolution = static_cast<float>(settings.resolution);
     message.info.width = static_cast<uint32_t>(window.width);
     message.info.height = static_cast<uint32_t>(window.height);
@@ -184,6 +187,7 @@ private:
   }
 
   std::string map_frame_;
+  std::string cloud_frame_;
   std::unique_ptr<monoscale::LogOddsGrid> grid_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher_;

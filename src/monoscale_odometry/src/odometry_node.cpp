@@ -417,7 +417,11 @@ private:
       if (update.pose_valid) {
         nav_msgs::msg::Odometry odometry;
         odometry.header.stamp = stamp;
-        odometry.header.frame_id = configuration_.topics.map_frame;
+        // REP-105: an odometry source owns odom->base_link, which is
+        // continuous and allowed to drift. Publishing the pose in `map` said
+        // this estimator had localised, which it has not -- the anchor map
+        // binds the drift, it does not remove it.
+        odometry.header.frame_id = configuration_.topics.odom_frame;
         odometry.child_frame_id = configuration_.topics.base_frame;
         odometry.pose.pose.position.x = update.pose.x;
         odometry.pose.pose.position.y = update.pose.y;
@@ -446,7 +450,7 @@ private:
         if (broadcaster_) {
           geometry_msgs::msg::TransformStamped transform;
           transform.header.stamp = stamp;
-          transform.header.frame_id = configuration_.topics.map_frame;
+          transform.header.frame_id = configuration_.topics.odom_frame;
           transform.child_frame_id = configuration_.topics.base_frame;
           transform.transform.translation.x = update.pose.x;
           transform.transform.translation.y = update.pose.y;
@@ -455,6 +459,20 @@ private:
           // would make the two disagree about the same vehicle.
           transform.transform.rotation = odometry.pose.pose.orientation;
           broadcaster_->sendTransform(transform);
+
+          if (configuration_.topics.publish_map_to_odom) {
+            // Identity. There is nothing in this stack that localises against
+            // anything absolute, so map and odom coincide -- this exists so the
+            // tree is whole and so a localiser can be dropped in above it
+            // without anything below changing. When one arrives it owns this
+            // transform and `publish_map_to_odom` goes false.
+            geometry_msgs::msg::TransformStamped correction;
+            correction.header.stamp = stamp;
+            correction.header.frame_id = configuration_.topics.map_frame;
+            correction.child_frame_id = configuration_.topics.odom_frame;
+            correction.transform.rotation.w = 1.0;
+            broadcaster_->sendTransform(correction);
+          }
         }
       }
 
@@ -470,7 +488,9 @@ private:
   {
     sensor_msgs::msg::PointCloud2 cloud;
     cloud.header.stamp = stamp;
-    cloud.header.frame_id = configuration_.topics.map_frame;
+    // These are dead reckoned like the pose, so they carry the same frame.
+    // Labelling them `map` claimed an absolute position they do not have.
+    cloud.header.frame_id = configuration_.topics.odom_frame;
     cloud.height = 1;
     cloud.width = static_cast<uint32_t>(points.size());
     const char * names[] = {"x", "y", "z", "label", "origin_x", "origin_y"};

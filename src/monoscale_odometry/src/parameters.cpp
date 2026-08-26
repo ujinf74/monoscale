@@ -98,6 +98,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   // mounted or which pose the hop was solved against.
   topics.ground_points = declare_string("ground_points_topic", topics.ground_points);
   topics.map_frame = declare_string("map_frame", topics.map_frame);
+  topics.odom_frame = declare_string("odom_frame", topics.odom_frame);
   topics.base_frame = declare_string("base_frame", topics.base_frame);
   settings.sync_tolerance_sec = declare_double("sync_tolerance_sec", 0.02);
   // How many frames may wait for a partner before the oldest is thrown away.
@@ -106,6 +107,11 @@ Configuration declare_and_read(rclcpp::Node & node)
   // settable and every eviction is counted.
   settings.pair_queue_depth = declare_int("pair_queue_depth", 12);
   topics.publish_tf = declare_bool("publish_tf", true);
+  // Identity, and published only so the tree is whole. There is no absolute
+  // localisation in this stack -- the anchor map binds drift, it does not
+  // remove it -- so map and odom coincide. The moment something can actually
+  // localise, it owns this transform and this node must stop publishing it.
+  topics.publish_map_to_odom = declare_bool("publish_map_to_odom", true);
   // Where a camera is bolted. The transform tree is the one place that already
   // has to be right for anything else to work, so it is asked first and the
   // parameters below are only the answer for a rig that publishes no tree.
