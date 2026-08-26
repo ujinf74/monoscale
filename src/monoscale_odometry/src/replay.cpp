@@ -254,6 +254,7 @@ int main(int argc, char ** argv)
   // Worth 0.3% of mean ATE here, which is inside the noise; it is applied
   // because it is the right number, not because it measured better.
   double truth_offset_m = 1.399;
+  bool truth_tilt = false;
   std::vector<std::string> ros_arguments{"--ros-args"};
 
   for (int i = 1; i < argc; ++i) {
@@ -277,6 +278,8 @@ int main(int argc, char ** argv)
       segment = std::stod(next());
     } else if (argument == "--tolerance") {
       tolerance = std::stod(next());
+    } else if (argument == "--truth-tilt") {
+      truth_tilt = true;
     } else if (argument == "--truth-offset") {
       truth_offset_m = std::stod(next());
     } else if (bag.empty()) {
@@ -368,6 +371,15 @@ int main(int argc, char ** argv)
       const auto pose =
         deserialize<geometry_msgs::msg::PoseWithCovarianceStamped>(serialized);
       const double yaw = yaw_of(pose.pose.pose.orientation);
+      if (truth_tilt) {
+        // A ceiling, not a mode: hand the estimator the attitude it is trying
+        // to estimate and see what the rest of it is worth.
+        const auto & q = pose.pose.pose.orientation;
+        const double sr = 2.0 * (q.w * q.x + q.y * q.z);
+        const double cr = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
+        const double sp = std::clamp(2.0 * (q.w * q.y - q.z * q.x), -1.0, 1.0);
+        estimator.override_tilt(std::atan2(sr, cr), std::asin(sp));
+      }
       // The truth reports the box centre; the stack estimates the rear axle,
       // so it is shifted back along the heading.
       truth.push_back(

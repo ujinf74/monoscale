@@ -624,6 +624,15 @@ public:
   std::vector<Update> take_updates();
 
   const Diagnostics & diagnostics() const {return diagnostics_;}
+
+  // Hand the estimator the attitude instead of letting it estimate one.
+  //
+  // Only the offline harness calls this, and only to measure a ceiling: the
+  // pitch reaches the ground projection through the camera's lever arm, which
+  // is 3.694 m on the front mount against 0.89 m of height, so a tenth of a
+  // degree of pitch error is 0.4% of that camera's scale. Substituting the
+  // truth says how much of the error is that and how much is everything else.
+  void override_tilt(double roll, double pitch);
   const Pose2 & pose() const {return pose_;}
   size_t camera_count() const {return cameras_.size();}
 
@@ -643,6 +652,7 @@ private:
     Camera & camera, std::optional<double> yaw_delta, std::optional<double> yaw_guess);
   void remember_solve_pixels(Camera & camera);
   std::optional<Eigen::Matrix3d> body_tilt() const;
+
   Eigen::Vector2d imu_world_velocity(const Eigen::Vector2d & velocity) const;
   std::optional<double> imu_yaw_at(double stamp) const;
   bool imu_still_arriving(double stamp) const;
@@ -727,6 +737,7 @@ private:
   std::optional<double> imu_yaw_datum_;
 
   std::unique_ptr<AttitudeFilter> attitude_;
+  std::optional<Eigen::Matrix3d> tilt_override_;
   HeadingBiasFilter heading_;
   std::vector<std::pair<double, double>> heading_observations_;
   PlanarInertialPropagator inertial_;

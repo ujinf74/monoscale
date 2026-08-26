@@ -669,8 +669,24 @@ std::optional<Eigen::Vector2d> Estimator::fused_world_velocity() const
 }
 
 
+void Estimator::override_tilt(double roll, double pitch)
+{
+  const double cr = std::cos(roll);
+  const double sr = std::sin(roll);
+  const double cp = std::cos(pitch);
+  const double sp = std::sin(pitch);
+  Eigen::Matrix3d level;
+  level << cp, sp * sr, sp * cr,
+    0.0, cr, -sr,
+    -sp, cp * sr, cp * cr;
+  tilt_override_ = level;
+}
+
 std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
 {
+  if (tilt_override_.has_value()) {
+    return tilt_override_;
+  }
   // The six degree of freedom filter carries roll and pitch as states, so it
   // answers this itself and the separate attitude filter is not asked. That is
   // the whole point of the container: one covariance rather than two estimators
