@@ -691,6 +691,15 @@ int main(int argc, char ** argv)
         double signed_rate;
       };
       std::vector<SplitRow> split_rows;
+      struct CommonRow
+      {
+        double symmetric;    // half the sum of the two cameras' errors
+        double fused;        // what the fusion actually produced
+        double speed;
+        double turn_rate;
+        double hop;
+      };
+      std::vector<CommonRow> common_rows;
       double run = 0.0;
       for (const auto & hop : hops) {
         if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
@@ -738,6 +747,18 @@ int main(int argc, char ** argv)
         if (dt > 1e-4) {
           split_rows.push_back(
             {0.5 * (e0 - e1), length / dt, std::abs(step.yaw) / dt, step.yaw / dt});
+          // And the part that actually survives the fusion.
+          //
+          // The split is the antisymmetric half and averaging the two cameras
+          // removes it by construction, which is why correcting it never moved
+          // the fused hop. What propagates is the symmetric half -- both
+          // cameras wrong the same way -- and until now nothing measured it.
+          const Eigen::Vector2d fused =
+            hop.applied_valid ? hop.applied_hop : hop.fused_hop;
+          const double fused_error =
+            (fused.x() * ux + fused.y() * uy - length) / length;
+          common_rows.push_back(
+            {0.5 * (e0 + e1), fused_error, length / dt, std::abs(step.yaw) / dt, length});
         }
       }
       if (!split_rows.empty()) {
@@ -789,6 +810,34 @@ int main(int argc, char ** argv)
           100.0 * by_speed.first, by_speed.second,
           100.0 * by_rate.first, by_rate.second,
           100.0 * by_signed.first, by_signed.second);
+      }
+      if (!common_rows.empty()) {
+        const auto stat = [](const std::vector<double> & v) {
+            double mean = 0.0;
+            for (double x : v) {
+              mean += x;
+            }
+            mean /= static_cast<double>(v.size());
+            double var = 0.0;
+            for (double x : v) {
+              var += (x - mean) * (x - mean);
+            }
+            return std::pair<double, double>{
+              mean, std::sqrt(var / static_cast<double>(v.size()))};
+          };
+        std::vector<double> sym;
+        std::vector<double> fus;
+        for (const auto & r : common_rows) {
+          sym.push_back(r.symmetric);
+          fus.push_back(r.fused);
+        }
+        const auto s = stat(sym);
+        const auto f = stat(fus);
+        std::printf(
+          "  대칭성분(누적되는 것): 편향 %+.3f%% 잡음 %.3f%% | 융합결과: 편향 %+.3f%%"
+          " 잡음 %.3f%%  n=%zu\n",
+          100.0 * s.first, 100.0 * s.second, 100.0 * f.first, 100.0 * f.second,
+          common_rows.size());
       }
       if (bins.size() >= 3) {
         std::printf("  10 m 구간별 front편향/rear편향 | 맵사용률 front/rear:\n   ");
