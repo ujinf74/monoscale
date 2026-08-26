@@ -555,6 +555,47 @@
     # sharp curves outright (s10 0.2121 -> 0.1401, s20 0.1258 -> 0.0772) and
     # loses the slow straight and both parks. No single tau holds both.
     attitude_tau_sec: 8.0
+
+    # The trim above is proportional only, and a proportional loop against a
+    # biased rate settles at bias*tau instead of at zero. Measured against the
+    # truth attitude that offset is real, it is the estimator's dominant error,
+    # and it had never been looked for because the measurement that found the
+    # tau referenced estimate and truth to their own medians -- which is exactly
+    # the quantity, thrown away as "a calibration question".
+    #
+    # It is not calibration. Three recordings of one drive give pitch offsets of
+    # 0.234, 0.005 and 0.169 degrees, and the offset scales with tau (0.067 /
+    # 0.127 / 0.234 / 0.387 at 2 / 4 / 8 / 16 s) -- so it is a per-run gyro bias
+    # of up to 0.05 deg/s, and bias*tau is what it is.
+    #
+    # Why it dominates: a pitch error is a common-mode scale error on every
+    # range in the frame, with opposite sign on a forward and a rearward camera.
+    # It explains 67% of the variance in the measured front/rear travel split at
+    # -23% per degree, and that split runs 4 to 11 per cent. Meanwhile the
+    # per-point scatter accounts for under 2% of the solve's error: 645 to 920
+    # inliers buy 0.5-1.2 mm where the actual error is 2-250 mm, an effective
+    # sample size of one to three. The error is per frame, not per point.
+    #
+    # So the bias becomes a state, which is the argument the heading filter has
+    # always made -- a bias is not noise and has to be a state or it cannot be
+    # cancelled -- applied one axis up.
+    attitude_bias_tau_sec: 8.0
+    # What admits a sample to the integral, and it is a DIRECTION, not a
+    # magnitude. attitude_gravity_tolerance gates on |f| and that is the wrong
+    # quantity here: a lateral acceleration a moves |f| by only a^2/2g while
+    # tilting the apparent vertical by atan(a/g), so at 0.3 it admits 13.9
+    # degrees of false tilt. A weak proportional pull survives that; an integral
+    # accumulates it. Ungated, the straights improve by up to 43% and the tight
+    # manoeuvres lose 60-85% as the integral winds up chasing the vehicle's own
+    # acceleration. Gated on the innovation, both hold.
+    attitude_bias_gate_rad: 0.010
+    # And a bound, because a MEMS gyro's bias is small. 0.0005 rad/s is 0.029
+    # deg/s, below the largest measured bias (0.05), so it clips -- and clipping
+    # measures better than not: 0.0002 / 0.0003 / 0.0005 / 0.0007 / 0.001 /
+    # 0.002 give ATE 0.1019 / 0.1000 / 0.0993 / 0.0995 / 0.1013 / 0.1033. A
+    # bound that is too generous lets a manoeuvre that slips the gate cost more
+    # than a real bias ever would.
+    attitude_bias_limit_rps: 0.0005
     # Left at 0.3. The gate is on the magnitude of the specific force, and for
     # a lateral acceleration the magnitude only grows as a^2/2g while the
     # apparent vertical tilts by atan(a/g) -- so 0.3 admits 2.43 m/s2, which is

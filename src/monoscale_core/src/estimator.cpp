@@ -287,7 +287,9 @@ Estimator::Estimator(const EstimatorSettings & settings)
   }
   if (settings.attitude_from_imu) {
     attitude_ = std::make_unique<AttitudeFilter>(
-      settings.attitude_tau_sec, settings.attitude_gravity_tolerance);
+      settings.attitude_tau_sec, settings.attitude_gravity_tolerance, 9.80665,
+      settings.attitude_bias_tau_sec, settings.attitude_bias_limit_rps,
+      settings.attitude_bias_gate_rad);
   }
   if (settings.fusion_model == FusionModel::Displacement) {
     PlanarDisplacementFilter::Settings filter;

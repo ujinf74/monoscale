@@ -138,6 +138,12 @@ struct EstimatorSettings
   bool attitude_from_imu = true;
   double attitude_tau_sec = 60.0;
   double attitude_gravity_tolerance = 0.3;
+  // The attitude trim's integral term, and the bound on what it may claim the
+  // gyro's bias to be, in radians per second. See attitude.hpp: without it the
+  // loop settles at bias*tau, and that offset is the estimator's common mode.
+  double attitude_bias_tau_sec = 0.0;
+  double attitude_bias_limit_rps = 0.001;
+  double attitude_bias_gate_rad = 0.0;
 
   // What the heading source is expected to do wrong, as the part's own numbers
   // rather than as tuning. Setting the first to 0 believes the reported heading

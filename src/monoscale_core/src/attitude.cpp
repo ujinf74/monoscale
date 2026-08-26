@@ -2,14 +2,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "monoscale_core/geometry.hpp"
 
 namespace monoscale
 {
 
-AttitudeFilter::AttitudeFilter(double tau, double tolerance, double gravity)
-: tau_(tau), tolerance_(tolerance), gravity_(gravity)
+AttitudeFilter::AttitudeFilter(
+  double tau, double tolerance, double gravity, double bias_tau, double bias_limit,
+  double bias_gate)
+: tau_(tau), tolerance_(tolerance), gravity_(gravity),
+  bias_tau_(bias_tau), bias_limit_(bias_limit), bias_gate_(bias_gate)
 {
 }
 
@@ -41,9 +45,10 @@ void AttitudeFilter::update(
   // vehicle reaches these are the exact Euler rates and the small angle form
   // would do just as well.
   const double tan_pitch = std::tan(pitch_);
-  roll_ += dt * (gyro.x() + gyro.y() * std::sin(roll_) * tan_pitch +
+  roll_ += dt * ((gyro.x() - roll_bias_) + gyro.y() * std::sin(roll_) * tan_pitch +
     gyro.z() * std::cos(roll_) * tan_pitch);
-  pitch_ += dt * (gyro.y() * std::cos(roll_) - gyro.z() * std::sin(roll_));
+  pitch_ += dt * ((gyro.y() - pitch_bias_) * std::cos(roll_) -
+    gyro.z() * std::sin(roll_));
 
   const double magnitude = std::sqrt(ax * ax + ay * ay + az * az);
   if (std::abs(magnitude - gravity_) > tolerance_) {
@@ -51,8 +56,20 @@ void AttitudeFilter::update(
   }
   ++corrections_;
   const double gain = std::min(dt / tau_, 1.0);
-  roll_ += gain * (level_roll - roll_);
-  pitch_ += gain * (level_pitch - pitch_);
+  const double roll_error = level_roll - roll_;
+  const double pitch_error = level_pitch - pitch_;
+  // Where the trim keeps having to pull the same way, the rate is biased.
+  const bool steady = bias_gate_ <= 0.0 ||
+    (std::abs(roll_error) < bias_gate_ && std::abs(pitch_error) < bias_gate_);
+  if (bias_tau_ > 0.0 && tau_ > 0.0 && steady) {
+    const double rate = dt / (tau_ * bias_tau_);
+    const double limit = bias_limit_ > 0.0 ? bias_limit_ :
+      std::numeric_limits<double>::infinity();
+    roll_bias_ = std::clamp(roll_bias_ - rate * roll_error, -limit, limit);
+    pitch_bias_ = std::clamp(pitch_bias_ - rate * pitch_error, -limit, limit);
+  }
+  roll_ += gain * roll_error;
+  pitch_ += gain * pitch_error;
 }
 
 Eigen::Matrix3d AttitudeFilter::body_tilt() const

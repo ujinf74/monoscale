@@ -225,6 +225,10 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.attitude_from_imu = declare_bool("attitude_from_imu", true);
   settings.attitude_tau_sec = declare_double("attitude_tau_sec", 60.0);
   settings.attitude_gravity_tolerance = declare_double("attitude_gravity_tolerance", 0.3);
+  settings.attitude_bias_tau_sec = declare_double("attitude_bias_tau_sec", 0.0);
+  settings.attitude_bias_limit_rps =
+    declare_double("attitude_bias_limit_rps", 0.001);
+  settings.attitude_bias_gate_rad = declare_double("attitude_bias_gate_rad", 0.0);
 
   // What the heading source is expected to do wrong, as the part's own numbers
   // rather than as tuning. Setting the first to 0 believes the reported heading
