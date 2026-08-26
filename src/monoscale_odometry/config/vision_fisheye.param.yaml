@@ -302,7 +302,32 @@
     # better constant was implemented and lost -- see softness_from_residual in
     # estimator.hpp. The residual varies seven times across these drives, so a
     # constant cannot be right for all of them, and yet tracking it is worse.
-    ground_align_softness_m: 0.030
+
+    # 0.030 / 0.045 -> 0.012 / 0.020 on 2026-08-26, found by asking which stage
+    # was correlating the hops rather than which was noisiest. Narrowing the
+    # pair width alone takes str_4.0's final error from 0.081 m to 0.009 and its
+    # walk ratio -- what it accumulated over what independent hops predict --
+    # from 1.89 to 0.24. Across the set both widths narrow monotonically:
+    #
+    #   pair (align .030)   .045    .035    .025    .020    .015    .010
+    #   ATE                .1496   .1357   .1175   .1155   .1164   .1203
+    #   walk                1.68    1.57    1.40    1.36    1.37    1.41
+    #
+    #   align (pair .015)   .030    .020    .012
+    #   ATE                .1164   .1062   .1064
+    #   walk                1.37    1.28    1.04
+    #
+    # The basin over .012-.020 by .015-.025 is flat on ATE (0.1043-0.1099), so
+    # this is chosen on walk, which reads **1.02** here -- the estimator adds
+    # essentially no memory of its own, against 1.68 before. That was the whole
+    # of the remaining gap on the straights.
+    #
+    # The widths stay in the ratio the residual measurement gives (the two frame
+    # path runs about half again the anchor path's), 0.020/0.012 = 1.67 against
+    # a measured 1.5; it is the scale that was wrong, not the balance. The
+    # earlier .030/.045 were set from the same residuals and are still two to
+    # three times wider than what they weigh on most drives.
+    ground_align_softness_m: 0.012
 
     # How many starting points the alignment's mode search tries.
     #
@@ -407,7 +432,7 @@
     # ground_align_softness_m, which carries the table; this path's residual is
     # the larger of the two reported per drive, so it keeps the wider of the
     # pair at half again the anchor path's.
-    ground_pair_softness_m: 0.045
+    ground_pair_softness_m: 0.020
     # Metres of hop given back per radian of turn.
     #
     # It acts on the **common** mode, which is what matters: both cameras share
