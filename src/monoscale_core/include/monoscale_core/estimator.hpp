@@ -29,7 +29,6 @@
 #include "monoscale_core/geometry.hpp"
 #include "monoscale_core/landmark.hpp"
 #include "monoscale_core/inertial.hpp"
-#include "monoscale_core/strapdown.hpp"
 
 namespace monoscale
 {
@@ -183,66 +182,6 @@ struct EstimatorSettings
   double obstacle_height_margin = 0.7;
   int obstacle_slip_patience = 30;
 
-  // What the six degree of freedom filter is told about the two things only it
-  // can carry: how much a levelling against gravity is worth, and how far the
-  // vehicle may climb over one hop. The second is a hop-length number and not a
-  // drive-length one, so a graded road is left alone.
-  double spatial_gravity_noise = 2.0;
-  // What the gyro is worth on roll and pitch, apart from the heading. See
-  // SpatialMsckfFilter::Settings: this is the stiffness the ground projection
-  // needs, and it is not the stiffness the heading needs.
-  double spatial_tilt_gyro_noise = 4.4e-4;
-  // How much acceleration the vehicle may be under and still be levelled, on
-  // the world-frame residual rather than on the reading's magnitude. Its own
-  // parameter and not attitude_gravity_tolerance: the two gate different
-  // quantities and only look alike.
-  double spatial_gravity_tolerance = 0.15;
-  double spatial_height_noise_m = 0.01;
-  // How far the ground projection's scale is allowed to move. Zero holds it at
-  // one; SpatialMsckfFilter::Settings carries what it costs and buys, measured
-  // on three drives and on the same drives with the scale injected wrong.
-  double spatial_scale_variance = 0.0;
-  // The six degree of freedom filter's own priors on the accelerometer bias and
-  // on how level the vehicle starts. Both differ from what the planar filters
-  // carry, and SpatialMsckfFilter::Settings says why.
-  double spatial_bias_variance = 0.01;
-  double spatial_tilt_variance = 7.6e-3;
-  // How often the attitude is levelled against gravity: on every instrument
-  // sample, or once for the whole interval a hop spans.
-  bool spatial_level_every_sample = true;
-  // Screen the instrument the way the planar path's propagator does before
-  // handing it to the six degree of freedom filter: hold the last believable
-  // reading through an impulse, and integrate nothing sideways until vision has
-  // supplied the constant the integral is missing.
-  // Whether the six degree of freedom filter's own roll and pitch are what the
-  // ground projection is given. Off, the separate attitude filter answers, as
-  // it does for every other path, and off is measured.
-  //
-  // Closing that loop was the point of carrying an attitude at all, and it does
-  // not work yet. One degree of tilt moves every range in the frame by two and
-  // a half to five per cent, so an attitude that jitters is a set of ranges
-  // that jitter, and that lands in the hop vision reports before any filter
-  // sees it. Relative error over three drives: 4.4, 3.3 and 4.4 per cent with
-  // the filter's own tilt, against 2.1, 2.3 and 2.3 with the trim's -- and the
-  // planar filters' own 2.0, 2.2 and 2.3.
-  //
-  // The separate filter is not more accurate. It is stiffer: a sixty second
-  // trim against this one's effective two and a half, and what the projection
-  // needs is stiffness while what the filter needs is response. Tuning did not
-  // reconcile them -- the tilt's process noise was taken to zero and the
-  // relative error stayed at 3.3 to 5.4 per cent, because what moves the tilt
-  // is the levelling measurement rather than the propagation. So the projection
-  // is given the trim and the filter keeps its state, until something smooths
-  // the one without slowing the other.
-  bool spatial_tilt_to_projection = false;
-  bool spatial_screen_impulses = true;
-  bool spatial_wait_for_vision = true;
-  // The same three degrees of freedom the planar filter's hop has, and the same
-  // gate. The vehicle staying on the road is not one of them: it is an
-  // assumption rather than a measurement, it gets its own update, and gating
-  // the two together threw away 57% of the vision the assumption was strained
-  // against.
-  double spatial_innovation_gate = 11.3;
 
   // What a mounting pitch error is worth knowing to before the drive starts,
   // and how much of the lean is that error rather than the road. The gain is
@@ -548,7 +487,6 @@ struct EstimatorSettings
 
   bool use_inertial_prediction = true;
   bool inertial_use_acceleration = true;
-  double inertial_velocity_gain = 0.6;
   double inertial_max_acceleration_mps2 = 12.0;
   int inertial_acceleration_median_window = 1;
   Integration inertial_integration = Integration::Rk4;
@@ -567,49 +505,6 @@ struct EstimatorSettings
   double filter_reference_inliers = 300.0;
   double filter_innovation_gate = 9.0;
 
-  // The MSCKF's own numbers. The gate is larger because the measurement has
-  // three degrees of freedom rather than two, and the yaw noise is the floor
-  // under whatever the ground solve reports for its own heading.
-  double msckf_gyro_noise = 0.01;
-  double msckf_gyro_bias_walk = 0.0005;
-  // A floor under what the ground solve claims about its own heading, not a
-  // fallback for when it claims nothing. The fit reports fit over lever over
-  // the root of the inlier count, which on a good frame is 2e-4 rad -- and that
-  // root assumes the residuals are independent, which a mounting or tilt error
-  // is not: it leans the whole frame one way and more points do not average it
-  // out. Measured over three drives, mean ATE in metres: 0.248 with no floor,
-  // 0.165 at 0.01, 0.223 at 0.02. Better on every drive at 0.01, and the cost
-  // is two tenths of a point of relative error.
-  double msckf_vision_yaw_noise = 0.01;
-  double msckf_initial_gyro_bias_variance = 1.0e-4;
-  double msckf_innovation_gate = 11.3;
-  double msckf_reject_beyond_m = 1.5;
-  // How far the instrument's reported heading is allowed to be wrong, in
-  // radians. Nothing else in the filter says where north is -- the anchors
-  // turn with the estimate, so they cannot argue with a heading that drifts --
-  // which makes this the term that pins the gyro bias down.
-  //
-  // It buys accuracy against a good instrument and costs it against a bad one,
-  // and the trade is monotone, so no value wins everywhere. Measured over one
-  // recording replayed with a gyro bias injected into it, ATE in metres:
-  //
-  //   bias deg/s  displacement   0.02    0.05     0.1     off
-  //          0.0        0.111   0.136   0.171   0.178   0.206
-  //          0.1        0.327   0.183   0.205   0.226   0.240
-  //          0.3        0.438   0.338   0.329   0.319   0.309
-  //          1.0        1.129   1.038   1.017   0.815   0.567
-  //
-  // 0.1 is the hedge that never loses badly at either end. Tighten it towards
-  // 0.02 for a rig whose AHRS is trusted, and set it to 0 -- which switches
-  // the measurement off entirely and leaves the heading to the gyro and the
-  // ground solve -- for one whose AHRS is not.
-  double msckf_heading_noise = 0.1;
-  // Or let the drive decide which of those it is: the gain is how hard a
-  // one-sided vision yaw residual counts against the reported heading, and 0
-  // switches the whole mechanism off. Off is the measured answer as well as
-  // the default -- PlanarMsckfFilter::Settings carries the numbers and why.
-  double msckf_heading_adaptive_gain = 0.0;
-  double msckf_heading_adaptive_window = 50.0;
 
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.
@@ -957,8 +852,6 @@ private:
   PlanarInertialPropagator inertial_;
   PlanarVelocityFilter velocity_filter_;
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;
-  std::unique_ptr<PlanarMsckfFilter> msckf_filter_;
-  std::unique_ptr<SpatialMsckfFilter> spatial_filter_;
   std::unique_ptr<LandmarkFilter> landmark_;
   Eigen::Vector2d landmark_hop_ = Eigen::Vector2d::Zero();
   Eigen::Vector3d landmark_previous_ = Eigen::Vector3d::Zero();

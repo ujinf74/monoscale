@@ -405,7 +405,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   declare_double("inertial_gate_absolute_m", 0.08);
   declare_double("inertial_gate_relative", 0.35);
   declare_double("inertial_gate_minimum_m", 0.05);
-  settings.inertial_velocity_gain = declare_double("inertial_velocity_gain", 0.6);
   settings.inertial_max_acceleration_mps2 =
     declare_double("inertial_max_acceleration_mps2", 12.0);
   settings.inertial_acceleration_median_window =
@@ -444,23 +443,15 @@ Configuration declare_and_read(rclcpp::Node & node)
   // can never correct the one state that decides which way all three point.
   // Here the gyro's rate drives the heading, its bias is a state, and the
   // ground solve's own heading is the measurement that observes both.
-  settings.msckf_gyro_noise = declare_double("msckf_gyro_noise", 0.01);
-  settings.msckf_gyro_bias_walk = declare_double("msckf_gyro_bias_walk", 0.0005);
-  settings.msckf_vision_yaw_noise = declare_double("msckf_vision_yaw_noise", 0.01);
-  settings.msckf_initial_gyro_bias_variance =
-    declare_double("msckf_initial_gyro_bias_variance", 1.0e-4);
   // Three degrees of freedom, so the chi-square gate moves with them: 11.3 is
   // the 99th percentile for three where 9.0 was for two.
-  settings.msckf_innovation_gate = declare_double("msckf_innovation_gate", 11.3);
   // Beyond this the innovation is not an outlier to be down-weighted, it is a
   // different vehicle, and it is dropped rather than inflated.
-  settings.msckf_reject_beyond_m = declare_double("msckf_reject_beyond_m", 1.5);
   // How far the instrument's reported heading is allowed to be wrong. Tight and
   // this is the older behaviour with a filter wrapped round it; loose and the
   // gyro and the ground solve carry the heading between fixes. 0 switches the
   // measurement off, which leaves the gyro bias with nothing to observe it.
   // EstimatorSettings carries the measured trade behind this default.
-  settings.msckf_heading_noise = declare_double("msckf_heading_noise", 0.1);
   // Read the mounting-pitch lean from beyond this range only. Not the solve's
   // ground band: the near ground still votes for the pose, it just cannot carry
   // a regression it is the noisiest part of.
@@ -473,30 +464,10 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.mounting_pitch_walk = declare_double("mounting_pitch_walk", 1.0e-4);
   settings.mounting_pitch_apply = declare_bool("mounting_pitch_apply", false);
   // The six degree of freedom filter's own two numbers, and its gate.
-  settings.spatial_gravity_noise = declare_double("spatial_gravity_noise", 2.0);
-  settings.spatial_tilt_gyro_noise =
-    declare_double("spatial_tilt_gyro_noise", 4.4e-4);
-  settings.spatial_gravity_tolerance =
-    declare_double("spatial_gravity_tolerance", 0.15);
-  settings.spatial_height_noise_m = declare_double("spatial_height_noise_m", 0.01);
-  settings.spatial_scale_variance = declare_double("spatial_scale_variance", 0.0);
-  settings.spatial_bias_variance = declare_double("spatial_bias_variance", 0.01);
-  settings.spatial_tilt_variance = declare_double("spatial_tilt_variance", 7.6e-3);
-  settings.spatial_level_every_sample =
-    declare_bool("spatial_level_every_sample", true);
-  settings.spatial_tilt_to_projection =
-    declare_bool("spatial_tilt_to_projection", false);
-  settings.spatial_screen_impulses = declare_bool("spatial_screen_impulses", true);
-  settings.spatial_wait_for_vision = declare_bool("spatial_wait_for_vision", true);
-  settings.spatial_innovation_gate = declare_double("spatial_innovation_gate", 11.3);
   // Rather than choosing that trade once, watch the ground disagree with the
   // reported heading and loosen it by however one-sided the disagreement is.
   // Off by default and off is what the measurement says: it only slides
   // between the fixed settings, and worse than choosing one of them does.
-  settings.msckf_heading_adaptive_gain =
-    declare_double("msckf_heading_adaptive_gain", 0.0);
-  settings.msckf_heading_adaptive_window =
-    declare_double("msckf_heading_adaptive_window", 50.0);
 
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.

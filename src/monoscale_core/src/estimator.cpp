@@ -300,43 +300,6 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.innovation_gate = settings.filter_innovation_gate;
     displacement_filter_ = std::make_unique<PlanarDisplacementFilter>(filter);
   }
-  if (settings.fusion_model == FusionModel::Msckf) {
-    PlanarMsckfFilter::Settings filter;
-    filter.acceleration_noise = settings.filter_acceleration_noise;
-    filter.bias_walk = settings.filter_bias_walk;
-    filter.vision_noise_m = settings.filter_vision_noise_m;
-    filter.vision_reference_inliers = settings.filter_reference_inliers;
-    filter.gyro_noise = settings.msckf_gyro_noise;
-    filter.gyro_bias_walk = settings.msckf_gyro_bias_walk;
-    filter.vision_yaw_noise = settings.msckf_vision_yaw_noise;
-    filter.initial_gyro_bias_variance = settings.msckf_initial_gyro_bias_variance;
-    filter.innovation_gate = settings.msckf_innovation_gate;
-    filter.reject_beyond_m = settings.msckf_reject_beyond_m;
-    filter.heading_adaptive_gain = settings.msckf_heading_adaptive_gain;
-    filter.heading_adaptive_window = settings.msckf_heading_adaptive_window;
-    msckf_filter_ = std::make_unique<PlanarMsckfFilter>(filter);
-  }
-  if (settings.fusion_model == FusionModel::Msckf6) {
-    SpatialMsckfFilter::Settings filter;
-    filter.acceleration_noise = settings.filter_acceleration_noise;
-    filter.bias_walk = settings.filter_bias_walk;
-    filter.vision_noise_m = settings.filter_vision_noise_m;
-    filter.vision_reference_inliers = settings.filter_reference_inliers;
-    filter.gyro_noise = settings.msckf_gyro_noise;
-    filter.gyro_bias_walk = settings.msckf_gyro_bias_walk;
-    filter.vision_yaw_noise = settings.msckf_vision_yaw_noise;
-    filter.initial_gyro_bias_variance = settings.msckf_initial_gyro_bias_variance;
-    filter.reject_beyond_m = settings.msckf_reject_beyond_m;
-    filter.gravity_tolerance = settings.spatial_gravity_tolerance;
-    filter.gravity_noise = settings.spatial_gravity_noise;
-    filter.tilt_gyro_noise = settings.spatial_tilt_gyro_noise;
-    filter.height_noise_m = settings.spatial_height_noise_m;
-    filter.innovation_gate = settings.spatial_innovation_gate;
-    filter.initial_scale_variance = settings.spatial_scale_variance;
-    filter.initial_bias_variance = settings.spatial_bias_variance;
-    filter.initial_tilt_variance = settings.spatial_tilt_variance;
-    spatial_filter_ = std::make_unique<SpatialMsckfFilter>(filter);
-  }
   map_ready_ = !settings.require_map_before_translating;
 }
 
@@ -495,7 +458,7 @@ void Estimator::ingest_imu(const ImuSample & measured)
       acceleration.setZero();
     }
     velocity_filter_.predict(acceleration, step.dt);
-    if (displacement_filter_ || msckf_filter_ || spatial_filter_) {
+    if (displacement_filter_) {
       // The same acceleration seen from the body, for the filter that carries
       // its own heading and must not be handed a vector already rotated by the
       // instrument's idea of which way the vehicle points.
@@ -726,17 +689,6 @@ std::optional<Eigen::Vector2d> Estimator::fused_world_velocity() const
   // The two that carry their own heading answer in the instrument's frame, and
   // are turned into the estimator's the same way their velocity corrections
   // are -- the estimator's frame starts at zero yaw, the instrument's does not.
-  if (spatial_filter_) {
-    return spatial_filter_->settled()
-           ? std::optional<Eigen::Vector2d>(
-      imu_world_velocity(spatial_filter_->velocity().head<2>()))
-           : std::nullopt;
-  }
-  if (msckf_filter_) {
-    return msckf_filter_->settled()
-           ? std::optional<Eigen::Vector2d>(imu_world_velocity(msckf_filter_->velocity()))
-           : std::nullopt;
-  }
   if (displacement_filter_) {
     return displacement_filter_->settled()
            ? std::optional<Eigen::Vector2d>(displacement_filter_->velocity())
@@ -886,9 +838,6 @@ std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
   // answers this itself and the separate attitude filter is not asked. That is
   // the whole point of the container: one covariance rather than two estimators
   // that cannot tell each other how sure they are.
-  if (spatial_filter_ && settings_.spatial_tilt_to_projection) {
-    return spatial_filter_->body_tilt();
-  }
   if (!attitude_ || !attitude_->started()) {
     return std::nullopt;
   }
@@ -1454,7 +1403,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         body, world, weights, handed, gate,
         settings_.ground_min_inliers,
         settings_.align_solves_yaw &&
-        (heading_.enabled() || msckf_filter_ != nullptr || spatial_filter_ != nullptr),
+        heading_.enabled(),
         lens, settings_.radial_min_range_m,
         softness_for(camera, settings_.ground_align_softness_m),
         settings_.align_seed_from_last_hop && camera.last_translation.has_value()
@@ -1493,8 +1442,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       // With the MSCKF the heading the ground settled on is what the filter is
       // being told; without it the heading handed in stands, which is what
       // every measurement before this assumed.
-      const double heading =
-        (msckf_filter_ || spatial_filter_) ? aligned->yaw : handed;
+      const double heading = handed;
       solved.yaw_sigma = aligned->yaw_sigma;
       const Pose2 placed{aligned->translation.x(), aligned->translation.y(), heading};
       PlanarMotion motion = relative_motion(pose_, placed);
@@ -1724,45 +1672,6 @@ void Estimator::process_pair()
   // instrument's: it has already carried the gyro across this interval with
   // the bias it has learned taken out.
   std::optional<double> yaw_guess;
-  if (msckf_filter_ && dt > 1e-4) {
-    msckf_filter_->open_hop();
-    replay_inertial(
-      previous_stamp, current_stamp,
-      [this](const AccelerationSample & sample, double step) {
-        msckf_filter_->predict(sample.body_acceleration, sample.rate, step);
-      });
-    yaw_guess = msckf_filter_->yaw();
-  }
-  if (spatial_filter_ && dt > 1e-4) {
-    spatial_filter_->open_hop();
-    std::optional<Eigen::Vector3d> levelling;
-    replay_inertial(
-      previous_stamp, current_stamp,
-      [this, &levelling](const AccelerationSample & sample, double step) {
-        Eigen::Vector3d force =
-          settings_.spatial_screen_impulses ? sample.held_force : sample.specific_force;
-        // Nothing sideways until vision has supplied the integral's constant.
-        // The planar propagator withholds the spawn and drop transient for the
-        // same reason, and a filter that integrates it starts the drive with a
-        // velocity nobody asked for.
-        if (settings_.spatial_wait_for_vision && !spatial_filter_->settled()) {
-          force.head<2>().setZero();
-        }
-        spatial_filter_->predict(force, sample.angular_velocity, step);
-        // The gate inside decides whether the reading is gravity at all, and a
-        // vehicle doing anything interesting fails it exactly when believing
-        // the accelerometer would be wrong.
-        if (settings_.spatial_level_every_sample) {
-          spatial_filter_->update_gravity(sample.specific_force);
-        } else {
-          levelling = sample.specific_force;
-        }
-      });
-    if (levelling.has_value()) {
-      spatial_filter_->update_gravity(*levelling);
-    }
-    yaw_guess = spatial_filter_->yaw();
-  }
 
   // What inertial propagation expects this hop to be, in the world frame. It
   // is not accurate enough to steer the solve -- feeding it in as a starting
@@ -2293,161 +2202,7 @@ void Estimator::process_pair()
 
   const Pose2 previous_pose = pose_;
 
-  if (msckf_filter_ && motion.has_value() && dt > 1e-4) {
-    // The measurement is the hop as vision saw it, in the frame the anchor was
-    // cloned in: how far, and how much the heading turned. Both halves are the
-    // ground solve's own answer -- the turn is not the instrument's, which is
-    // the point of carrying the heading as a state.
-    Eigen::Vector2d hop(motion->x, motion->y);
-    double turn = motion->yaw;
-    double extra = motions.size() >= 2
-      ? std::pow(settings_.camera_disagreement_weight * disagreement, 2)
-      : settings_.single_camera_variance * dt * dt;
-    double spread = 0.0;
-    {
-      double weighted = 0.0;
-      double total = 0.0;
-      for (const auto & input : precision_inputs) {
-        weighted += input.spread * input.count;
-        total += input.count;
-      }
-      spread = total > 0.0 ? weighted / total : 0.0;
-    }
-    // Both cameras see the same heading, so their opinions of it combine the
-    // way two measurements of one quantity do.
-    double precision = 0.0;
-    for (const auto & entry : solved) {
-      if (entry.has_value() && entry->motion.has_value() &&
-        std::isfinite(entry->yaw_sigma) && entry->yaw_sigma > 0.0)
-      {
-        precision += 1.0 / (entry->yaw_sigma * entry->yaw_sigma);
-      }
-    }
-    const double yaw_sigma = precision > 0.0 ? std::sqrt(1.0 / precision) : 0.0;
-
-    if (standing) {
-      hop.setZero();
-      turn = 0.0;
-      extra = std::pow(settings_.zupt_velocity_sigma * dt, 2);
-      spread = 0.0;
-    }
-    if (!msckf_filter_->update(hop, turn, motion->inliers, extra, spread, yaw_sigma)) {
-      ++diagnostics_.filter_rejections;
-    }
-    if (standing) {
-      msckf_filter_->update_zero_velocity(settings_.zupt_velocity_sigma);
-    }
-    // And what the instrument says the heading is, weighed rather than
-    // believed. This is the reference that makes the gyro bias observable;
-    // without it a systematic error in the ground solve's heading is
-    // indistinguishable from one.
-    if (settings_.msckf_heading_noise > 0.0 && imu_yaw_datum_.has_value()) {
-      const auto reported = imu_yaw_at(current_stamp);
-      if (reported.has_value()) {
-        msckf_filter_->update_heading(
-          wrap_pi(*reported - *imu_yaw_datum_), settings_.msckf_heading_noise);
-      }
-    }
-    inertial_.correct_velocity(imu_world_velocity(msckf_filter_->velocity()));
-    diagnostics_.gyro_bias = msckf_filter_->gyro_bias();
-    diagnostics_.heading_drift = msckf_filter_->heading_drift();
-    diagnostics_.filter_dropped = msckf_filter_->dropped();
-    if (msckf_filter_->last_update().has_value()) {
-      diagnostics_.last_nis = msckf_filter_->last_update()->nis;
-    }
-    const Eigen::Vector2d fused = msckf_filter_->body_translation();
-    if (fused.norm() <= settings_.max_translation_per_frame_m) {
-      motion->x = fused.x();
-      motion->y = fused.y();
-      motion->yaw = msckf_filter_->hop_yaw();
-      motion->scale = 1.0;
-    }
-  } else if (spatial_filter_ && motion.has_value() && dt > 1e-4) {
-    // The same measurement the planar MSCKF is given. What differs is what
-    // receives it: a hop into a filter that also knows which way the vehicle is
-    // leaning, and can therefore be told that it did not climb.
-    Eigen::Vector2d hop(motion->x, motion->y);
-    double turn = motion->yaw;
-    double extra = motions.size() >= 2
-      ? std::pow(settings_.camera_disagreement_weight * disagreement, 2)
-      : settings_.single_camera_variance * dt * dt;
-    double spread = 0.0;
-    {
-      double weighted = 0.0;
-      double total = 0.0;
-      for (const auto & input : precision_inputs) {
-        weighted += input.spread * input.count;
-        total += input.count;
-      }
-      spread = total > 0.0 ? weighted / total : 0.0;
-    }
-    double precision = 0.0;
-    for (const auto & entry : solved) {
-      if (entry.has_value() && entry->motion.has_value() &&
-        std::isfinite(entry->yaw_sigma) && entry->yaw_sigma > 0.0)
-      {
-        precision += 1.0 / (entry->yaw_sigma * entry->yaw_sigma);
-      }
-    }
-    const double yaw_sigma = precision > 0.0 ? std::sqrt(1.0 / precision) : 0.0;
-
-    if (standing) {
-      hop.setZero();
-      turn = 0.0;
-      extra = std::pow(settings_.zupt_velocity_sigma * dt, 2);
-      spread = 0.0;
-    }
-    if (!spatial_filter_->update(hop, turn, motion->inliers, extra, spread, yaw_sigma)) {
-      ++diagnostics_.filter_rejections;
-    }
-    {
-      // Straight after the hop and before anything else touches the state:
-      // whether the filter took the measurement it was given.
-      const Eigen::Vector2d taken =
-        spatial_filter_->range_scale() * spatial_filter_->body_translation();
-      hop_taken_squared_ += (taken - hop).squaredNorm();
-    }
-    // Separately, and ungated: the vehicle did not climb over this hop.
-    spatial_filter_->update_height();
-    if (standing) {
-      spatial_filter_->update_zero_velocity(settings_.zupt_velocity_sigma);
-    }
-    if (settings_.msckf_heading_noise > 0.0 && imu_yaw_datum_.has_value()) {
-      const auto reported = imu_yaw_at(current_stamp);
-      if (reported.has_value()) {
-        spatial_filter_->update_heading(
-          wrap_pi(*reported - *imu_yaw_datum_), settings_.msckf_heading_noise);
-      }
-    }
-    inertial_.correct_velocity(imu_world_velocity(spatial_filter_->velocity().head<2>()));
-    diagnostics_.gyro_bias = spatial_filter_->gyro_bias().z();
-    diagnostics_.filter_dropped = spatial_filter_->dropped();
-    diagnostics_.roll = spatial_filter_->roll();
-    diagnostics_.pitch = spatial_filter_->pitch();
-    diagnostics_.height = spatial_filter_->position().z();
-    diagnostics_.levelled = spatial_filter_->levelled();
-    diagnostics_.range_scale = spatial_filter_->range_scale();
-    {
-      const Eigen::Vector2d after =
-        spatial_filter_->range_scale() * spatial_filter_->body_translation();
-      hop_residual_squared_ += (after - hop).squaredNorm();
-      ++hop_residual_count_;
-      diagnostics_.hop_residual =
-        std::sqrt(hop_residual_squared_ / static_cast<double>(hop_residual_count_));
-      diagnostics_.hop_taken =
-        std::sqrt(hop_taken_squared_ / static_cast<double>(hop_residual_count_));
-    }
-    if (spatial_filter_->last_update().has_value()) {
-      diagnostics_.last_nis = spatial_filter_->last_update()->nis;
-    }
-    const Eigen::Vector2d fused = spatial_filter_->body_translation();
-    if (fused.norm() <= settings_.max_translation_per_frame_m) {
-      motion->x = fused.x();
-      motion->y = fused.y();
-      motion->yaw = spatial_filter_->hop_yaw();
-      motion->scale = 1.0;
-    }
-  } else if (displacement_filter_ && motion.has_value() && dt > 1e-4) {
+  if (displacement_filter_ && motion.has_value() && dt > 1e-4) {
     // Propagate over exactly the interval this measurement spans, boundaries
     // included. Each buffered sample carries the step since the one before it,
     // so taking whole samples covers a window shifted early by up to one IMU
@@ -2686,34 +2441,6 @@ void Estimator::process_pair()
     }
   }
 
-  if (msckf_filter_) {
-    // Put the filter where the estimator ended up. On an accepted solve the
-    // two already agree -- the pose came out of the filter. On a rejected one
-    // the estimator coasted or held, and during the warm-up it is pinned at
-    // the origin on purpose; without this the filter would carry on
-    // integrating away from it and hand back the difference as travel the
-    // moment a solve is finally accepted.
-    //
-    // The heading is a different matter. On a rejected solve the pose carries
-    // the instrument's heading, so handing it back makes the filter inherit
-    // the AHRS it exists to improve on -- and the gyro bias it has learned is
-    // what makes that improvement. The position is pinned; the heading is left
-    // where the filter's own propagation put it.
-    const Eigen::Vector2d position(pose_.x, pose_.y);
-    if (rejected) {
-      msckf_filter_->set_position(position);
-    } else {
-      msckf_filter_->set_pose(position, pose_.yaw);
-    }
-  }
-  if (spatial_filter_) {
-    const Eigen::Vector2d position(pose_.x, pose_.y);
-    if (rejected) {
-      spatial_filter_->set_position(position);
-    } else {
-      spatial_filter_->set_pose(position, pose_.yaw);
-    }
-  }
 
   // After the pose is settled, so each bearing is filed under where the camera
   // actually was when it saw it.
