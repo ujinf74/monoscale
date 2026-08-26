@@ -96,20 +96,6 @@ struct Estimator::Camera
   }
 
   CameraSettings settings;
-  // A track that is not on the road, kept until its own bearings have spread
-  // far enough to intersect. The rays are world-frame, so the camera centre
-  // travels with them and the pose that recorded each one is already folded in.
-  struct Offground
-  {
-    std::vector<Eigen::Vector3d> centres;
-    std::vector<Eigen::Vector3d> bearings;
-    Eigen::Vector3d world = Eigen::Vector3d::Zero();
-    bool solved = false;
-    int64_t seen = 0;
-    int64_t fixed = 0;
-  };
-  std::unordered_map<int64_t, Offground> offground;
-  int64_t offground_frame = 0;
 
   // What the ground residual has actually been running at, for the paths that
   // weight by it. Zero until the first solve reports one, so the configured
@@ -265,7 +251,6 @@ Estimator::Estimator(const EstimatorSettings & settings)
   camera_spread_.assign(settings.cameras.size(), 0.0);
   camera_usable_.assign(settings.cameras.size(), 0.0);
   camera_known_.assign(settings.cameras.size(), 0.0);
-  camera_offground_.assign(settings.cameras.size(), 0.0);
   camera_bearing_.assign(settings.cameras.size(), 0.0);
   camera_projected_.assign(settings.cameras.size(), 0.0);
   camera_bearings_.assign(settings.cameras.size(), 0);
@@ -282,9 +267,6 @@ Estimator::Estimator(const EstimatorSettings & settings)
     cameras_.back()->model.level_frame_origin = settings.level_frame_origin;
   }
 
-  if (settings.landmark_filter) {
-    landmark_ = std::make_unique<LandmarkFilter>(settings.landmark);
-  }
   if (settings.attitude_from_imu) {
     attitude_ = std::make_unique<AttitudeFilter>(
       settings.attitude_tau_sec, settings.attitude_gravity_tolerance, 9.80665,
@@ -699,138 +681,6 @@ std::optional<Eigen::Vector2d> Estimator::fused_world_velocity() const
          : std::nullopt;
 }
 
-// Buffer this frame's off-ground bearings and triangulate whatever has spread
-// far enough. Called after the pose is settled, so every observation carries
-// the pose it was actually taken from.
-void Estimator::record_offground(Camera & camera)
-{
-  if (!settings_.offground_anchors || !camera.latest.has_value()) {
-    return;
-  }
-  const Eigen::Index count = camera.track_ids.size();
-  if (count == 0 || camera.track_pixels.rows() != count) {
-    return;
-  }
-  ++camera.offground_frame;
-
-  const auto tilt = body_tilt();
-  Eigen::Matrix3d level = Eigen::Matrix3d::Identity();
-  if (tilt.has_value()) {
-    level = *tilt;
-  }
-  const Eigen::Vector3d mount = level * camera.model.translation_base_from_camera;
-  const double c = std::cos(pose_.yaw);
-  const double s = std::sin(pose_.yaw);
-  Eigen::Matrix3d turn = Eigen::Matrix3d::Identity();
-  turn(0, 0) = c; turn(0, 1) = -s; turn(1, 0) = s; turn(1, 1) = c;
-  const Eigen::Vector3d centre =
-    Eigen::Vector3d(pose_.x, pose_.y, 0.0) + turn * mount;
-
-  const auto rays = pixels_to_bearings(camera.track_pixels, camera.model);
-  const double parallax_limit =
-    std::cos(settings_.offground_min_parallax_deg * M_PI / 180.0);
-  const size_t cap = static_cast<size_t>(std::max(settings_.offground_max_observations, 3));
-
-  for (Eigen::Index i = 0; i < count; ++i) {
-    const int64_t identity = camera.track_ids(i);
-    const Eigen::Vector3d bearing = turn * (level * rays.row(i).transpose());
-    if (!bearing.allFinite()) {
-      continue;
-    }
-    auto & track = camera.offground[identity];
-    track.seen = camera.offground_frame;
-    if (track.solved && settings_.offground_refresh_frames > 0 &&
-      camera.offground_frame - track.fixed < settings_.offground_refresh_frames)
-    {
-      continue;
-    }
-    // A ground anchor works because every sighting moves it, so it follows the
-    // pose that is reading it. One triangulated once and frozen does not: it
-    // keeps the drift between the pose that fixed it and the pose asking. So
-    // this is a rolling window -- the oldest observation leaves, the newest
-    // arrives, and the point is solved again from what is currently in it.
-    //
-    // Rebuilding it every N frames instead was measured and is erratic (6 / 8 /
-    // 12 / 15 frames score .1853 / .2441 / .1805 / .2234): a discrete rebuild
-    // makes the estimate jump, and the jump is what the alignment sees.
-    if (track.centres.size() >= cap) {
-      track.centres.erase(
-        track.centres.begin() + (settings_.offground_rolling ? 0 : 1));
-      track.bearings.erase(
-        track.bearings.begin() + (settings_.offground_rolling ? 0 : 1));
-    }
-    track.centres.push_back(centre);
-    track.bearings.push_back(bearing);
-    if (static_cast<int>(track.centres.size()) < settings_.offground_min_views) {
-      continue;
-    }
-    double widest = 1.0;
-    for (size_t a = 0; a < track.bearings.size(); ++a) {
-      for (size_t b = a + 1; b < track.bearings.size(); ++b) {
-        widest = std::min(widest, track.bearings[a].dot(track.bearings[b]));
-      }
-    }
-    if (widest > parallax_limit) {
-      continue;
-    }
-    // Midpoint of the rays: the point closest to all of them at once.
-    Eigen::Matrix3d normal = Eigen::Matrix3d::Zero();
-    Eigen::Vector3d moment = Eigen::Vector3d::Zero();
-    for (size_t n = 0; n < track.centres.size(); ++n) {
-      const Eigen::Matrix3d block =
-        Eigen::Matrix3d::Identity() - track.bearings[n] * track.bearings[n].transpose();
-      normal += block;
-      moment += block * track.centres[n];
-    }
-    Eigen::Matrix3d inverse;
-    double determinant = 0.0;
-    bool invertible = false;
-    normal.computeInverseAndDetWithCheck(inverse, determinant, invertible);
-    if (!invertible || determinant < 1e-6) {
-      continue;
-    }
-    const Eigen::Vector3d point = inverse * moment;
-    if (!point.allFinite()) {
-      continue;
-    }
-    double residual = 0.0;
-    for (size_t n = 0; n < track.centres.size(); ++n) {
-      const Eigen::Vector3d off = point - track.centres[n];
-      residual += (off - off.dot(track.bearings[n]) * track.bearings[n]).norm();
-    }
-    residual /= static_cast<double>(track.centres.size());
-    const double range = (point - centre).norm();
-    if (residual > settings_.offground_max_residual_m ||
-      point.z() < settings_.offground_min_height_m ||
-      range > settings_.offground_max_range_m || (point - centre).dot(bearing) <= 0.0)
-    {
-      continue;
-    }
-    track.world = point;
-    if (!track.solved) {
-      ++diagnostics_.offground_anchors;
-    }
-    track.solved = true;
-    track.fixed = camera.offground_frame;
-    if (!settings_.offground_rolling) {
-      track.centres.clear();
-      track.bearings.clear();
-    }
-  }
-
-  // Anything not seen this frame for a while is gone; the tracker will not
-  // bring that identity back.
-  if (camera.offground_frame % 60 == 0) {
-    for (auto it = camera.offground.begin(); it != camera.offground.end(); ) {
-      it = camera.offground_frame - it->second.seen > 250
-        ? camera.offground.erase(it) : std::next(it);
-    }
-  }
-  diagnostics_.offground_live = 0;
-  for (const auto & entry : camera.offground) {
-    diagnostics_.offground_live += entry.second.solved ? 1 : 0;
-  }
-}
 
 std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
 {
@@ -1300,85 +1150,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       }
     }
 
-    // And whatever is not on the road. A triangulated point has no plane to
-    // read a range off, so its body position comes from the bearing seen now
-    // and the range predicted from where the pose was last put. The range
-    // error that carries lies *along* the ray, which is the direction the
-    // alignment learns nothing from; what it uses is where the ray points, and
-    // that is measured.
-    if (settings_.offground_anchors && !camera.offground.empty()) {
-      const auto tilt = body_tilt();
-      Eigen::Matrix3d level = Eigen::Matrix3d::Identity();
-      if (tilt.has_value()) {
-        level = *tilt;
-      }
-      const Eigen::Vector3d mount = level * camera.model.translation_base_from_camera;
-      // Carried onto where the vehicle is expected to be, not where it was
-      // last put. The range is predicted from this, and a hop's worth of lag
-      // in it displaces every point along its own ray -- 0.5 m of hop against
-      // a 5 m range is a tenth of the way there.
-      const double yaw_now = wrap_pi(pose_.yaw + *yaw_delta);
-      Eigen::Vector2d where(pose_.x, pose_.y);
-      if (expected_hop_.has_value()) {
-        where += *expected_hop_;
-      }
-      const double cy = std::cos(yaw_now);
-      const double sy = std::sin(yaw_now);
-      const Eigen::Vector3d centre(
-        where.x() + cy * mount.x() - sy * mount.y(),
-        where.y() + sy * mount.x() + cy * mount.y(), mount.z());
-      const auto rays = pixels_to_bearings(current_pixels, camera.model);
-      std::vector<Eigen::Index> extra;
-      std::vector<Eigen::Vector2d> extra_body;
-      std::vector<Eigen::Vector2d> extra_world;
-      std::vector<double> extra_range;
-      extra.reserve(static_cast<size_t>(count));
-      for (Eigen::Index i = 0; i < count; ++i) {
-        const auto found = camera.offground.find(track_ids(i));
-        if (found == camera.offground.end() || !found->second.solved) {
-          continue;
-        }
-        const Eigen::Vector3d & point = found->second.world;
-        const double range = (point - centre).norm();
-        if (!(range > 0.5) || range > settings_.offground_max_range_m) {
-          continue;
-        }
-        const Eigen::Vector3d bearing = level * rays.row(i).transpose();
-        const Eigen::Vector3d placed = mount + range * bearing;
-        if (!placed.allFinite()) {
-          continue;
-        }
-        extra.push_back(i);
-        extra_body.emplace_back(placed.x(), placed.y());
-        extra_world.emplace_back(point.x(), point.y());
-        extra_range.push_back(range);
-      }
-      const Eigen::Index added = static_cast<Eigen::Index>(extra.size());
-      if (added > 0) {
-        camera_offground_[camera.source] += static_cast<double>(added);
-        body.conservativeResize(chosen + added, 2);
-        world.conservativeResize(chosen + added, 2);
-        // The ground points keep the configured gate; these are judged on the
-        // same angle instead, which at their range is a wider distance.
-        scale.setOnes(chosen + added);
-        const bool carry = weights.size() == chosen;
-        if (carry) {
-          weights.conservativeResize(chosen + added);
-        }
-        for (Eigen::Index i = 0; i < added; ++i) {
-          body(chosen + i, 0) = extra_body[static_cast<size_t>(i)].x();
-          body(chosen + i, 1) = extra_body[static_cast<size_t>(i)].y();
-          world(chosen + i, 0) = extra_world[static_cast<size_t>(i)].x();
-          world(chosen + i, 1) = extra_world[static_cast<size_t>(i)].y();
-          scale(chosen + i) = std::max(
-            extra_range[static_cast<size_t>(i)] / settings_.offground_residual_range_m,
-            1.0);
-          if (carry) {
-            weights(chosen + i) = settings_.offground_weight;
-          }
-        }
-      }
-    }
 
     // Where the solve is told to start looking. With the MSCKF that is the
     // filter's own propagated heading rather than the instrument's, and the
@@ -1843,88 +1614,6 @@ void Estimator::process_pair()
   }
   auto motion = fuse_planar_motions(motions, fusion_weights);
 
-  // Or hand the hop to the one filter that holds everything at once.
-  //
-  // Both cameras' sightings go into a single update against a single state, so
-  // there is nothing to fuse afterwards and no choice to make between a map
-  // and a fallback. A feature whose ray meets the road arrives with a tight
-  // range prior; one that does not arrives with none and waits for its own
-  // parallax. That is the entire difference between them here.
-  if (landmark_ && yaw_delta.has_value() && dt > 1e-4) {
-    ++landmark_frame_;
-    // Predicted with whatever the vision solve already found, falling back to
-    // carrying the last step forward. A filter is entitled to any prediction;
-    // starting from zero is a deadlock, because nothing can move the pose until
-    // a sighting is accepted and no sighting is accepted while the pose is a
-    // step behind.
-    const Eigen::Vector2d guess = motion.has_value()
-      ? Eigen::Vector2d(motion->x, motion->y) : landmark_hop_;
-    landmark_->predict(guess, *yaw_delta);
-    const auto tilt = body_tilt();
-    Eigen::Matrix3d level = Eigen::Matrix3d::Identity();
-    if (tilt.has_value()) {
-      level = *tilt;
-    }
-    std::vector<LandmarkFilter::Sighting> seen;
-    seen.reserve(1024);
-    for (size_t c = 0; c < solved.size(); ++c) {
-      if (!solved[c].has_value()) {
-        continue;
-      }
-      const auto & entry = *solved[c];
-      const Eigen::Index count = entry.track_ids.size();
-      if (count == 0 || entry.current_pixels.rows() != count) {
-        continue;
-      }
-      const auto & camera = *cameras_[c];
-      const Eigen::Vector3d mount = level * camera.model.translation_base_from_camera;
-      const auto rays = pixels_to_bearings(entry.current_pixels, camera.model);
-      for (Eigen::Index i = 0; i < count; ++i) {
-        LandmarkFilter::Sighting sighting;
-        // The two cameras issue identities from their own counters, so the
-        // source has to be part of the name or they collide in one state.
-        sighting.identity = (entry.track_ids(i) << 3) | static_cast<int64_t>(c);
-        sighting.mount = mount;
-        sighting.bearing = level * rays.row(i).transpose();
-        if (!sighting.bearing.allFinite() || sighting.bearing.norm() < 0.5) {
-          continue;
-        }
-        sighting.bearing.normalize();
-        if (entry.ground_valid.size() == count && entry.ground_valid(i)) {
-          // The plane already answered for this one; the range along the ray is
-          // how far its intersection sits from the lens.
-          const Eigen::Vector3d point(
-            entry.current_ground(i, 0), entry.current_ground(i, 1), 0.0);
-          const double range = (point - mount).norm();
-          if (range > 0.1 && range < 40.0) {
-            sighting.ground_range = range;
-          }
-        }
-        seen.push_back(sighting);
-      }
-    }
-    const int used = landmark_->observe(seen, landmark_frame_);
-    landmark_->retire(landmark_frame_);
-    diagnostics_.landmarks = static_cast<int64_t>(landmark_->landmarks());
-    diagnostics_.landmark_used += used;
-    const Eigen::Vector3d now = landmark_->pose();
-    const double cp = std::cos(landmark_previous_.z());
-    const double sp = std::sin(landmark_previous_.z());
-    const double dx = now.x() - landmark_previous_.x();
-    const double dy = now.y() - landmark_previous_.y();
-    landmark_hop_ = Eigen::Vector2d(cp * dx + sp * dy, -sp * dx + cp * dy);
-    landmark_previous_ = now;
-    if (used > 0) {
-      if (!motion.has_value()) {
-        motion = PlanarMotion{landmark_hop_.x(), landmark_hop_.y(), *yaw_delta, used, 1.0};
-      } else {
-        motion->x = landmark_hop_.x();
-        motion->y = landmark_hop_.y();
-        motion->inliers = used;
-      }
-      aligned_from_map = true;
-    }
-  }
 
   // One solve over every reference there is.
   //
@@ -2445,7 +2134,6 @@ void Estimator::process_pair()
   // After the pose is settled, so each bearing is filed under where the camera
   // actually was when it saw it.
   for (auto & camera : cameras_) {
-    record_offground(*camera);
   }
 
   ++diagnostics_.frames_processed;

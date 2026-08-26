@@ -27,7 +27,6 @@
 #include "monoscale_core/attitude.hpp"
 #include "monoscale_core/fusion.hpp"
 #include "monoscale_core/geometry.hpp"
-#include "monoscale_core/landmark.hpp"
 #include "monoscale_core/inertial.hpp"
 
 namespace monoscale
@@ -400,8 +399,6 @@ struct EstimatorSettings
   // The ground and the structure above it stop being different code and become
   // different priors on a range. See landmark.hpp: this is the switch that
   // hands the hop to that filter instead of to the two solvers.
-  bool landmark_filter = false;
-  LandmarkSettings landmark;
   // Whether the anchor alignment estimates the heading itself when a filter
   // exists that could consume one. It only ever did because such a filter
   // implies a gyro bias state, and a bias is only observable against an
@@ -420,38 +417,6 @@ struct EstimatorSettings
   // forward-backward check passes, because zero out is zero back.
   double solve_min_pixel_flow = 0.0;
 
-  // Anchors that are not on the ground, triangulated from their own track
-  // rather than read off the plane. Ground features cross the band and die in
-  // a median of 5-12 frames; what is above the road does not, and is measured
-  // to live 5-10x longer. Off by default until it earns its place.
-  bool offground_anchors = false;
-  // Views a track needs before it is worth triangulating, and how far its
-  // bearings must have spread. Below a degree or so the ray intersection is
-  // conditioned on nothing.
-  int offground_min_views = 5;
-  double offground_min_parallax_deg = 2.0;
-  // What counts as off the ground, and how far out to believe a triangulation.
-  // Measured on these drives: 0.2-3.0 m triangulates to 1-4 cm, beyond 3 m the
-  // residual runs 4-9 cm with a 0.28-0.46 m tail.
-  double offground_min_height_m = 0.20;
-  double offground_max_range_m = 25.0;
-  // How tightly the rays have to meet before the point is kept.
-  double offground_max_residual_m = 0.10;
-  int offground_max_observations = 12;
-  // What one of these is worth against a ground anchor, which carries its own
-  // sighting count. A triangulated point is measured to sit 10-70x looser.
-  double offground_weight = 1.0;
-  // The range at which an off-ground anchor is judged on the same footing as a
-  // ground one. Its residual scales with range, so the gate has to as well.
-  double offground_residual_range_m = 5.0;
-  // How often a triangulated point is thrown away and rebuilt from fresh
-  // bearings. Zero never rebuilds, which lets it carry whatever the pose has
-  // drifted since it was fixed.
-  int offground_refresh_frames = 0;
-  // Keep a window of recent observations and re-solve the point every frame,
-  // the way a ground anchor is re-averaged every sighting, instead of fixing it
-  // once from whatever poses happened to be current then.
-  bool offground_rolling = false;
   double curvature_scale_gain = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;
@@ -608,17 +573,12 @@ struct Diagnostics
   int64_t filter_rejections = 0;
   int64_t imu_yaw_misses = 0;
   int64_t map_aligned_frames = 0;
-  // Off-ground points triangulated so far, and how many are live now.
-  int64_t offground_anchors = 0;
-  int64_t offground_live = 0;
   // Votes the unified solve took, and how many of them came from the map
   // rather than from the feature's own previous sighting.
   int64_t unified_votes = 0;
   int64_t unified_from_map = 0;
   // How much structure the unified filter is holding, and how many sightings
   // it took.
-  int64_t landmarks = 0;
-  int64_t landmark_used = 0;
   int64_t zupt_holds = 0;
   int64_t obstacles_unavailable = 0;
   // Temporary instrumentation: where the slip obstacle path loses its
@@ -780,7 +740,6 @@ private:
   std::vector<double> camera_spread_;
   std::vector<double> camera_usable_;
   std::vector<double> camera_known_;
-  std::vector<double> camera_offground_;
   std::vector<int64_t> camera_looks_;
   std::vector<double> camera_bearing_;
   std::vector<double> camera_projected_;
@@ -852,17 +811,12 @@ private:
   PlanarInertialPropagator inertial_;
   PlanarVelocityFilter velocity_filter_;
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;
-  std::unique_ptr<LandmarkFilter> landmark_;
-  Eigen::Vector2d landmark_hop_ = Eigen::Vector2d::Zero();
-  Eigen::Vector3d landmark_previous_ = Eigen::Vector3d::Zero();
-  int64_t landmark_frame_ = 0;
   // World frame velocity from whichever filter this run is actually running.
   // Only one of the four is fed vision; the other three are propagated on the
   // accelerometer alone and drift without bound, so asking the wrong one is
   // asking an open integrator.
   std::optional<Eigen::Vector2d> fused_world_velocity() const;
   double softness_for(const Camera & camera, double configured) const;
-  void record_offground(Camera & camera);
   // The last accelerometer reading believable enough to propagate on.
   std::optional<Eigen::Vector3d> last_specific_force_;
   double hop_residual_squared_ = 0.0;

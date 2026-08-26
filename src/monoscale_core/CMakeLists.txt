@@ -22,7 +22,6 @@ add_library(monoscale_core SHARED
   src/fusion.cpp
   src/inertial.cpp
   src/attitude.cpp
-  src/landmark.cpp
   src/estimator.cpp
   src/occupancy.cpp
 )
@@ -56,8 +55,6 @@ if(BUILD_TESTING)
   target_link_libraries(test_inertial monoscale_core)
   ament_add_gtest(test_estimator test/test_estimator.cpp)
   target_link_libraries(test_estimator monoscale_core)
-  ament_add_gtest(test_landmark test/test_landmark.cpp)
-  target_link_libraries(test_landmark monoscale_core)
   ament_add_gtest(test_occupancy test/test_occupancy.cpp)
   target_link_libraries(test_occupancy monoscale_core)
   ament_add_gtest(test_attitude test/test_attitude.cpp)
