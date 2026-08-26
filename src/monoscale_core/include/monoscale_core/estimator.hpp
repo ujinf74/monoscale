@@ -450,6 +450,27 @@ struct Update
   Pose2 pose;
   // Body-frame vx, vy and yaw rate.
   Eigen::Vector3d twist = Eigen::Vector3d::Zero();
+  // Roll and pitch as the attitude filter holds them. The planar solve owns
+  // yaw, so it is in `pose`; these two are estimated and were, until now, only
+  // ever used internally -- the projection they steer is the reason this stack
+  // works at all, and a consumer reading the orientation was being told the
+  // vehicle is always level.
+  double roll = 0.0;
+  double pitch = 0.0;
+  bool tilt_valid = false;
+  // What the estimator claims to know, so that a consumer can weigh it.
+  //
+  // The pose is dead reckoned, so its covariance grows without bound: this is
+  // the accumulated per-hop covariance, in the world frame, plus the heading's
+  // own accumulation. That accumulation is only honest because the hops turned
+  // out to be very nearly independent -- the benchmark's `walk` reads 0.97
+  // against 1.0 for a true random walk -- and it would understate the growth
+  // on a stack whose hops were correlated.
+  Eigen::Matrix3d pose_covariance = Eigen::Matrix3d::Zero();
+  // Body frame, per sample: vx, vy from the filter and the yaw rate from the
+  // instrument.
+  Eigen::Matrix3d twist_covariance = Eigen::Matrix3d::Zero();
+  bool covariance_valid = false;
   // False while the map is still being built and the pose is pinned at the
   // origin. Whoever consumes this is better served by no pose than by one that
   // is knowingly standing still while the car is not.
@@ -518,6 +539,8 @@ struct Diagnostics
   // the whole claim; the NIS says whether the covariance is honest.
   double gyro_bias = 0.0;
   double last_nis = 0.0;
+  double nis_total = 0.0;
+  int64_t nis_samples = 0;
   // The one-sided part of vision's yaw residual, in radians per hop: how far
   // the reported heading is pulling the estimate away from the ground.
   double heading_drift = 0.0;
@@ -660,6 +683,8 @@ private:
   std::optional<double> last_mapping_stamp_;
   std::optional<Eigen::Vector2d> last_seed_position_;
   Eigen::Vector3d filtered_twist_ = Eigen::Vector3d::Zero();
+  // Accumulated dead-reckoning covariance for the absolute pose.
+  Eigen::Matrix3d pose_covariance_ = Eigen::Matrix3d::Zero();
   bool map_ready_ = false;
 
   std::deque<std::pair<double, double>> imu_yaw_samples_;

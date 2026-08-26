@@ -567,3 +567,48 @@ TEST(EstimatorDrive, FlatRoadProducesNoObstacles)
   EXPECT_GT(ground, 0u);
   EXPECT_EQ(obstacles, 0u);
 }
+
+TEST(EstimatorDrive, TheCovarianceItPublishesGrowsAndIsNotAFilterArtefact)
+{
+  // A dead-reckoning source has to say how sure it is, and an all-zero
+  // covariance on the wire is read by plenty of stacks as "exact". This one is
+  // built from what the solve measured -- the scatter of the inlying votes over
+  // their count -- rather than from the fusion filter's own covariance, which
+  // is dominated by a process noise chosen to make the filter defer to vision
+  // and reads a NIS of 0.001 where an honest one gives 2.
+  EstimatorSettings settings = deployment_settings();
+  Drive drive(settings);
+  for (int i = 0; i < 120; ++i) {
+    drive.step(2.0, 0.0, 1.0 / 30.0);
+  }
+  ASSERT_GT(drive.estimator.diagnostics().map_aligned_frames, 0);
+
+  std::optional<monoscale::Update> last;
+  double first_trace = -1.0;
+  for (int i = 0; i < 120; ++i) {
+    drive.step(2.0, 0.0, 1.0 / 30.0);
+    for (const auto & update : drive.estimator.take_updates()) {
+      if (!update.covariance_valid) {
+        continue;
+      }
+      if (first_trace < 0.0) {
+        first_trace = update.pose_covariance.trace();
+      }
+      last = update;
+    }
+  }
+  ASSERT_TRUE(last.has_value()) << "no update carried a covariance";
+  EXPECT_TRUE(last->pose_covariance.allFinite());
+  EXPECT_GT(last->pose_covariance(0, 0), 0.0);
+  EXPECT_GT(last->pose_covariance(1, 1), 0.0);
+  EXPECT_GT(last->pose_covariance(2, 2), 0.0) << "the heading claims no uncertainty at all";
+  // Dead reckoning has no absolute reference, so it only ever grows.
+  EXPECT_GT(last->pose_covariance.trace(), first_trace);
+  // And it has to be a believable size: a metre of one-sigma over six metres
+  // travelled would be useless, and a micrometre would be a lie.
+  const double sigma = std::sqrt(last->pose_covariance(0, 0) + last->pose_covariance(1, 1));
+  EXPECT_GT(sigma, 1e-4);
+  EXPECT_LT(sigma, 1.0);
+  EXPECT_TRUE(last->twist_covariance.allFinite());
+  EXPECT_GT(last->twist_covariance(0, 0), 0.0);
+}

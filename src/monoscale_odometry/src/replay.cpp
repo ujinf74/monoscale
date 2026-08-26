@@ -318,6 +318,11 @@ int main(int argc, char ** argv)
 
   std::vector<Sample> estimates;
   std::vector<monoscale::Update> hops;
+  // What the estimator claims to know about its own pose by the end, so the
+  // claim can be laid beside the error it actually made. A covariance that
+  // does not match is worse than none: it is a lie a consumer will act on.
+  double claimed_position = 0.0;
+  double claimed_yaw = 0.0;
   std::vector<Sample> truth;
   while (reader.has_next()) {
     const auto message = reader.read_next();
@@ -384,6 +389,11 @@ int main(int argc, char ** argv)
       }
       estimates.push_back(
         Sample{update.stamp, update.pose.x, update.pose.y, update.pose.yaw});
+      if (update.covariance_valid) {
+        claimed_position = std::sqrt(
+          std::max(update.pose_covariance(0, 0) + update.pose_covariance(1, 1), 0.0));
+        claimed_yaw = std::sqrt(std::max(update.pose_covariance(2, 2), 0.0));
+      }
     }
   }
   rclcpp::shutdown();
@@ -822,6 +832,19 @@ int main(int argc, char ** argv)
       ar, std::sqrt(std::max(ar * ar - am * am, 0.0)), am,
       cr, std::sqrt(std::max(cr * cr - cm * cm, 0.0)), cm,
       std::hypot(ar, cr), error_count);
+  }
+  {
+    const auto & d = estimator.diagnostics();
+    if (d.nis_samples > 0) {
+      std::printf(
+        "필터 NIS 평균 %.3f (정직하면 2.0)   갱신 %ld회\n",
+        d.nis_total / static_cast<double>(d.nis_samples), d.nis_samples);
+    }
+  }
+  if (claimed_position > 0.0) {
+    std::printf(
+      "주장 불확실성: 위치 1시그마 %.4f m   헤딩 1시그마 %.3f deg\n",
+      claimed_position, claimed_yaw * 180.0 / M_PI);
   }
   const auto & diagnostics = estimator.diagnostics();
   std::printf(

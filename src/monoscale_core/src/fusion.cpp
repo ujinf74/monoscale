@@ -261,6 +261,19 @@ void PlanarDisplacementFilter::update_zero_velocity(double sigma)
   covariance_ = 0.5 * (covariance_ + covariance_.transpose()).eval();
 }
 
+Eigen::Matrix2d PlanarDisplacementFilter::hop_covariance() const
+{
+  return covariance_.block<2, 2>(kPosition, kPosition) -
+         covariance_.block<2, 2>(kPosition, kAnchor) -
+         covariance_.block<2, 2>(kAnchor, kPosition) +
+         covariance_.block<2, 2>(kAnchor, kAnchor);
+}
+
+Eigen::Matrix2d PlanarDisplacementFilter::velocity_covariance() const
+{
+  return covariance_.block<2, 2>(kVelocity, kVelocity);
+}
+
 Eigen::Vector2d PlanarDisplacementFilter::body_translation(double yaw) const
 {
   const double c = std::cos(yaw);

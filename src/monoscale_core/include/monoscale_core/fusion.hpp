@@ -189,6 +189,18 @@ public:
 
   double speed() const {return state_.segment<2>(4).norm();}
 
+  // What the filter thinks it knows, so that whoever consumes the odometry can
+  // weigh it. An all-zero covariance on the wire is conventionally "unknown"
+  // and is read by plenty of stacks as "exact", which is the worse of the two
+  // mistakes a dead-reckoning source can make.
+  //
+  // The hop is position minus the cloned anchor, so its covariance is the
+  // covariance of that difference and not of either term -- the two are
+  // strongly correlated by construction and subtracting them is most of the
+  // point of the cloning.
+  Eigen::Matrix2d hop_covariance() const;
+  Eigen::Matrix2d velocity_covariance() const;
+
 private:
   using State = Eigen::Matrix<double, 8, 1>;
   using Covariance = Eigen::Matrix<double, 8, 8>;

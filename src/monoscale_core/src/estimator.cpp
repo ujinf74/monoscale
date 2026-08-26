@@ -1570,6 +1570,9 @@ void Estimator::process_pair()
   // those are the hops it most needed protecting from.
 
   const Pose2 previous_pose = pose_;
+  // The scatter of the inlying votes, kept past the block that computes it so
+  // the published covariance can be built from what the solve measured.
+  double solve_spread = 0.0;
 
   if (displacement_filter_ && motion.has_value() && dt > 1e-4) {
     // Propagate over exactly the interval this measurement spans, boundaries
@@ -1603,6 +1606,7 @@ void Estimator::process_pair()
       }
       spread = total > 0.0 ? weighted / total : 0.0;
     }
+    solve_spread = spread;
     // The filter's own innovation is the one scale reference that does not
     // come from the ground plane. `predicted` is where inertial propagation
     // says the vehicle went since the last vision update; `measured` is where
@@ -1629,6 +1633,12 @@ void Estimator::process_pair()
           }
         }
       }
+    }
+    if (const auto & record = displacement_filter_->last_update(); record.has_value()) {
+      // Two degrees of freedom, so an honest covariance averages 2. Below that
+      // the filter is claiming less certainty than it has.
+      diagnostics_.nis_total += record->nis;
+      ++diagnostics_.nis_samples;
     }
     inertial_.correct_velocity(displacement_filter_->velocity());
     const Eigen::Vector2d fused = displacement_filter_->body_translation(previous_pose.yaw);
@@ -1834,6 +1844,45 @@ void Estimator::process_pair()
 
   update.pose = pose_;
   update.twist = twist;
+  if (attitude_ && attitude_->started()) {
+    update.roll = attitude_->roll();
+    update.pitch = attitude_->pitch();
+    update.tilt_valid = true;
+  }
+  if (displacement_filter_ && dt > 1e-4) {
+    // The hop's own covariance, turned into the world frame the pose lives in,
+    // and added to what has accumulated. Dead reckoning has no other answer:
+    // there is no absolute reference to bound it.
+    const double c = std::cos(previous_pose.yaw);
+    const double s = std::sin(previous_pose.yaw);
+    Eigen::Matrix2d turn;
+    turn << c, -s, s, c;
+    // Not the filter's own covariance. That is dominated by
+    // `filter_acceleration_noise`, which is set to 8.0 because it makes the
+    // filter defer to vision and not because the instrument is that bad -- the
+    // measured value is 0.006 to 0.823. The filter's NIS reads 0.001 to 0.05
+    // where an honest covariance gives 2.0, so it is claiming a thousandfold
+    // less certainty than it has, and a pose covariance built on it inherits
+    // that.
+    //
+    // What is defensible is what the solve itself measured: the scatter of the
+    // inlying votes over their count, which is the same quantity the filter
+    // takes as R.
+    const double hop_variance =
+      displacement_filter_->measurement_variance(motion->inliers, solve_spread);
+    pose_covariance_.topLeftCorner<2, 2>() +=
+      turn * (Eigen::Matrix2d::Identity() * hop_variance) * turn.transpose();
+    // Heading is carried by the gyro between solves and trimmed by the ground
+    // where it answers, so its variance grows at the instrument's noise.
+    const double gyro = settings_.gyro_noise_sigma_rad_s;
+    pose_covariance_(2, 2) += gyro * gyro * dt;
+    update.pose_covariance = pose_covariance_;
+    // Velocity is a hop over a time, so its variance is the hop's over dt^2.
+    update.twist_covariance.topLeftCorner<2, 2>() =
+      Eigen::Matrix2d::Identity() * (hop_variance / (dt * dt));
+    update.twist_covariance(2, 2) = gyro * gyro;
+    update.covariance_valid = true;
+  }
   // Nothing goes out while the map is still being built. The pose is pinned to
   // the origin over that stretch, and a vehicle already at 8 m/s covers 0.375 m
   // before the first map-anchored solve lands -- published as (0, 0) it becomes
