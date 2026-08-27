@@ -50,9 +50,27 @@ void AttitudeFilter::update(
   pitch_ += dt * ((gyro.y() - pitch_bias_) * std::cos(roll_) -
     gyro.z() * std::sin(roll_));
 
-  const double magnitude = std::sqrt(ax * ax + ay * ay + az * az);
-  if (std::abs(magnitude - gravity_) > tolerance_) {
-    return;
+  // What corrupts the apparent vertical is the vehicle's own acceleration, and
+  // the magnitude gate is the wrong instrument for it: a horizontal `a` moves
+  // |accel| by only a^2/2g while tilting the apparent vertical by atan(a/g).
+  // The deployed 0.10 m/s2 therefore still admits a = 1.40 and 8.1 degrees of
+  // false tilt. Take the estimated gravity out of the specific force and gate
+  // on what is left, which is the acceleration itself.
+  if (horizontal_tolerance_ > 0.0) {
+    const double cr = std::cos(roll_);
+    const double sr = std::sin(roll_);
+    const double cp = std::cos(pitch_);
+    const double sp = std::sin(pitch_);
+    const Eigen::Vector3d down(-sp, sr * cp, cr * cp);
+    const Eigen::Vector3d own = Eigen::Vector3d(ax, ay, az) - gravity_ * down;
+    if (own.head<2>().norm() > horizontal_tolerance_) {
+      return;
+    }
+  } else {
+    const double magnitude = std::sqrt(ax * ax + ay * ay + az * az);
+    if (std::abs(magnitude - gravity_) > tolerance_) {
+      return;
+    }
   }
   ++corrections_;
   const double gain = std::min(dt / tau_, 1.0);
@@ -70,14 +88,31 @@ void AttitudeFilter::update(
   }
   roll_ += gain * roll_error;
   pitch_ += gain * pitch_error;
+
+  if (slope_tau_ > 0.0) {
+    if (!slope_started_) {
+      slope_roll_ = roll_;
+      slope_pitch_ = pitch_;
+      slope_started_ = true;
+    } else {
+      const double slow = std::min(dt / slope_tau_, 1.0);
+      slope_roll_ += slow * (roll_ - slope_roll_);
+      slope_pitch_ += slow * (pitch_ - slope_pitch_);
+    }
+  }
 }
 
 Eigen::Matrix3d AttitudeFilter::body_tilt() const
 {
-  const double cr = std::cos(roll_);
-  const double sr = std::sin(roll_);
-  const double cp = std::cos(pitch_);
-  const double sp = std::sin(pitch_);
+  // What the projection wants is the body against the ROAD. The filter tracks
+  // it against gravity, and the difference is the road's slope, which the slow
+  // running average below holds.
+  const double roll = slope_tau_ > 0.0 ? roll_ - slope_roll_ : roll_;
+  const double pitch = slope_tau_ > 0.0 ? pitch_ - slope_pitch_ : pitch_;
+  const double cr = std::cos(roll);
+  const double sr = std::sin(roll);
+  const double cp = std::cos(pitch);
+  const double sp = std::sin(pitch);
   Eigen::Matrix3d tilt;
   tilt <<
     cp, sp * sr, sp * cr,

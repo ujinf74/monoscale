@@ -228,6 +228,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.attitude_from_imu = declare_bool("attitude_from_imu", true);
   settings.attitude_tau_sec = declare_double("attitude_tau_sec", 60.0);
   settings.attitude_gravity_tolerance = declare_double("attitude_gravity_tolerance", 0.3);
+  settings.attitude_horizontal_tolerance =
+    declare_double("attitude_horizontal_tolerance", 0.0);
   settings.attitude_bias_tau_sec = declare_double("attitude_bias_tau_sec", 0.0);
   settings.attitude_bias_limit_rps =
     declare_double("attitude_bias_limit_rps", 0.001);
@@ -291,6 +293,32 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_min_update_gain = declare_double("anchor_min_update_gain", 0.0);
   settings.anchor_evict_by_age = declare_bool("anchor_evict_by_age", false);
   settings.anchor_evict_for_new = declare_bool("anchor_evict_for_new", false);
+  settings.anchor_evict_by_weight =
+    declare_bool("anchor_evict_by_weight", false);
+  settings.anchor_evict_unseen_solves =
+    declare_int("anchor_evict_unseen_solves", 1);
+  settings.anchor_evict_by_information =
+    declare_bool("anchor_evict_by_information", false);
+  settings.anchor_admit_per_update =
+    declare_int("anchor_admit_per_update", 0);
+  settings.anchored_min_observations =
+    declare_int("anchored_min_observations", 0);
+  settings.anchor_forget_beyond_bearing_deg =
+    declare_double("anchor_forget_beyond_bearing_deg", 0.0);
+  settings.anchor_forget_beyond_range_m =
+    declare_double("anchor_forget_beyond_range_m", 0.0);
+  settings.anchor_density_cell_m =
+    declare_double("anchor_density_cell_m", 0.0);
+  settings.anchor_density_quota =
+    declare_int("anchor_density_quota", 0);
+  settings.anchor_polar_sector_deg =
+    declare_double("anchor_polar_sector_deg", 15.0);
+  settings.anchor_polar_ring_m =
+    declare_double("anchor_polar_ring_m", 2.0);
+  settings.anchor_polar_rings =
+    declare_int("anchor_polar_rings", 4);
+  settings.anchor_polar_quota =
+    declare_int("anchor_polar_quota", 0);
   settings.camera_split_lever = declare_double("camera_split_lever", 0.0);
   settings.road_point_weight = declare_double("road_point_weight", 1.0);
   settings.anchor_information_power = declare_double("anchor_information_power", 0.0);
@@ -312,7 +340,41 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
   settings.solve_max_pixel_flow = declare_double("solve_max_pixel_flow", 0.0);
   settings.solve_min_pixel_flow = declare_double("solve_min_pixel_flow", 0.0);
-  settings.curvature_scale_gain = declare_double("curvature_scale_gain", 0.0);
+  settings.tilt_at_capture = declare_bool("tilt_at_capture", false);
+  settings.remember_sighting_poses =
+    declare_bool("remember_sighting_poses", false);
+  settings.rebuild_measure_only = declare_bool("rebuild_measure_only", false);
+  settings.fusion_gain_mode = declare_int("fusion_gain_mode", 0);
+  settings.equalise_reach = declare_bool("equalise_reach", false);
+  settings.photometric_step_gain =
+    declare_double("photometric_step_gain", 0.0);
+  settings.photometric_min_score =
+    declare_double("photometric_min_score", 0.0);
+  settings.photometric_max_spread =
+    declare_double("photometric_max_spread", 0.0);
+  settings.photometric_on_pairs =
+    declare_bool("photometric_on_pairs", false);
+  settings.photometric_align_prior =
+    declare_bool("photometric_align_prior", false);
+  settings.photometric_when_mapless =
+    declare_bool("photometric_when_mapless", false);
+  settings.pose_graph_window = declare_int("pose_graph_window", 0);
+  settings.pose_graph_loop_weight =
+    declare_double("pose_graph_loop_weight", 1.0);
+  settings.pose_graph_sweeps = declare_int("pose_graph_sweeps", 8);
+  settings.anchor_link_radius_m = declare_double("anchor_link_radius_m", 0.0);
+  settings.anchor_link_adopter_writes =
+    declare_bool("anchor_link_adopter_writes", false);
+  settings.anchor_link_rebind_grace = declare_int("anchor_link_rebind_grace", 1);
+  settings.anchor_link_measure_only =
+    declare_bool("anchor_link_measure_only", false);
+  settings.ground_plane_offset_m =
+    declare_double("ground_plane_offset_m", 0.0);
+  settings.pair_scale_gain = declare_double("pair_scale_gain", 0.0);
+  settings.pitch_centre_x_m = declare_double("pitch_centre_x_m", 0.0);
+  settings.ground_height_from_tilt =
+    declare_bool("ground_height_from_tilt", true);
+  settings.attitude_slope_tau_sec = declare_double("attitude_slope_tau_sec", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);
   settings.imu_translation_base_from_imu = vector_of(

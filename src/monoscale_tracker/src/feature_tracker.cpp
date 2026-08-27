@@ -272,6 +272,23 @@ struct TrackState
   // Previous frame to current, in ROI coordinates. Kept as the warm start for
   // the next fit, which is most of why the iteration converges at all.
   cv::Mat road_warp;
+  // This camera's own photometric step, in metres per nominal frame. Each
+  // camera measures it separately: the two answers are what the estimator's
+  // fusion is built on, and collapsing them to one would remove the binding
+  // that the front/rear split provides.
+  double road_step = std::numeric_limits<double>::quiet_NaN();
+  // How well the region landed on itself at the answer. A road that aligns
+  // reads 0.93 to 0.99; a frame that lost the surface reads far lower, and
+  // that is the only thing separating a measurement from a tail event.
+  double road_score = 0.0;
+  // How far apart the across-track tiles' answers are, relative to the step.
+  // Large where something that is not the road is in the region.
+  double road_spread = 0.0;
+  // The same step over the near and far halves of the band.
+  double road_near = std::numeric_limits<double>::quiet_NaN();
+  double road_far = std::numeric_limits<double>::quiet_NaN();
+  // Where the next frame's search starts. Smoothed, and never published.
+  double road_bracket = std::numeric_limits<double>::quiet_NaN();
 
   // How many features this camera is currently trying to hold. Owned by the
   // one thread that runs this camera's callback, so it needs no guard.
@@ -435,6 +452,50 @@ public:
     // leave the region.
     road_max_age_ = declare_parameter<int>("road_max_age", 0);
     road_epsilon_ = declare_parameter<double>("road_ecc_epsilon", 1.0e-4);
+    // Score the step by photometric alignment of the far road instead of by
+    // counting corners that agree. Off leaves `measure_step` in charge.
+    road_step_photometric_ = declare_parameter<bool>("road_step_photometric", false);
+    // Measure this camera's step photometrically and carry the road grid by the
+    // homography that step induces, instead of by a free affine fit. Needs
+    // `road_alignment` for the grid and a ground model for the geometry.
+    road_from_step_ = declare_parameter<bool>("road_from_step", false);
+    // Also measure the band in halves, so the plane offset and the two
+    // mounting pitches can be solved for without truth.
+    road_step_calibrate_ = declare_parameter<bool>("road_step_calibrate", false);
+    // The near band, in fractions of the frame, and the default for a camera
+    // that does not name its own. Ground from 0.34 m -- the closest row the
+    // frame holds -- out to about 1.5 m, one lane wide.
+    //
+    // The two cameras do not want the same band, and the reason is the
+    // direction the ground flows. The front's ground approaches, so it enters
+    // high and leaves at the bottom: every row was in the previous frame. The
+    // rear's recedes, so the bottom rows are ground that has just appeared --
+    // at 8 m/s a 29-row strip there moves about 47 px in one frame, which is
+    // more than the strip is tall, and it measures -35% against truth while the
+    // same strip at 1.6 m/s measures -0.7%. Masking the fabricated border does
+    // not rescue it (it reads -63%); the band has to be left out. Hence
+    // `rear.road_step_roi_y1` at 0.92 while the front keeps 1.00.
+    //
+    // The far band was tried first, on the reasoning that it is where the
+    // corner path has nothing. It loses by two orders of magnitude, and the
+    // reason is that both facts have one cause: a step moves a ground point's
+    // bearing by h/(R^2+h^2), which at 5 m is a fifteenth of what it is at 1 m.
+    // Where a corner cannot be identified is where the step cannot be seen.
+    // Doubling the resolution does not rescue it, and widening this region
+    // sideways or outwards makes it worse, not better, because the road leaves
+    // the plane the warp assumes.
+    road_step_roi_ = {
+      declare_parameter<double>("road_step_roi_x0", 0.25),
+      declare_parameter<double>("road_step_roi_y0", 0.60),
+      declare_parameter<double>("road_step_roi_x1", 0.75),
+      declare_parameter<double>("road_step_roi_y1", 1.00)};
+    // Coarse candidates, then the same count again over one coarse spacing.
+    road_step_samples_ = declare_parameter<int>("road_step_samples", 13);
+    road_step_stride_ = declare_parameter<int>("road_step_stride", 8);
+    // Across-track tiles, each answering on its own; the median is taken. 1
+    // keeps the single-region search.
+    road_step_tiles_ = declare_parameter<int>("road_step_tiles", 1);
+    road_step_dump_ = declare_parameter<std::string>("road_step_dump", "");
     // Run the optical flow on the GPU.
     //
     // This is the one stage in the whole stack where a GPU has a case to make.
@@ -589,8 +650,9 @@ public:
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
       states_[name].target = max_features_;
-      if (predict_from_motion_) {
+      if (predict_from_motion_ || road_from_step_) {
         models_[name] = load_ground_model(name);
+        road_bands_[name] = load_road_band(name);
       }
       publishers_[name] = create_publisher<std_msgs::msg::Float64MultiArray>(
         "/vision/tracks/" + name, output_qos);
@@ -614,7 +676,7 @@ public:
         get_logger(), "tracking %s on %s", name.c_str(), topics[index].c_str());
     }
 
-    if (predict_from_motion_) {
+    if (predict_from_motion_ || road_from_step_) {
       // The turn in the induced homography is measured, not solved for. This
       // rig's gyro yaw is exact -- correlation 0.985 to 0.9997 against the
       // truth pose, scale 0.97 to 1.004 -- so the only thing left to find is
@@ -710,7 +772,9 @@ private:
     // the flow so the search starts there rather than where the feature was.
     double turn = 0.0;
     bool turn_known = false;
-    if (predict_from_motion_ && have_previous && !state.points.empty()) {
+    if ((predict_from_motion_ || road_from_step_) && have_previous &&
+      !state.points.empty())
+    {
       double yaw_now = 0.0;
       double yaw_then = 0.0;
       if (yaw_at(stamp, yaw_now) && yaw_at(state.stamp, yaw_then)) {
@@ -775,6 +839,37 @@ private:
     // say it. Searched as one scalar over the induced family: the features that
     // failed to track all agree on zero, so the vote is bimodal, and a window
     // around the last answer keeps the zero out of reach.
+    if (road_from_step_ && turn_known && !state.previous_gray.empty() &&
+      state.previous_gray.size() == gray.size())
+    {
+      const auto model = models_.find(name);
+      if (model != models_.end() && model->second.ready) {
+        const bool held = std::isfinite(state.road_bracket);
+        double peak = 0.0;
+        double spread = 0.0;
+        const double found = measure_step_photometric(
+          model->second, state.previous_gray, gray, turn, reach,
+          held ? state.road_bracket : 0.0, held, band_for(name), &peak, &spread);
+        state.road_score = peak;
+        state.road_spread = spread;
+        if (road_step_calibrate_ && std::isfinite(found)) {
+          measure_step_bands(
+            model->second, state.previous_gray, gray, turn, reach, found,
+            band_for(name), state.road_near, state.road_far);
+        }
+        if (std::isfinite(found)) {
+          // Two values, deliberately. The smoothed one brackets the next
+          // frame's search, because a bracket wants the best guess available.
+          // The raw one is what leaves this node, because smoothing an output
+          // correlates consecutive measurements by construction, and correlated
+          // hops accumulate as n instead of root n -- measured as the lag-1
+          // autocorrelation rising from 0.66 to 0.90 while the bias fell.
+          state.road_step = found;
+          state.road_bracket = std::isfinite(state.road_bracket)
+            ? state.road_bracket + 0.7 * (found - state.road_bracket) : found;
+        }
+      }
+    }
     if (predict_from_motion_ && turn_known && name == step_reference_ &&
       previous_points.size() >= 60)
     {
@@ -782,6 +877,40 @@ private:
       if (found != models_.end() && found->second.ready) {
         measure_step(found->second, previous_points, current_points,
           gray.cols, gray.rows, turn, reach);
+        if ((road_step_photometric_ || !road_step_dump_.empty()) &&
+          !state.previous_gray.empty() && state.previous_gray.size() == gray.size())
+        {
+          double held = 0.0;
+          bool ready = false;
+          {
+            std::lock_guard<std::mutex> guard(step_lock_);
+            held = shared_step_;
+            ready = step_ready_;
+          }
+          const double photometric = measure_step_photometric(
+            found->second, state.previous_gray, gray, turn, reach, held, ready,
+            band_for(name));
+          if (!road_step_dump_.empty()) {
+            std::lock_guard<std::mutex> guard(road_step_lock_);
+            if (road_step_file_ == nullptr) {
+              road_step_file_ = std::fopen(road_step_dump_.c_str(), "w");
+              if (road_step_file_ != nullptr) {
+                std::fprintf(road_step_file_, "stamp,votes,photometric,turn,reach\n");
+              }
+            }
+            if (road_step_file_ != nullptr) {
+              std::fprintf(
+                road_step_file_, "%.6f,%.6f,%.6f,%.6f,%.4f\n", stamp, held,
+                photometric, turn, reach);
+              std::fflush(road_step_file_);
+            }
+          }
+          if (road_step_photometric_ && std::isfinite(photometric)) {
+            std::lock_guard<std::mutex> guard(step_lock_);
+            shared_step_ = photometric;
+            step_ready_ = true;
+          }
+        }
       }
     }
     if (elapsed > 0.0) {
@@ -863,7 +992,18 @@ private:
     }
 
     if (road_alignment_ && !road_previous.empty() && road_previous.size() == gray.size()) {
-      align_road(state, road_previous, gray, previous_points, current_points, identities);
+      const auto model = models_.find(name);
+      const bool physical = road_from_step_ && turn_known &&
+        std::isfinite(state.road_step) && model != models_.end() && model->second.ready;
+      if (physical) {
+        const cv::Matx33d plane =
+          model->second.homography(state.road_step * reach, turn);
+        align_road(
+          state, road_previous, gray, previous_points, current_points, identities,
+          &model->second, &plane);
+      } else {
+        align_road(state, road_previous, gray, previous_points, current_points, identities);
+      }
     }
 
     if (!dump_dir_.empty() && ++dumped_[name] == 60) {
@@ -876,7 +1016,10 @@ private:
     }
 
     publish(
-      name, message, gray.size(), previous_points, current_points, identities);
+      name, message, gray.size(), previous_points, current_points, identities,
+      road_from_step_ && std::isfinite(state.road_step)
+      ? state.road_step * reach : std::numeric_limits<double>::quiet_NaN(),
+      state.road_score, state.road_spread, state.road_near, state.road_far);
 
     stage.publish = lap();
     const double spent = std::chrono::duration<double>(
@@ -1017,10 +1160,19 @@ private:
   // this rig, the hop those corners produce is eight to twenty times noisier
   // than independent point noise would allow. A warp fitted over the whole
   // region is not aperture limited.
+  // The grid the road region carries, and what carries it.
+  //
+  // `plane` is the frame's motion written as the homography a plane induces --
+  // the vehicle's step and turn, and nothing else, because the mount, the lens
+  // and the height are calibration. When it is supplied the ECC fit is not run
+  // at all: six or eight free parameters are fitted where three exist, and the
+  // spare ones absorb noise with a direction, which is why the region fit has
+  // never survived a curve.
   void align_road(
     TrackState & state, const cv::Mat & previous, const cv::Mat & current,
     std::vector<cv::Point2f> & previous_points, std::vector<cv::Point2f> & current_points,
-    std::vector<int64_t> & identities)
+    std::vector<int64_t> & identities, const GroundModel * model = nullptr,
+    const cv::Matx33d * plane = nullptr)
   {
     const cv::Rect roi(
       cv::Point(
@@ -1032,6 +1184,7 @@ private:
       return;
     }
 
+    const bool from_plane = model != nullptr && plane != nullptr && model->ready;
     const int motion = road_homography_ ? cv::MOTION_HOMOGRAPHY : cv::MOTION_AFFINE;
     const int rows = road_homography_ ? 3 : 2;
     if (state.road_warp.empty() || state.road_warp.rows != rows) {
@@ -1041,6 +1194,7 @@ private:
     // time asks the iteration to cross the whole hop, which at road speed is
     // further than it can see.
     cv::Mat warp = state.road_warp.clone();
+    if (!from_plane) {
     try {
       cv::findTransformECC(
         previous(bounded), current(bounded), warp, motion,
@@ -1061,6 +1215,7 @@ private:
     } else {
       return;
     }
+    }
 
     const cv::Mat_<float> w = state.road_warp;
     const cv::Point2f origin(
@@ -1080,14 +1235,25 @@ private:
         continue;
       }
       const cv::Point2f & from = state.road_points[i];
-      const float scale = road_homography_
-        ? w(2, 0) * from.x + w(2, 1) * from.y + w(2, 2) : 1.0f;
-      if (std::abs(scale) < 1e-6f) {
-        continue;
+      cv::Point2f to;
+      if (from_plane) {
+        // Straight through the geometry: a bearing in the previous frame, the
+        // plane's homography, and back to a pixel. The pair this emits is
+        // exactly consistent with the step that was measured, so what the
+        // estimator recovers from it is that step and nothing else.
+        const cv::Vec3d b = (*plane) *
+          model->bearing(from + origin, current.cols, current.rows);
+        to = model->pixel(b, current.cols, current.rows) - origin;
+      } else {
+        const float scale = road_homography_
+          ? w(2, 0) * from.x + w(2, 1) * from.y + w(2, 2) : 1.0f;
+        if (std::abs(scale) < 1e-6f) {
+          continue;
+        }
+        to = cv::Point2f(
+          (w(0, 0) * from.x + w(0, 1) * from.y + w(0, 2)) / scale,
+          (w(1, 0) * from.x + w(1, 1) * from.y + w(1, 2)) / scale);
       }
-      const cv::Point2f to(
-        (w(0, 0) * from.x + w(0, 1) * from.y + w(0, 2)) / scale,
-        (w(1, 0) * from.x + w(1, 1) * from.y + w(1, 2)) / scale);
       if (to.x < 0.0f || to.y < 0.0f ||
         to.x > static_cast<float>(bounded.width - 1) ||
         to.y > static_cast<float>(bounded.height - 1))
@@ -1662,6 +1828,320 @@ private:
     }
   }
 
+
+  // Where each pixel of one region of the predicted frame came from, rather
+  // than of the whole frame. Same coarse lattice as `build_warp`; the point is
+  // that a candidate step costs one small region instead of 3.7 megapixels,
+  // which is what makes scanning over steps affordable.
+  void build_warp_roi(
+    const GroundModel & model, double step, double turn, int width, int height,
+    const cv::Rect & roi, cv::Mat & map_x, cv::Mat & map_y) const
+  {
+    const cv::Matx33d inverse = model.homography(step, turn).inv();
+    const int stride = std::max(road_step_stride_, 1);
+    const int cols = std::max(roi.width / stride, 2);
+    const int rows = std::max(roi.height / stride, 2);
+    cv::Mat sx(rows, cols, CV_32F);
+    cv::Mat sy(rows, cols, CV_32F);
+    // Same rule as `build_warp`: the lattice sits where cv::resize will read
+    // it, not on a linspace across the region. Getting this wrong shifts the
+    // whole map by half a lattice cell, which reads as several per cent of
+    // step -- measured at +3.9% against +0.33% before the sampling was fixed.
+    const double sx_step = static_cast<double>(roi.width) / cols;
+    const double sy_step = static_cast<double>(roi.height) / rows;
+    for (int r = 0; r < rows; ++r) {
+      const double y = roi.y + (r + 0.5) * sy_step - 0.5;
+      for (int c = 0; c < cols; ++c) {
+        const double x = roi.x + (c + 0.5) * sx_step - 0.5;
+        const cv::Vec3d b = inverse *
+          model.bearing(cv::Point2f(static_cast<float>(x), static_cast<float>(y)), width, height);
+        const cv::Point2f p = model.pixel(b, width, height);
+        sx.at<float>(r, c) = p.x;
+        sy.at<float>(r, c) = p.y;
+      }
+    }
+    cv::resize(sx, map_x, roi.size(), 0, 0, cv::INTER_LINEAR);
+    cv::resize(sy, map_y, roi.size(), 0, 0, cv::INTER_LINEAR);
+  }
+
+  // How well the road lands on itself if the vehicle stepped this far, once per
+  // across-track tile.
+  //
+  // One number for the whole region is not robust to anything that is not the
+  // road. A kerb entering from the side is off the plane, so the induced
+  // homography cannot describe it; it sits closer to the camera, so it sweeps
+  // faster and the fit that matches it reports a step 75 to 130 per cent too
+  // long; and it is a strong straight edge, so it aligns crisply and *raises*
+  // the score -- on curve_s10 the band's standard deviation goes from 5 to 24
+  // where it enters, and those frames score 0.987 against the drive's 0.956. No
+  // threshold on the score can reject a wrong answer that scores better than
+  // the right one. Tiles can: the intruder contaminates the tile it is in, and
+  // the median of the tiles is the road's answer.
+  void road_scores(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double hop, double turn, const cv::Rect & roi, std::vector<double> & out,
+    double * whole = nullptr) const
+  {
+    cv::Mat map_x;
+    cv::Mat map_y;
+    build_warp_roi(model, hop, turn, previous.cols, previous.rows, roi, map_x, map_y);
+    cv::Mat warped;
+    cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    const int tiles = std::max(road_step_tiles_, 1);
+    out.assign(static_cast<size_t>(tiles), -2.0);
+    const cv::Mat target = current(roi);
+    if (whole != nullptr) {
+      cv::Mat all;
+      cv::matchTemplate(target, warped, all, cv::TM_CCOEFF_NORMED);
+      *whole = all.at<float>(0, 0);
+    }
+    for (int i = 0; i < tiles; ++i) {
+      const int x0 = i * roi.width / tiles;
+      const int x1 = (i + 1) * roi.width / tiles;
+      if (x1 - x0 < 8) {
+        continue;
+      }
+      const cv::Rect slice(x0, 0, x1 - x0, roi.height);
+      cv::Mat score;
+      cv::matchTemplate(target(slice), warped(slice), score, cv::TM_CCOEFF_NORMED);
+      out[static_cast<size_t>(i)] = score.at<float>(0, 0);
+    }
+  }
+
+  double road_score(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double hop, double turn, const cv::Rect & roi) const
+  {
+    std::vector<double> tiles;
+    road_scores(model, previous, current, hop, turn, roi, tiles);
+    return tiles.empty() ? -2.0 : *std::max_element(tiles.begin(), tiles.end());
+  }
+
+  // The step the road itself says, scored photometrically rather than by vote.
+  //
+  // `measure_step` scans the same one-parameter family -- the plane-induced
+  // homography, in which the vehicle's step is the only unknown once the mount
+  // and the turn are known -- but scores each candidate by counting tracked
+  // corners that agree. Past about 1.9 m the front camera has no corners to
+  // count: the ground samples at 10-37 mm per pixel out there and a road corner
+  // is not individually identifiable, which is what Lovegrove reported in 2011
+  // and why that camera uses a third of the band it is given. A photometric
+  // score needs no corner. It asks whether the whole region lands on itself,
+  // which is the one question thousands of ambiguous pixels can answer together.
+  double measure_step_photometric(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double reach, double centre, bool have_centre,
+    const std::array<double, 4> & band, double * peak_score = nullptr,
+    double * spread = nullptr) const
+  {
+    const cv::Rect roi = cv::Rect(
+      cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
+      cv::Point(cvRound(band[2] * current.cols), cvRound(band[3] * current.rows))) &
+      cv::Rect(0, 0, current.cols, current.rows);
+    if (roi.width < 32 || roi.height < 32) {
+      return std::numeric_limits<double>::quiet_NaN();
+    }
+    const double span = std::max(reach, 1e-3);
+    // Each candidate is warped once; the whole-region score and the per-tile
+    // scores both come out of that one warp, so keeping the tiles here costs
+    // nothing and saves the separate spread sweep it used to need -- a third of
+    // the search's warps.
+    const int tiles = std::max(road_step_tiles_, 1);
+    std::vector<double> tile_best(static_cast<size_t>(tiles), 0.0);
+    std::vector<double> tile_value(static_cast<size_t>(tiles), -2.0);
+    std::vector<double> scores;
+    const auto scan = [&](double low, double high, int samples, double & best_score) {
+        double best = low;
+        best_score = -2.0;
+        for (int i = 0; i < samples; ++i) {
+          const double s = low + (high - low) * i / std::max(samples - 1, 1);
+          double whole = -2.0;
+          road_scores(model, previous, current, s * span, turn, roi, scores, &whole);
+          if (whole > best_score) {
+            best_score = whole;
+            best = s;
+          }
+          for (int j = 0; j < tiles && j < static_cast<int>(scores.size()); ++j) {
+            if (scores[static_cast<size_t>(j)] > tile_value[static_cast<size_t>(j)]) {
+              tile_value[static_cast<size_t>(j)] = scores[static_cast<size_t>(j)];
+              tile_best[static_cast<size_t>(j)] = s;
+            }
+          }
+        }
+        return best;
+      };
+    // A bracket that follows the last answer, so the grid stays fine relative
+    // to the step at any speed. A fixed span over every plausible speed makes
+    // the spacing 2% of the step at 8 m/s and 9% at 1.6, and the coarser
+    // spacing biases the parabola.
+    double peak = 0.0;
+    const double reachable = have_centre ? std::max(0.35 * centre, 0.01) : 0.0;
+    const double low = have_centre ? std::max(0.0, centre - reachable) : -0.05;
+    const double high = have_centre ? centre + reachable : 0.60;
+    const double coarse = scan(low, high, road_step_samples_, peak);
+    const double spacing = (high - low) / std::max(road_step_samples_ - 1, 1);
+    double fine_peak = 0.0;
+    double found = scan(
+      coarse - spacing, coarse + spacing, road_step_samples_, fine_peak);
+    // What each across-track tile would have answered, at no extra warp: the
+    // region is warped once per candidate either way. The answer stays the
+    // whole region's -- splitting it costs precision on the 92% of frames that
+    // have nothing wrong with them, measured as ATE 0.0581 -> 0.0705. The
+    // spread of the tiles is kept instead, as the one signal that separates a
+    // frame with a kerb in it from a frame without: the score cannot, because
+    // the intruder scores *higher* than the road.
+    if (tiles > 1 && spread != nullptr) {
+      const auto range = std::minmax_element(tile_best.begin(), tile_best.end());
+      *spread = (*range.second - *range.first) / std::max(std::abs(found), 1e-6);
+    }
+    const double fine = 2.0 * spacing / std::max(road_step_samples_ - 1, 1);
+    const double left = road_score(model, previous, current, (found - fine) * span, turn, roi);
+    const double right = road_score(model, previous, current, (found + fine) * span, turn, roi);
+    if (peak_score != nullptr) {
+      *peak_score = fine_peak;
+    }
+    const double curve = left - 2.0 * fine_peak + right;
+    if (std::abs(curve) > 1e-9) {
+      const double shift = 0.5 * (left - right) / curve;
+      if (std::abs(shift) <= 1.0) {
+        found += shift * fine;
+      }
+    }
+    return found;
+  }
+
+  // The same one-parameter family, but each across-track tile answers on its
+  // own and the median of their answers is taken. Coarse then fine, as the
+  // single-region path does, so precision is not traded for the robustness.
+  double measure_step_tiled(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double span, double centre, bool have_centre, const cv::Rect & roi,
+    double * peak_score) const
+  {
+    const int tiles = road_step_tiles_;
+    const double reachable = have_centre ? std::max(0.35 * centre, 0.01) : 0.0;
+    const double low = have_centre ? std::max(0.0, centre - reachable) : -0.05;
+    const double high = have_centre ? centre + reachable : 0.60;
+    const auto sweep = [&](double from, double to, int samples,
+        std::vector<double> & best, std::vector<double> & value) {
+        best.assign(static_cast<size_t>(tiles), from);
+        value.assign(static_cast<size_t>(tiles), -2.0);
+        std::vector<double> scores;
+        for (int i = 0; i < samples; ++i) {
+          const double s = from + (to - from) * i / std::max(samples - 1, 1);
+          road_scores(model, previous, current, s * span, turn, roi, scores);
+          for (int j = 0; j < tiles && j < static_cast<int>(scores.size()); ++j) {
+            if (scores[static_cast<size_t>(j)] > value[static_cast<size_t>(j)]) {
+              value[static_cast<size_t>(j)] = scores[static_cast<size_t>(j)];
+              best[static_cast<size_t>(j)] = s;
+            }
+          }
+        }
+      };
+    std::vector<double> coarse;
+    std::vector<double> ignored;
+    sweep(low, high, road_step_samples_, coarse, ignored);
+    const double spacing = (high - low) / std::max(road_step_samples_ - 1, 1);
+    std::vector<double> answers;
+    answers.reserve(static_cast<size_t>(tiles));
+    double peak = -2.0;
+    for (int j = 0; j < tiles; ++j) {
+      std::vector<double> fine;
+      std::vector<double> value;
+      const double at = coarse[static_cast<size_t>(j)];
+      sweep(at - spacing, at + spacing, road_step_samples_, fine, value);
+      answers.push_back(fine[static_cast<size_t>(j)]);
+      peak = std::max(peak, value[static_cast<size_t>(j)]);
+    }
+    if (peak_score != nullptr) {
+      *peak_score = peak;
+    }
+    std::sort(answers.begin(), answers.end());
+    const size_t half = answers.size() / 2;
+    return answers.size() % 2 == 1
+           ? answers[half] : 0.5 * (answers[half - 1] + answers[half]);
+  }
+
+  // The same step, but over the near half of the band and over the far half.
+  //
+  // Three unknowns set this camera chain's scale: one plane offset shared by
+  // both cameras -- the road is a single surface -- and one mounting pitch
+  // each. Three observations reach them without truth. A pitch error moves a
+  // point at range R by (R^2+h^2)/h and a height error by R, so within one
+  // camera the *near against far* disagreement is the pitch:
+  //
+  //     dtheta = h (s_far/s_near - 1) / (2 (R_far - R_near))
+  //
+  // and between the two cameras, which measure the same motion from different
+  // heights, what is left after removing each one's pitch is the plane offset:
+  //
+  //     delta = [ (s_f/s_r - 1) - 2 R_f dtheta_f/h_f + 2 R_r dtheta_r/h_r ]
+  //             / (1/h_f - 1/h_r)
+  //
+  // Checked offline against truth on straight_s8_t01: this recovers 3.39 mm
+  // where the value fitted to truth was 3.5, and pitches of 0.041 and 0.059
+  // degrees. What it cannot reach is a scale error common to both cameras --
+  // the same lens model and the same assembly are used for each, so a focal
+  // length that is wrong scales every bearing alike and cancels in the ratio.
+  // That residual measures -0.133%.
+  void measure_step_bands(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double reach, double centre, const std::array<double, 4> & band,
+    double & near_step, double & far_step) const
+  {
+    const double split = 0.5 * (band[1] + band[3]);
+    std::array<double, 4> far_band{band[0], band[1], band[2], split};
+    std::array<double, 4> near_band{band[0], split, band[2], band[3]};
+    // A short sweep either side of the answer the whole band gave; the two
+    // halves cannot disagree by much or the warp would not have fitted at all.
+    const double span = std::max(reach, 1e-3);
+    const auto refine = [&](const std::array<double, 4> & use) {
+        const cv::Rect roi = cv::Rect(
+          cv::Point(cvRound(use[0] * current.cols), cvRound(use[1] * current.rows)),
+          cv::Point(cvRound(use[2] * current.cols), cvRound(use[3] * current.rows))) &
+          cv::Rect(0, 0, current.cols, current.rows);
+        if (roi.width < 16 || roi.height < 8) {
+          return std::numeric_limits<double>::quiet_NaN();
+        }
+        // The disagreement being measured is 0.05 to 0.16 per cent of the
+        // step. A grid alone cannot see it -- at nine points across two per
+        // cent the spacing is half a per cent and the two halves come back
+        // bit-identical, which is what the first version did. The peak has to
+        // be interpolated, exactly as the main search does.
+        const int samples = 9;
+        const double width = 0.01 * std::max(centre, 0.01);
+        const double spacing = 2.0 * width / (samples - 1);
+        std::vector<double> value(static_cast<size_t>(samples), -2.0);
+        int at = 0;
+        for (int i = 0; i < samples; ++i) {
+          const double s = centre - width + spacing * i;
+          std::vector<double> tiles;
+          double whole = -2.0;
+          road_scores(model, previous, current, s * span, turn, roi, tiles, &whole);
+          value[static_cast<size_t>(i)] = whole;
+          if (whole > value[static_cast<size_t>(at)]) {
+            at = i;
+          }
+        }
+        double best = centre - width + spacing * at;
+        if (at > 0 && at + 1 < samples) {
+          const double a = value[static_cast<size_t>(at - 1)];
+          const double b = value[static_cast<size_t>(at)];
+          const double c = value[static_cast<size_t>(at + 1)];
+          const double curve = a - 2.0 * b + c;
+          if (std::abs(curve) > 1e-12) {
+            const double shift = 0.5 * (a - c) / curve;
+            if (std::abs(shift) <= 1.0) {
+              best += shift * spacing;
+            }
+          }
+        }
+        return best;
+      };
+    far_step = refine(far_band);
+    near_step = refine(near_band);
+  }
+
   // One scalar, voted on by every correspondence this camera kept.
   void measure_step(
     const GroundModel & model, const std::vector<cv::Point2f> & previous,
@@ -1759,6 +2239,23 @@ private:
     cv::resize(sy, map_y, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
   }
 
+  // The band this camera measures its step over. Falls back to the node-level
+  // one where a camera does not name its own.
+  const std::array<double, 4> & band_for(const std::string & name)
+  {
+    const auto found = road_bands_.find(name);
+    return found != road_bands_.end() ? found->second : road_step_roi_;
+  }
+
+  std::array<double, 4> load_road_band(const std::string & name)
+  {
+    return {
+      declare_parameter<double>(name + ".road_step_roi_x0", road_step_roi_[0]),
+      declare_parameter<double>(name + ".road_step_roi_y0", road_step_roi_[1]),
+      declare_parameter<double>(name + ".road_step_roi_x1", road_step_roi_[2]),
+      declare_parameter<double>(name + ".road_step_roi_y1", road_step_roi_[3])};
+  }
+
   GroundModel load_ground_model(const std::string & name)
   {
     GroundModel model;
@@ -1786,6 +2283,23 @@ private:
     model.translation_base_from_camera =
       cv::Vec3d(translation[0], translation[1], translation[2]);
     model.equidistant = lens != "plumb_bob" && lens != "pinhole";
+    // Correction to the mounting pitch, applied to the calibration.
+    //
+    // The road itself measures this: warp the near band and the far band
+    // separately and the two disagree about the step by 2 R dtheta / h, so the
+    // ratio of their answers is the pitch error and needs no truth. On the
+    // deployed front camera it reads 0.06 to 0.09 degrees, and removing it
+    // flattens the bias across range and takes the drive's scale error from
+    // 0.254% to 0.077%. Positive is nose down, as in REP-103.
+    const double pitch = declare_parameter<double>(name + ".mount_pitch_offset_deg", 0.0);
+    if (pitch != 0.0) {
+      const double a = pitch * M_PI / 180.0;
+      const cv::Matx33d about_y(
+        std::cos(a), 0.0, std::sin(a),
+        0.0, 1.0, 0.0,
+        -std::sin(a), 0.0, std::cos(a));
+      model.rotation_base_from_camera = about_y * model.rotation_base_from_camera;
+    }
     model.ready = std::abs(model.translation_base_from_camera[2]) > 1e-3 && model.fx > 0.0;
     return model;
   }
@@ -1808,7 +2322,35 @@ private:
         break;
       }
     }
-    if (before == nullptr || after == nullptr || after->first - before->first > 0.12) {
+    if (before == nullptr && after != nullptr) {
+      return false;
+    }
+    if (after == nullptr) {
+      // The newest frame has no sample past it, and never will in time: the bag
+      // and the live rig both publish in stamp order, so the image at t arrives
+      // before the IMU sample at t + dt. Waiting for one costs every frame --
+      // this gate is why an earlier run measured six frames out of six hundred.
+      //
+      // Extrapolated from the last two instead, and only across one sample
+      // interval. At 60 Hz that is 17 ms, over which the yaw acceleration this
+      // vehicle carries contributes well under a tenth of a milliradian.
+      if (imu_yaw_.size() < 2) {
+        return false;
+      }
+      const auto & last = imu_yaw_.back();
+      const auto & prior = *(imu_yaw_.end() - 2);
+      const double span = last.first - prior.first;
+      const double ahead = stamp - last.first;
+      if (!(span > 1e-9) || ahead > 0.05 || ahead < 0.0) {
+        return false;
+      }
+      double step = last.second - prior.second;
+      while (step > M_PI) {step -= 2.0 * M_PI;}
+      while (step < -M_PI) {step += 2.0 * M_PI;}
+      out = last.second + step * ahead / span;
+      return true;
+    }
+    if (after->first - before->first > 0.12) {
       return false;
     }
     const double span = after->first - before->first;
@@ -1838,7 +2380,8 @@ private:
     const cv::Size & frame,
     const std::vector<cv::Point2f> & previous_points,
     const std::vector<cv::Point2f> & current_points,
-    const std::vector<int64_t> & identities)
+    const std::vector<int64_t> & identities, double step, double score,
+    double spread, double near_step, double far_step)
   {
     std_msgs::msg::Float64MultiArray out;
     out.data.reserve(4 + identities.size() * 5);
@@ -1854,6 +2397,18 @@ private:
       out.data.push_back(previous_points[i].y);
       out.data.push_back(current_points[i].x);
       out.data.push_back(current_points[i].y);
+    }
+    // The photometric step this frame, in metres, appended after the feature
+    // block. It is a displacement, not a feature, and the estimator has to take
+    // it as one -- carrying it as a grid of virtual points delivers nothing,
+    // because those identities never enter the anchor map and the map path
+    // answers most frames.
+    if (std::isfinite(step)) {
+      out.data.push_back(step);
+      out.data.push_back(score);
+      out.data.push_back(spread);
+      out.data.push_back(near_step);
+      out.data.push_back(far_step);
     }
     publishers_[name]->publish(std::move(out));
     {
@@ -1896,6 +2451,17 @@ private:
   double step_tolerance_deg_ = 0.3;
   bool motion_warp_ = false;
   double motion_warp_min_step_ = 0.12;
+  bool road_step_photometric_ = false;
+  bool road_from_step_ = false;
+  bool road_step_calibrate_ = false;
+  std::array<double, 4> road_step_roi_{0.25, 0.60, 0.75, 1.00};
+  std::map<std::string, std::array<double, 4>> road_bands_;
+  int road_step_samples_ = 13;
+  int road_step_stride_ = 8;
+  int road_step_tiles_ = 1;
+  std::string road_step_dump_;
+  std::mutex road_step_lock_;
+  std::FILE * road_step_file_ = nullptr;
   std::unordered_map<std::string, GroundModel> models_;
   // The step the reference camera last measured, shared with the others. The
   // rig is rigid, so one number serves every camera on it.

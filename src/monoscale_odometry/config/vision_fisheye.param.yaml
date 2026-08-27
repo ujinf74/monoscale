@@ -332,7 +332,28 @@
     # a measured 1.5; it is the scale that was wrong, not the balance. The
     # earlier .030/.045 were set from the same residuals and are still two to
     # three times wider than what they weigh on most drives.
-    ground_align_softness_m: 0.012
+    # Re-tuned 2026-08-27 on the re-recorded set, jointly over nine axes. The
+    # values these replace were fitted to drives in which six of eleven ended in
+    # a collision, and they were mis-fitted: a 400-point joint search found a
+    # whole region better, and the median of its top forty scores as well as its
+    # best single point. ATE 0.1195 -> 0.0654, worst ATE 0.3061 -> 0.0898,
+    # walk 3.78 -> 2.14, repeat spread 1.71 -> 1.21, RPE40 0.211 -> 0.172, in
+    # exchange for RPE5 +13% and RPE10 +6%. It is the hard drives that move --
+    # 8 m/s -74%, the sharp slalom -85% -- and the easy straights that pay a
+    # little. Taken on the trajectory, which is what this stack is for.
+    # The Gaussian weight's width is the residual's own sigma, so it is measured
+    # rather than configured -- the solve reports the residual every frame and
+    # `Camera::residual_scale` is its running mean. sqrt(2) is the derived
+    # multiplier: the reported spread is a two-dimensional scatter while the
+    # weight acts on a one-dimensional distance.
+    #
+    # This replaces two fitted constants with one derived rule, and the two
+    # below are now only the fallback for the first frames of a drive, before
+    # the residual has been measured. What the constants could not do is follow
+    # the conditions: sweeping the fixed `ground_pair_softness_m` moves ATE by
+    # 4.09x on the 8 m/s drive, where this rule moves it by 1.29x.
+    softness_from_residual: 1.41
+    ground_align_softness_m: 0.017
 
     # How many starting points the alignment's mode search tries.
     #
@@ -375,9 +396,21 @@
     # 1.80x, at 5.0 they spread 1.20x, and SD over the ten drives is 0.076
     # against 0.083. Buying 0.001 of mean with half the repeatability is not a
     # trade a general-purpose stack should take.
-    solve_max_distance_m: 5.0
-    anchor_max_range_m: 5.0
-    ground_min_inliers: 24
+    solve_max_distance_m: 5.8
+    anchor_max_range_m: 5.7
+    # Both frames of a hop used to be projected with the *current* body tilt,
+    # so the earlier frame carried the whole pitch change of the hop. The
+    # ray-plane intersection moves by (R^2+h^2)/h per radian -- about 8 m/rad
+    # at 2.5 m of range on the 0.89 m mount -- so 0.06 deg of body pitch is
+    # 8 mm in the hop, added in metres rather than as a fraction. Measured
+    # against the truth pitch change per solve, that single variable explains
+    # R^2 = 0.76 of the hop error on the 8 m/s drive, 0.61 on park_clean and
+    # 0.60 on curve_s10, where every other candidate this stack has regressed
+    # reaches 0.02. Both cameras take the SAME sign -- the rear camera's points
+    # sit at negative x and their range shrinks where the front's grows -- so
+    # the fusion cannot cancel it.
+    tilt_at_capture: true
+    ground_min_inliers: 30
     max_scale_error: 0.08
     # 20 Hz frames, so this caps the vehicle at 20 m/s before a frame is rejected.
     # One, not two. The two cameras were worked by a pair of threads, and
@@ -446,7 +479,7 @@
     # ground_align_softness_m, which carries the table; this path's residual is
     # the larger of the two reported per drive, so it keeps the wider of the
     # pair at half again the anchor path's.
-    ground_pair_softness_m: 0.020
+    ground_pair_softness_m: 0.047
     # Metres of hop given back per radian of turn.
     #
     # It acts on the **common** mode, which is what matters: both cameras share
@@ -485,9 +518,31 @@
     #
     # 0.085-0.130 is a flat basin, so 0.100 is not a fitted point, and it is the
     # rare change that takes mean, SD and repeat spread together.
-    curvature_scale_gain: 0.100
-    ground_range_scale_front: 1.0039
-    ground_range_scale_rear: 1.0060
+    # The ground the cameras see sits this far above the datum the extrinsics
+    # are measured from, so each mount is really at `h - d` and
+    # `range_scale = h / (h - d)`. Measured 2026-08-27, not fitted:
+    # triangulating the tracked features from the truth poses with no plane
+    # assumed and fitting a plane to them puts the rendered road **2.4 to
+    # 8.1 mm** above z=0 -- and the correction it asks for is the SAME on both
+    # mounts (front 5.5 / 8.1 / 2.6 / 2.5 mm against rear 5.9 / 7.0 / 2.4 /
+    # 2.7 on nv3 / ns4 / sv2 / cs10). One number, not two.
+    #
+    # It replaces `ground_range_scale_front: 1.0032` and `_rear: 1.0053`, which
+    # were two free parameters where the physics has one -- and which had the
+    # front scale SMALLER than the rear, the opposite of what a shared road
+    # offset requires, because the front is the lower mount. That is the
+    # signature of a pair absorbing something per-camera.
+    #
+    # 5.5 mm gives front 1.0062 / rear 1.0044 and is the first configuration
+    # this session to dominate the deployed one on all eleven metrics:
+    # RPE5 0.431->0.416, RPE10 0.331->0.312, RPE20 0.256->0.238,
+    # RPE40 0.193->0.171, worst5 0.585->0.574, worst10 0.411->0.368,
+    # hop% 0.45->0.44, walk 2.76->2.42, ATE 0.0834->0.0744,
+    # worst ATE 0.1148->0.1067, repeat 1.21->1.15.
+    #
+    # The plane it is fitted to is flat: 0.011-0.060 deg of tilt, so there is no
+    # road crown to model.
+    ground_plane_offset_m: 0.0055
     # Roll and pitch from the IMU, feeding the ground projection. The gain
     # here is small because this simulator's vehicle barely tilts -- 0.1
     # degrees under hard braking and hard steering -- and the whole four drive
@@ -568,7 +623,7 @@
     # tau 2 is better still on nv2 and worse overall (0.1773): it wins the two
     # sharp curves outright (s10 0.2121 -> 0.1401, s20 0.1258 -> 0.0772) and
     # loses the slow straight and both parks. No single tau holds both.
-    attitude_tau_sec: 8.0
+    attitude_tau_sec: 6.0
 
     # The trim above is proportional only, and a proportional loop against a
     # biased rate settles at bias*tau instead of at zero. Measured against the
@@ -627,6 +682,17 @@
     # than a proportional pull, so admitting fewer and cleaner samples now pays
     # where it did not. Re-swept: 0.05 / 0.10 / 0.30 / 0.60 give ATE 0.1105 /
     # 0.0996 / 0.0993 / 0.1053, and 0.10 takes the worst drive 0.1697 -> 0.1579.
+    # Gate the accelerometer's opinion of down on the vehicle's own horizontal
+    # acceleration, in m/s^2, rather than on the specific force's magnitude.
+    # The magnitude is the wrong quantity: a horizontal `a` moves |accel| by
+    # only a^2/2g while tilting the apparent vertical by atan(a/g), so the
+    # `attitude_gravity_tolerance: 0.10` below still admits a = 1.40 and **8.1
+    # degrees** of false tilt. 0.60 admits 3.5 degrees and says so.
+    #
+    # Tightening it much further starves the correction faster than it protects
+    # it -- 1.0 deg scores 1.335 and 0.5 deg 2.189 on the composite -- which is
+    # the same wall the magnitude gate hit.
+    attitude_horizontal_tolerance: 0.60
     attitude_gravity_tolerance: 0.10
     camera_workers: 1
     # How much the ground has to move before a solve is worth attempting.

@@ -80,9 +80,23 @@ public:
   // Roll and pitch as a rotation from the body into a level frame. Yaw is left
   // out: the planar solve owns it, and putting it here as well would rotate the
   // ground twice.
+  // How slowly the road's own slope is tracked and taken back out. The vehicle
+  // follows the road, so the slow part of its attitude is the road's slope and
+  // what is left is the body on its suspension. The projection wants the
+  // second, and the lever arm multiplies the first, so the two only separate
+  // together. Zero leaves the tilt measured against gravity.
+  // Gate on the vehicle's own horizontal acceleration in m/s^2 rather than
+  // on the specific force's magnitude. Zero keeps the magnitude gate.
+  void set_horizontal_tolerance(double a) {horizontal_tolerance_ = a;}
+  void set_slope_tau(double tau) {slope_tau_ = tau;}
   Eigen::Matrix3d body_tilt() const;
 
 private:
+  double horizontal_tolerance_ = 0.0;
+  double slope_tau_ = 0.0;
+  double slope_roll_ = 0.0;
+  double slope_pitch_ = 0.0;
+  bool slope_started_ = false;
   double roll_ = 0.0;
   double pitch_ = 0.0;
   bool started_ = false;

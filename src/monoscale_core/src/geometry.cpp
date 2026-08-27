@@ -178,7 +178,8 @@ Eigen::Matrix<double, Eigen::Dynamic, 3> pixels_to_bearings(
 void pixels_to_ground(
   const Points2 & pixels, const CameraModel & model, double max_distance,
   double min_distance, const Eigen::Matrix3d * tilt, double range_scale,
-  Points2 & ground_out, Mask & valid_out)
+  Points2 & ground_out, Mask & valid_out, double pitch_centre_x,
+  bool height_from_tilt)
 {
   const Eigen::Index count = pixels.rows();
   ground_out.resize(count, 2);
@@ -196,11 +197,16 @@ void pixels_to_ground(
     origin.z() /= range_scale;
   }
 
+  // The body pivots about here, not about base_link's origin, so this is what
+  // the tilt swings the mount around.
+  const Eigen::Vector3d centre(pitch_centre_x, 0.0, 0.0);
+  const Eigen::Vector3d arm = origin - centre;
+
   Eigen::Vector3d normal(0.0, 0.0, 1.0);
   // The camera's own position, in whichever frame the points come out in.
   Eigen::Vector3d reference = origin;
   if (tilt != nullptr && model.level_frame_origin) {
-    reference = (*tilt) * origin;
+    reference = (*tilt) * arm + centre;
   }
   if (tilt != nullptr) {
     // The ground stays level in the world while the body tilts, so in body
@@ -210,7 +216,13 @@ void pixels_to_ground(
 
   // One matrix instead of two: the pixel goes straight to a ray in base_link.
   const Eigen::Matrix3d ray_from_pixel = model.rotation_base_from_camera * model.k_inverse;
-  const double height = origin.dot(normal);
+  // The camera's height over the road does not change when the road tilts --
+  // the vehicle rides on the road, not on gravity -- and `arm.dot(normal)` says
+  // it does, by the lever times the sine of the *absolute* pitch. That term is
+  // the larger of the two ways the tilt reaches a range (-10.4 m/rad against
+  // the normal's -7.9 on the front mount) and it is spurious for every bit of
+  // the tilt that is road slope. Holding the height nominal drops it.
+  const double height = height_from_tilt ? arm.dot(normal) + centre.z() : origin.z();
 
   for (Eigen::Index i = 0; i < count; ++i) {
     const Eigen::Vector3d homogeneous(corrected(i, 0), corrected(i, 1), 1.0);

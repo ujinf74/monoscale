@@ -222,6 +222,16 @@ bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::T
     out.pixels(i, 0) = data[at + 3];
     out.pixels(i, 1) = data[at + 4];
   }
+  const size_t after = static_cast<size_t>(4 + 5 * count);
+  if (data.size() > after) {
+    out.photometric_step = data[after];
+    if (data.size() > after + 1) {
+      out.photometric_score = data[after + 1];
+    }
+    if (data.size() > after + 2) {
+      out.photometric_spread = data[after + 2];
+    }
+  }
   return true;
 }
 
@@ -255,6 +265,10 @@ int main(int argc, char ** argv)
   // because it is the right number, not because it measured better.
   double truth_offset_m = 1.399;
   bool truth_tilt = false;
+  std::string hops_path;
+  std::string revisits_path;
+  std::string anchors_path;
+  double until_seconds = 0.0;
   std::vector<std::string> ros_arguments{"--ros-args"};
 
   for (int i = 1; i < argc; ++i) {
@@ -280,6 +294,18 @@ int main(int argc, char ** argv)
       tolerance = std::stod(next());
     } else if (argument == "--truth-tilt") {
       truth_tilt = true;
+    } else if (argument == "--hops") {
+      hops_path = next();
+    } else if (argument == "--anchors") {
+      anchors_path = next();
+    } else if (argument == "--revisits") {
+      revisits_path = next();
+    } else if (argument == "--until") {
+      // Six of the eleven recorded drives end in a contact the simulator
+      // reports as tens of g. Three of them destroy the measurement -- s8 goes
+      // from 0.68% hop error to 39.20% -- so the benchmark stops before it
+      // rather than scoring the wreck.
+      until_seconds = std::stod(next());
     } else if (argument == "--truth-offset") {
       truth_offset_m = std::stod(next());
     } else if (bag.empty()) {
@@ -327,7 +353,11 @@ int main(int argc, char ** argv)
   double claimed_position = 0.0;
   double claimed_yaw = 0.0;
   std::vector<Sample> truth;
-  while (reader.has_next()) {
+  // Header time of the first IMU sample. `--until` is measured from there, so
+  // it is on the same clock as everything the diagnostics report.
+  double first_header_stamp = 0.0;
+  bool stop_reading = false;
+  while (reader.has_next() && !stop_reading) {
     const auto message = reader.read_next();
     rclcpp::SerializedMessage serialized(*message->serialized_data);
 
@@ -339,6 +369,14 @@ int main(int argc, char ** argv)
       }
     } else if (message->topic_name == configuration.topics.imu) {
       const auto imu = deserialize<sensor_msgs::msg::Imu>(serialized);
+      const double header = stamp_of(imu.header);
+      if (first_header_stamp == 0.0) {
+        first_header_stamp = header;
+      }
+      if (until_seconds > 0.0 && header - first_header_stamp > until_seconds) {
+        stop_reading = true;
+        continue;
+      }
       monoscale::ImuSample sample;
       sample.stamp = stamp_of(imu.header);
       sample.orientation = Eigen::Vector4d(
@@ -640,6 +678,87 @@ int main(int argc, char ** argv)
               ++per_camera_n[c];
             }
           }
+        }
+      }
+      if (!anchors_path.empty()) {
+    std::vector<std::array<double, 4>> polar;
+    estimator.anchor_polar(polar);
+    std::ofstream out(anchors_path);
+    out << "range,bearing,weight,unseen\n";
+    for (const auto & a : polar) {
+      out << a[0] << "," << a[1] << "," << a[2] << "," << a[3] << "\n";
+    }
+  }
+  if (!revisits_path.empty()) {
+    std::ofstream out(revisits_path);
+    out << "t0,t1,edx,edy,odx,ody,w\n";
+    for (const auto & r : estimator.revisit_audit()) {
+      out << r.time_from << "," << r.time_to << "," << r.edge_dx << "," << r.edge_dy
+          << "," << r.odometry_dx << "," << r.odometry_dy << "," << r.weight << "\n";
+    }
+  }
+  if (!hops_path.empty()) {
+        // One row per solve, so the bias can be regressed against candidate
+        // drivers instead of binned by the one the correction already assumes.
+        std::FILE * f = std::fopen(hops_path.c_str(), "w");
+        if (f != nullptr) {
+          std::fprintf(f, "t0,t1,dt,length,dyaw,curvature,bias,lat,front,rear,fmap,rmap,fwd,yawsign,fcond,fweak,rcond,rweak,fhx,fhy,fpx,fpy,rhx,rhy,rpx,rpy,frng,fn,rrng,rn,pdist,flen,fh,fp,rh,rp\n");
+          for (const auto & hop : hops) {
+            if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
+              continue;
+            }
+            const Sample step = relative_pose(at(hop.previous_stamp), at(hop.stamp));
+            const double length = std::hypot(step.x, step.y);
+            if (length < 0.02) {
+              continue;
+            }
+            const double ux = step.x / length;
+            const double uy = step.y / length;
+            const auto along = [&](const Eigen::Vector2d & v) {
+                return (v.x() * ux + v.y() * uy - length) / length;
+              };
+            // Across the direction of travel, same normalisation. Roll tilts
+            // the plane sideways, so if it reaches the hop at all this is where
+            // it lands -- straight-ahead points barely move under roll and the
+            // left and right ones move opposite ways.
+            const auto across = [&](const Eigen::Vector2d & v) {
+                return (v.x() * -uy + v.y() * ux) / length;
+              };
+            const auto camera = [&](size_t c) {
+                return c < hop.camera_hops.size() && hop.camera_hops[c].allFinite()
+                  ? along(hop.camera_hops[c]) : std::numeric_limits<double>::quiet_NaN();
+              };
+            const auto from_map = [&](size_t c) {
+                return c < hop.camera_from_map.size() ? int(hop.camera_from_map[c]) : -1;
+              };
+            const auto gain = [](const std::vector<Eigen::Vector2d> & v, size_t c, int a) {
+                return c < v.size() ? v[c](a) : std::numeric_limits<double>::quiet_NaN();
+              };
+            const auto pick = [](const std::vector<double> & v, size_t c) {
+                return c < v.size() ? v[c] : std::numeric_limits<double>::quiet_NaN();
+              };
+            std::fprintf(
+              f, "%.6f,%.6f,%.4f,%.5f,%.6f,%.5f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.5f,%+d,"
+              "%.4f,%.5f,%.4f,%.5f,"
+              "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
+              "%.4f,%.0f,%.4f,%.0f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f\n",
+              hop.previous_stamp, hop.stamp, hop.stamp - hop.previous_stamp, length, std::abs(step.yaw),
+              std::abs(step.yaw) / length, along(hop.fused_hop), across(hop.fused_hop),
+              camera(0), camera(1),
+              from_map(0), from_map(1), step.x, step.yaw >= 0.0 ? 1 : -1,
+              pick(hop.camera_condition, 0), pick(hop.camera_weak_bearing, 0),
+              pick(hop.camera_condition, 1), pick(hop.camera_weak_bearing, 1),
+              gain(hop.camera_height_gain, 0, 0), gain(hop.camera_height_gain, 0, 1),
+              gain(hop.camera_pitch_gain, 0, 0), gain(hop.camera_pitch_gain, 0, 1),
+              gain(hop.camera_height_gain, 1, 0), gain(hop.camera_height_gain, 1, 1),
+              gain(hop.camera_pitch_gain, 1, 0), gain(hop.camera_pitch_gain, 1, 1),
+              pick(hop.camera_mean_range, 0), pick(hop.camera_point_count, 0),
+              pick(hop.camera_mean_range, 1), pick(hop.camera_point_count, 1),
+              hop.photometric_distance, hop.fused_length,
+              pick(hop.radial_height, 0), pick(hop.radial_pitch, 0),
+              pick(hop.radial_height, 1), pick(hop.radial_pitch, 1));
+          }
+          std::fclose(f);
         }
       }
       std::printf("  곡률 구간별 편향:");
@@ -981,12 +1100,13 @@ int main(int argc, char ** argv)
   const auto & diagnostics = estimator.diagnostics();
   std::printf(
     "pairs=%ld solves=%ld estimates=%zu failures=%ld (nosolve=%ld trans=%ld yaw=%ld) "
-    "coasted=%ld yaw_misses=%ld anchors=%d "
+    "coasted=%ld yaw_misses=%ld anchors=%d(도달 %d, 종평균 %+.1fm 종퍼짐 %.1fm) "
     "map_frames=%ld evicted=%ld "
     "link[n=%ld gap=%.4fm range=%.2fm gap/range=%.5f]\n",
     diagnostics.pairs_seen, diagnostics.frames_processed, estimates.size(),
     diagnostics.motion_failures, diagnostics.fail_no_solve, diagnostics.fail_translation,
     diagnostics.fail_yaw, diagnostics.coasted, diagnostics.imu_yaw_misses, diagnostics.anchors,
+    diagnostics.anchors_within, diagnostics.anchors_along, diagnostics.anchors_across,
     diagnostics.map_aligned_frames, diagnostics.frames_evicted,
     diagnostics.anchors_adopted, diagnostics.link_gap_m, diagnostics.link_range_m,
     diagnostics.link_gap_per_m);
@@ -1052,6 +1172,29 @@ int main(int argc, char ** argv)
     stages += buffer;
   }
   std::printf("단계별 ms/solve: %s\n", stages.c_str());
+  if (diagnostics.remembered_sightings > 0) {
+    const double slots = static_cast<double>(diagnostics.anchors);
+    const double bytes = slots * 16.0 * (4.0 + 8.0 + 4.0) + slots * 4.0;
+    std::printf(
+      "관측별 포즈: %ld개 기억, 앵커 %ld, 포즈 이력 %ld, 저장 %.1f MB, 재구성 %.2f ms\n",
+      diagnostics.remembered_sightings, diagnostics.anchors,
+      diagnostics.pose_history, bytes / 1048576.0, diagnostics.rebuild_ms);
+    std::printf("  재구성이 앵커를 옮기는 거리 평균 %.4f m, 관측 포즈 폭 %.1f\n",
+      diagnostics.rebuild_shift_m, diagnostics.sighting_span);
+    std::printf("  광도 step: 적용 %ld / 기회 %ld, 맵없음 %ld\n",
+      diagnostics.photometric_uses, diagnostics.photometric_chances,
+      diagnostics.photometric_mapless);
+    std::printf("  포즈그래프: 재방문 구속 %ld개, 포즈 평균 이동 %.4f m\n",
+      diagnostics.pose_graph_loops, diagnostics.pose_graph_shift_m);
+  }
+  for (size_t i = 0; i < diagnostics.pair_radial_samples.size(); ++i) {
+    if (diagnostics.pair_radial_samples[i] == 0) {
+      continue;
+    }
+    std::printf(
+      "2프레임 dh/h[%zu]: %+.5f  n=%ld\n",
+      i, diagnostics.pair_radial[i], diagnostics.pair_radial_samples[i]);
+  }
   for (size_t i = 0; i < diagnostics.radial_samples.size(); ++i) {
     if (diagnostics.radial_samples[i] == 0) {
       continue;

@@ -135,10 +135,17 @@ Eigen::Matrix<double, Eigen::Dynamic, 3> pixels_to_bearings(
 // It is not a claim about where the camera is -- the extrinsics have to keep
 // matching the sensor kit -- but about how far the ground is measured to have
 // moved once the flow and this projection are both done with.
+//
+// `pitch_centre_x` is where along the body the tilt is taken to pivot. The
+// height that sets every range is the mount's height above the road, and a
+// body pitching by alpha moves a mount `L` ahead of the pivot down by
+// `L sin(alpha)`. Leaving this at zero pivots about base_link's origin at road
+// level, which puts the whole 3.694 m of the front mount into the lever.
 void pixels_to_ground(
   const Points2 & pixels, const CameraModel & model, double max_distance,
   double min_distance, const Eigen::Matrix3d * tilt, double range_scale,
-  Points2 & ground_out, Mask & valid_out);
+  Points2 & ground_out, Mask & valid_out, double pitch_centre_x = 0.0,
+  bool height_from_tilt = true);
 
 // Same, allocating its own results. The caller that runs this every solve
 // should prefer the form above and keep its buffers.

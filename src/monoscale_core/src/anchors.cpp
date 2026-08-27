@@ -20,6 +20,14 @@ GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings, int sources)
   information_.setZero(capacity);
   identifier_.setConstant(capacity, -1);
   owner_.setConstant(capacity, sources_, -1);
+  sight_pose_.setConstant(capacity, kRemember, -1);
+  sight_body_.setZero(capacity, 2 * kRemember);
+  sight_weight_.setZero(capacity, kRemember);
+  sight_source_.setConstant(capacity, kRemember, -1);
+  best_pose_.setConstant(capacity, sources_, -1);
+  best_body_.setZero(capacity, 2 * sources_);
+  best_weight_.setZero(capacity, sources_);
+  sight_count_.setZero(capacity);
   founder_.setConstant(capacity, -1);
   founded_path_.setZero(capacity);
   free_.reserve(static_cast<size_t>(capacity));
@@ -39,6 +47,52 @@ int64_t GroundAnchorMap::slot_of(int source, int64_t identity) const
   const auto & table = by_id_[static_cast<size_t>(source)];
   const auto found = table.find(identity);
   return found == table.end() ? -1 : found->second;
+}
+
+// Bearing off the heading crossed with range, in the vehicle's frame.
+int GroundAnchorMap::polar_cell_of(double x, double y) const
+{
+  const double c = std::cos(yaw_);
+  const double s = std::sin(yaw_);
+  const double dx = x - at_x_;
+  const double dy = y - at_y_;
+  const double f = c * dx + s * dy;
+  const double l = -s * dx + c * dy;
+  const double range = std::hypot(f, l);
+  const double bearing = std::abs(std::atan2(l, f)) * 180.0 / M_PI;
+  const int sectors = std::max(
+    1, static_cast<int>(std::ceil(180.0 / std::max(settings_.polar_sector_deg, 1e-3))));
+  const int rings = std::max(settings_.polar_rings, 1);
+  const int sector = std::min(
+    sectors - 1, static_cast<int>(bearing / std::max(settings_.polar_sector_deg, 1e-3)));
+  const int ring = std::min(
+    rings - 1, static_cast<int>(range / std::max(settings_.polar_ring_m, 1e-3)));
+  return sector * rings + ring;
+}
+
+void GroundAnchorMap::rebuild_polar_counts()
+{
+  const int sectors = std::max(
+    1, static_cast<int>(std::ceil(180.0 / std::max(settings_.polar_sector_deg, 1e-3))));
+  const int rings = std::max(settings_.polar_rings, 1);
+  polar_.assign(static_cast<size_t>(sectors * rings), 0);
+  for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
+    if (identifier_(slot) < 0) {
+      continue;
+    }
+    const int cell = polar_cell_of(position_(slot, 0), position_(slot, 1));
+    if (cell >= 0 && cell < static_cast<int>(polar_.size())) {
+      ++polar_[static_cast<size_t>(cell)];
+    }
+  }
+}
+
+int64_t GroundAnchorMap::density_cell_of(double x, double y) const
+{
+  const double size = std::max(settings_.density_cell_m, 1e-3);
+  const int64_t cx = static_cast<int64_t>(std::floor(x / size));
+  const int64_t cy = static_cast<int64_t>(std::floor(y / size));
+  return cx * 73856093LL ^ cy * 19349663LL;
 }
 
 int64_t GroundAnchorMap::cell_of(double x, double y) const
@@ -126,6 +180,28 @@ int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
   return best;
 }
 
+// What this anchor is worth for measuring motion along the heading.
+double GroundAnchorMap::longitudinal_information(int64_t slot) const
+{
+  if (!(lens_height_ > 1e-6)) {
+    return 1.0;
+  }
+  const double c = std::cos(yaw_);
+  const double s = std::sin(yaw_);
+  const double dx = position_(slot, 0) - at_x_;
+  const double dy = position_(slot, 1) - at_y_;
+  const double f = c * dx + s * dy;
+  const double l = -s * dx + c * dy;
+  const double range = std::hypot(f, l);
+  if (range < 1e-6) {
+    return 1.0;
+  }
+  const double radial = (range * range + lens_height_ * lens_height_) / lens_height_;
+  const double cosb = f / range;
+  const double sinb = l / range;
+  return cosb * cosb / (radial * radial) + sinb * sinb / (range * range);
+}
+
 double GroundAnchorMap::weight_at(int64_t slot) const
 {
   double count = settings_.weight_by_information
@@ -155,11 +231,79 @@ double GroundAnchorMap::weight_at(int64_t slot) const
   return count / std::max(variance_(slot), 1e-4);
 }
 
+void GroundAnchorMap::polar(
+  double x, double y, double yaw, std::vector<std::array<double, 4>> & out) const
+{
+  out.clear();
+  out.reserve(static_cast<size_t>(live_));
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
+    if (identifier_(slot) < 0) {
+      continue;
+    }
+    const double dx = position_(slot, 0) - x;
+    const double dy = position_(slot, 1) - y;
+    const double f = c * dx + s * dy;
+    const double l = -s * dx + c * dy;
+    out.push_back(
+      {std::hypot(f, l), std::atan2(l, f), weight_at(slot),
+        static_cast<double>(frame_ - seen_(slot))});
+  }
+}
+
+void GroundAnchorMap::extent(
+  double x, double y, double yaw, double band, int & within, double & along,
+  double & across) const
+{
+  within = 0;
+  double sa = 0.0;
+  double sc = 0.0;
+  double sa2 = 0.0;
+  double sc2 = 0.0;
+  double n = 0.0;
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
+    if (identifier_(slot) < 0) {
+      continue;
+    }
+    const double dx = position_(slot, 0) - x;
+    const double dy = position_(slot, 1) - y;
+    const double f = c * dx + s * dy;
+    const double l = -s * dx + c * dy;
+    if (std::hypot(dx, dy) <= band) {
+      ++within;
+    }
+    sa += f; sc += l; sa2 += f * f; sc2 += l * l; n += 1.0;
+  }
+  if (n > 1.0) {
+    // Mean offset first, spread second: a map that is a tight cluster far
+    // behind and a map that is a window around the vehicle look the same in
+    // the spread alone.
+    along = sa / n;
+    across = std::sqrt(std::max(sa2 / n - along * along, 0.0));
+  }
+}
+
 void GroundAnchorMap::anchored(int source, const Identities & ids, Mask & out) const
 {
   out.resize(ids.size());
   for (Eigen::Index i = 0; i < ids.size(); ++i) {
-    out(i) = slot_of(source, ids(i)) >= 0;
+    const int64_t slot = slot_of(source, ids(i));
+    // Maturity is only asked once the map is full. Before that it holds nothing
+    // to be choosy with, and refusing its young anchors deadlocks the start:
+    // `warming_up = !map_ready_ && !aligned_from_map` means the estimator
+    // accepts no update until the map path has answered once, so a gate applied
+    // from frame zero gives 899 solves and **zero** estimates.
+    // Full means the map has ever reached capacity, not that no slot is
+    // free right now: with eviction on, slots are freed and refilled every
+    // update, so `free_.empty()` is false at the moment this is asked and
+    // the gate never fires.
+    const bool full = saturated_;
+    out(i) = slot >= 0 &&
+      (!full || settings_.anchored_min_observations <= 0 ||
+      observation_(slot) >= settings_.anchored_min_observations);
   }
 }
 
@@ -179,6 +323,77 @@ void GroundAnchorMap::anchor_view(
     world_out(i, 0) = position_(slot, 0);
     world_out(i, 1) = position_(slot, 1);
     weights_out(i) = weight_at(slot);
+  }
+}
+
+void GroundAnchorMap::update(
+  int source, const Identities & ids, const Points2 & world_points, bool allow_new,
+  const Weights & information, const Points2 & body_points, int32_t pose_index)
+{
+  update(source, ids, world_points, allow_new, information);
+  const Eigen::Index count = ids.size();
+  if (body_points.rows() != count) {
+    return;
+  }
+  const bool weighted = information.size() == count;
+  for (Eigen::Index i = 0; i < count; ++i) {
+    const int64_t slot = slot_of(source, ids(i));
+    if (slot < 0 || slot >= sight_pose_.rows()) {
+      continue;
+    }
+    const int32_t at = sight_count_(slot) % kRemember;
+    sight_pose_(slot, at) = pose_index;
+    sight_body_(slot, 2 * at) = static_cast<float>(body_points(i, 0));
+    sight_body_(slot, 2 * at + 1) = static_cast<float>(body_points(i, 1));
+    sight_weight_(slot, at) = static_cast<float>(weighted ? information(i) : 1.0);
+    sight_source_(slot, at) = source;
+    const float strength = static_cast<float>(weighted ? information(i) : 1.0);
+    if (best_pose_(slot, source) < 0 || strength > best_weight_(slot, source)) {
+      best_pose_(slot, source) = pose_index;
+      best_body_(slot, 2 * source) = static_cast<float>(body_points(i, 0));
+      best_body_(slot, 2 * source + 1) = static_cast<float>(body_points(i, 1));
+      best_weight_(slot, source) = strength;
+    }
+    sight_count_(slot) = sight_count_(slot) + 1;
+    ++remembered_;
+  }
+}
+
+void GroundAnchorMap::rebuild(const std::vector<std::array<double, 3>> & poses)
+{
+  for (Eigen::Index slot = 0; slot < position_.rows(); ++slot) {
+    if (identifier_(slot) < 0 || sight_count_(slot) <= 0) {
+      continue;
+    }
+    const int32_t held = std::min<int32_t>(sight_count_(slot), kRemember);
+    double wx = 0.0;
+    double wy = 0.0;
+    double total = 0.0;
+    for (int32_t k = 0; k < held; ++k) {
+      const int32_t index = sight_pose_(slot, k);
+      if (index < 0 || static_cast<size_t>(index) >= poses.size()) {
+        continue;
+      }
+      const auto & p = poses[static_cast<size_t>(index)];
+      const double c = std::cos(p[2]);
+      const double s = std::sin(p[2]);
+      const double bx = sight_body_(slot, 2 * k);
+      const double by = sight_body_(slot, 2 * k + 1);
+      const double w = std::max<double>(sight_weight_(slot, k), 1e-12);
+      wx += w * (p[0] + c * bx - s * by);
+      wy += w * (p[1] + s * bx + c * by);
+      total += w;
+    }
+    if (total > 0.0) {
+      const double nx = wx / total;
+      const double ny = wy / total;
+      rebuild_shift_ += std::hypot(nx - position_(slot, 0), ny - position_(slot, 1));
+      ++rebuild_slots_;
+      if (!settings_.rebuild_measure_only) {
+        position_(slot, 0) = nx;
+        position_(slot, 1) = ny;
+      }
+    }
   }
 }
 
@@ -292,27 +507,59 @@ void GroundAnchorMap::update(
   // cannot be registered against again.
   if (settings_.evict_for_new && allow_new && fresh.size() > free_.size()) {
     const size_t needed = fresh.size() - free_.size();
-    std::vector<std::pair<int64_t, int64_t>> oldest;
-    oldest.reserve(static_cast<size_t>(live_));
+    std::vector<std::pair<double, int64_t>> ranked;
+    ranked.reserve(static_cast<size_t>(live_));
     for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
-      if (identifier_(slot) >= 0 && seen_(slot) != frame_) {
-        oldest.emplace_back(seen_(slot), slot);
+      if (identifier_(slot) >= 0 &&
+        frame_ - seen_(slot) >= std::max<int64_t>(settings_.evict_unseen_solves, 1))
+      {
+        double rank = static_cast<double>(seen_(slot));
+        if (settings_.evict_by_information) {
+          rank = weight_at(slot) * longitudinal_information(slot);
+        } else if (settings_.evict_by_weight) {
+          rank = weight_at(slot);
+        }
+        ranked.emplace_back(rank, slot);
       }
     }
-    const size_t give = std::min(needed, oldest.size());
+    const size_t give = std::min(needed, ranked.size());
     if (give > 0) {
       std::nth_element(
-        oldest.begin(), oldest.begin() + static_cast<std::ptrdiff_t>(give), oldest.end(),
+        ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(give), ranked.end(),
         [](const auto & a, const auto & b) {return a.first < b.first;});
       for (size_t n = 0; n < give; ++n) {
-        forget(oldest[n].second);
+        forget(ranked[n].second);
       }
     }
   }
-  const size_t room = std::min(fresh.size(), free_.size());
+  if (live_ >= settings_.max_anchors) {
+    saturated_ = true;
+  }
+  size_t room = std::min(fresh.size(), free_.size());
+  if (settings_.admit_per_update > 0) {
+    room = std::min(room, static_cast<size_t>(settings_.admit_per_update));
+  }
   if (room > 0) {
     for (size_t n = 0; n < room; ++n) {
       const Eigen::Index i = fresh[n];
+      // Refuse a birth into a cell that already holds its share. Nothing is
+      // removed to make space; the ground here is already described.
+      if (settings_.density_quota > 0) {
+        const int64_t cell = density_cell_of(world_points(i, 0), world_points(i, 1));
+        const auto held = density_.find(cell);
+        if (held != density_.end() && held->second >= settings_.density_quota) {
+          continue;
+        }
+      }
+      int polar_cell = -1;
+      if (settings_.polar_quota > 0 && !polar_.empty()) {
+        polar_cell = polar_cell_of(world_points(i, 0), world_points(i, 1));
+        if (polar_cell >= 0 && polar_cell < static_cast<int>(polar_.size()) &&
+          polar_[static_cast<size_t>(polar_cell)] >= settings_.polar_quota)
+        {
+          continue;
+        }
+      }
       const int64_t slot = free_.back();
       free_.pop_back();
       position_(slot, 0) = world_points(i, 0);
@@ -330,6 +577,10 @@ void GroundAnchorMap::update(
       founded_path_(slot) = path_;
       by_id_[static_cast<size_t>(source)][ids(i)] = slot;
       grid_insert(slot);
+      ++density_[density_cell_of(position_(slot, 0), position_(slot, 1))];
+      if (polar_cell >= 0 && polar_cell < static_cast<int>(polar_.size())) {
+        ++polar_[static_cast<size_t>(polar_cell)];
+      }
       ++live_;
     }
   }
@@ -347,9 +598,26 @@ void GroundAnchorMap::forget(int64_t slot)
     owner_(slot, source) = -1;
   }
   grid_erase(slot);
+  if (settings_.density_quota > 0) {
+    const auto held = density_.find(
+      density_cell_of(position_(slot, 0), position_(slot, 1)));
+    if (held != density_.end() && --held->second <= 0) {
+      density_.erase(held);
+    }
+  }
   founder_(slot) = -1;
   identifier_(slot) = -1;
   observation_(slot) = 0;
+  // The remembered sightings belong to the anchor that just died, not to
+  // whatever is put in this slot next. Leaving them makes a rebuild place the
+  // new anchor where the old one was, which measured as eighteen metres.
+  if (sight_count_.size() > slot) {
+    sight_count_(slot) = 0;
+    sight_pose_.row(slot).setConstant(-1);
+    sight_source_.row(slot).setConstant(-1);
+    best_pose_.row(slot).setConstant(-1);
+    best_weight_.row(slot).setZero();
+  }
   free_.push_back(slot);
   --live_;
 }
@@ -361,12 +629,27 @@ void GroundAnchorMap::prune()
       continue;
     }
     const bool stale = frame_ - seen_(slot) > settings_.max_age_frames;
+    // Behind and receding: it cannot be observed again, and it measures nothing
+    // about motion along the heading.
+    bool astern = false;
+    if (settings_.forget_beyond_bearing_deg > 0.0) {
+      const double c = std::cos(yaw_);
+      const double s = std::sin(yaw_);
+      const double dx = position_(slot, 0) - at_x_;
+      const double dy = position_(slot, 1) - at_y_;
+      const double f = c * dx + s * dy;
+      const double l = -s * dx + c * dy;
+      const double reach = std::hypot(f, l);
+      astern = reach > std::max(settings_.forget_beyond_range_m, 1e-6) &&
+        std::abs(std::atan2(l, f)) >
+        settings_.forget_beyond_bearing_deg * M_PI / 180.0;
+    }
     // Given a few sightings to settle, an anchor that still scatters is not a
     // landmark and should not be registered against.
     const bool scattered = settings_.select_by_consistency &&
       observation_(slot) >= settings_.trial_observations &&
       variance_(slot) > settings_.max_variance;
-    if (!stale && !scattered) {
+    if (!stale && !scattered && !astern) {
       continue;
     }
     if (scattered && !stale) {
@@ -444,7 +727,8 @@ std::optional<double> GroundAnchorMap::weight_of(int64_t identity) const
 std::optional<AnchorAlignment> align_to_anchors(
   const Points2 & body_points, const Points2 & world_points, const Weights & weights_in,
   double yaw, double threshold, int min_inliers, bool refine_yaw,
-  const Eigen::Vector2d & origin, double radial_min_range, double softness,
+  const Eigen::Vector2d & origin, double radial_min_range, double lens_height,
+  double softness,
   const Eigen::Vector2d * translation_prior, int restarts, double ambiguity,
   const Eigen::Vector2d * inertial_hop, double inertial_gate,
   const Weights & residual_scale)
@@ -805,6 +1089,30 @@ std::optional<AnchorAlignment> align_to_anchors(
       result.radial_linear = b1 / s11;
       result.radial_reference = reference;
     }
+    // And again with both bases, so a pitch is not read as a height.
+    if (lens_height > 1e-6) {
+      double a11 = 0.0;
+      double a12 = 0.0;
+      double a22 = 0.0;
+      double c1 = 0.0;
+      double c2 = 0.0;
+      for (size_t i = 0; i < ranges.size(); ++i) {
+        const double w = radial_weight[i];
+        const double u = ranges[i] / reference;
+        const double v = (ranges[i] * ranges[i] + lens_height * lens_height) /
+          (lens_height * reference);
+        a11 += w * u * u;
+        a12 += w * u * v;
+        a22 += w * v * v;
+        c1 += w * u * radial[i];
+        c2 += w * v * radial[i];
+      }
+      const double det = a11 * a22 - a12 * a12;
+      if (std::abs(det) > 1e-12) {
+        result.radial_height = (c1 * a22 - c2 * a12) / det;
+        result.radial_pitch = (a11 * c2 - a12 * c1) / det;
+      }
+    }
   }
   return result;
 }
@@ -835,6 +1143,81 @@ std::optional<CameraTranslation> fuse_by_precision(
   fused.y = y / total;
   fused.count = count;
   return fused;
+}
+
+
+double GroundAnchorMap::sighting_span() const
+{
+  double total = 0.0;
+  int64_t n = 0;
+  for (Eigen::Index slot = 0; slot < sight_count_.size(); ++slot) {
+    if (identifier_(slot) < 0 || sight_count_(slot) < 2) {
+      continue;
+    }
+    const int32_t held = std::min<int32_t>(sight_count_(slot), kRemember);
+    int32_t low = std::numeric_limits<int32_t>::max();
+    int32_t high = -1;
+    for (int32_t k = 0; k < held; ++k) {
+      const int32_t index = sight_pose_(slot, k);
+      if (index < 0) {continue;}
+      low = std::min(low, index);
+      high = std::max(high, index);
+    }
+    if (high >= low) {total += high - low; ++n;}
+  }
+  return n > 0 ? total / static_cast<double>(n) : 0.0;
+}
+
+std::vector<GroundAnchorMap::Revisit> GroundAnchorMap::revisits() const
+{
+  std::vector<Revisit> out;
+  if (sources_ < 2 || sight_count_.size() == 0) {
+    return out;
+  }
+  for (Eigen::Index slot = 0; slot < sight_count_.size(); ++slot) {
+    if (identifier_(slot) < 0 || sight_count_(slot) < 2) {
+      continue;
+    }
+    // Two sources have bound this slot only if the link found the same ground
+    // twice. `owner_` records who; the sightings themselves do not carry a
+    // source, so the pair is taken as the earliest and latest remembered
+    // sighting, which is the widest baseline the slot holds.
+    int bound = 0;
+    for (int source = 0; source < sources_; ++source) {
+      bound += owner_(slot, source) >= 0 ? 1 : 0;
+    }
+    if (bound < 2) {
+      continue;
+    }
+    // The two cameras' strongest sightings of this slot, ordered in time.
+    int32_t first_source = -1;
+    int32_t second_source = -1;
+    for (int source = 0; source < sources_; ++source) {
+      if (best_pose_(slot, source) < 0) {continue;}
+      if (first_source < 0 || best_pose_(slot, source) < best_pose_(slot, first_source)) {
+        second_source = first_source;
+        first_source = source;
+      } else if (second_source < 0 || best_pose_(slot, source) > best_pose_(slot, second_source)) {
+        second_source = source;
+      }
+    }
+    if (first_source < 0 || second_source < 0 ||
+      best_pose_(slot, first_source) >= best_pose_(slot, second_source))
+    {
+      continue;
+    }
+    Revisit r;
+    r.from = best_pose_(slot, first_source);
+    r.to = best_pose_(slot, second_source);
+    r.bx_from = best_body_(slot, 2 * first_source);
+    r.by_from = best_body_(slot, 2 * first_source + 1);
+    r.bx_to = best_body_(slot, 2 * second_source);
+    r.by_to = best_body_(slot, 2 * second_source + 1);
+    r.weight = std::min<double>(best_weight_(slot, first_source),
+      best_weight_(slot, second_source));
+    out.push_back(r);
+  }
+  return out;
 }
 
 }  // namespace monoscale
