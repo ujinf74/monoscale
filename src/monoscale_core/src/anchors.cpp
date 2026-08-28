@@ -136,6 +136,7 @@ int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
   if (settings_.link_radius_m <= 0.0) {
     return -1;
   }
+
   const double size = std::max(settings_.link_radius_m, 1e-3);
   const double limit = settings_.link_radius_m * settings_.link_radius_m;
   const int64_t cx = static_cast<int64_t>(std::floor(x / size));
@@ -167,6 +168,11 @@ int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
         {
           continue;
         }
+        if (settings_.link_cross_source_only &&
+          founder_(slot) == static_cast<int64_t>(source))
+        {
+          continue;
+        }
         const double ex = position_(slot, 0) - x;
         const double ey = position_(slot, 1) - y;
         const double distance = ex * ex + ey * ey;
@@ -181,6 +187,27 @@ int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
 }
 
 // What this anchor is worth for measuring motion along the heading.
+double GroundAnchorMap::longitudinal_information_at(double x, double y) const
+{
+  if (!(lens_height_ > 1e-6)) {
+    return 1.0;
+  }
+  const double c = std::cos(yaw_);
+  const double s = std::sin(yaw_);
+  const double dx = x - at_x_;
+  const double dy = y - at_y_;
+  const double f = c * dx + s * dy;
+  const double l = -s * dx + c * dy;
+  const double range = std::hypot(f, l);
+  if (range < 1e-6) {
+    return 1.0;
+  }
+  const double radial = (range * range + lens_height_ * lens_height_) / lens_height_;
+  const double cosb = f / range;
+  const double sinb = l / range;
+  return cosb * cosb / (radial * radial) + sinb * sinb / (range * range);
+}
+
 double GroundAnchorMap::longitudinal_information(int64_t slot) const
 {
   if (!(lens_height_ > 1e-6)) {
@@ -548,7 +575,41 @@ void GroundAnchorMap::update(
         const int64_t cell = density_cell_of(world_points(i, 0), world_points(i, 1));
         const auto held = density_.find(cell);
         if (held != density_.end() && held->second >= settings_.density_quota) {
-          continue;
+          // The cell is full. Refusing here keeps whatever it already has,
+          // which after a few seconds of driving is ground the vehicle has
+          // passed -- the least informative place an anchor can be. Weigh the
+          // candidate against the cell's poorest instead.
+          bool admitted = false;
+          if (settings_.density_replace_margin > 0.0) {
+            const auto list = density_slots_.find(cell);
+            if (list != density_slots_.end() && !list->second.empty()) {
+              int64_t worst = -1;
+              double worst_value = std::numeric_limits<double>::infinity();
+              for (const int64_t held_slot : list->second) {
+                if (identifier_(held_slot) < 0) {
+                  continue;
+                }
+                const double value = longitudinal_information(held_slot);
+                if (value < worst_value) {
+                  worst_value = value;
+                  worst = held_slot;
+                }
+              }
+              const double candidate =
+                longitudinal_information_at(world_points(i, 0), world_points(i, 1));
+              if (worst >= 0 &&
+                candidate > settings_.density_replace_margin * worst_value)
+              {
+                forget(worst);
+                free_.push_back(worst);
+                --live_;
+                admitted = true;
+              }
+            }
+          }
+          if (!admitted) {
+            continue;
+          }
         }
       }
       int polar_cell = -1;
@@ -577,7 +638,11 @@ void GroundAnchorMap::update(
       founded_path_(slot) = path_;
       by_id_[static_cast<size_t>(source)][ids(i)] = slot;
       grid_insert(slot);
-      ++density_[density_cell_of(position_(slot, 0), position_(slot, 1))];
+      const int64_t born_cell = density_cell_of(position_(slot, 0), position_(slot, 1));
+      ++density_[born_cell];
+      if (settings_.density_replace_margin > 0.0) {
+        density_slots_[born_cell].push_back(slot);
+      }
       if (polar_cell >= 0 && polar_cell < static_cast<int>(polar_.size())) {
         ++polar_[static_cast<size_t>(polar_cell)];
       }
@@ -603,6 +668,17 @@ void GroundAnchorMap::forget(int64_t slot)
       density_cell_of(position_(slot, 0), position_(slot, 1)));
     if (held != density_.end() && --held->second <= 0) {
       density_.erase(held);
+    }
+    if (settings_.density_replace_margin > 0.0) {
+      const auto list = density_slots_.find(
+        density_cell_of(position_(slot, 0), position_(slot, 1)));
+      if (list != density_slots_.end()) {
+        auto & slots = list->second;
+        slots.erase(std::remove(slots.begin(), slots.end(), slot), slots.end());
+        if (slots.empty()) {
+          density_slots_.erase(list);
+        }
+      }
     }
   }
   founder_(slot) = -1;
@@ -731,7 +807,7 @@ std::optional<AnchorAlignment> align_to_anchors(
   double softness,
   const Eigen::Vector2d * translation_prior, int restarts, double ambiguity,
   const Eigen::Vector2d * inertial_hop, double inertial_gate,
-  const Weights & residual_scale)
+  const Weights & residual_scale, bool bearing_nonholonomic)
 {
   const Eigen::Index count = body_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || world_points.rows() != count) {
@@ -1028,6 +1104,13 @@ std::optional<AnchorAlignment> align_to_anchors(
   std::vector<double> radial_weight;
   double range_total = 0.0;
   double range_weight = 0.0;
+  // The bearing-domain normal equations, accumulated in the same pass. Five
+  // unknowns: three of rotation and the two in-plane translations, which are
+  // carried so that whatever the ground fit left behind lands there instead of
+  // leaking into the angles.
+  Eigen::Matrix<double, 5, 5> bearing_normal = Eigen::Matrix<double, 5, 5>::Zero();
+  Eigen::Matrix<double, 5, 1> bearing_rhs = Eigen::Matrix<double, 5, 1>::Zero();
+  int bearing_terms = 0;
   ranges.reserve(static_cast<size_t>(count));
   radial.reserve(static_cast<size_t>(count));
   radial_weight.reserve(static_cast<size_t>(count));
@@ -1062,6 +1145,38 @@ std::optional<AnchorAlignment> align_to_anchors(
     radial_weight.push_back(w);
     range_total += w * range;
     range_weight += w;
+
+    if (lens_height > 1e-6) {
+      const double rho = std::hypot(range, lens_height);
+      const Eigen::Vector3d bearing(bx / rho, by / rho, -lens_height / rho);
+      // Only the part of a ground residual that lies across the line of sight
+      // moves a bearing; the part along it is a range error and is invisible
+      // here, which is exactly the separation being used.
+      const Eigen::Vector3d ground(body_rx, body_ry, 0.0);
+      const Eigen::Vector3d residual =
+        (ground - bearing * bearing.dot(ground)) / rho;
+      Eigen::Matrix<double, 3, 5> basis;
+      for (int k = 0; k < 3; ++k) {
+        Eigen::Vector3d axis = Eigen::Vector3d::Zero();
+        axis(k) = 1.0;
+        basis.col(k) = -axis.cross(bearing);
+      }
+      for (int k = 0; k < 2; ++k) {
+        Eigen::Vector3d axis = Eigen::Vector3d::Zero();
+        axis(k) = 1.0;
+        basis.col(3 + k) = -(axis - bearing * bearing.dot(axis)) / rho;
+      }
+      if (bearing_nonholonomic) {
+        // A yaw about the axle carries the lens sideways by its own lever, so
+        // the two columns become one; the sideways column then has nothing left
+        // to describe and is held at zero rather than fitted.
+        basis.col(2) += origin.x() * basis.col(4);
+        basis.col(4).setZero();
+      }
+      bearing_normal += w * basis.transpose() * basis;
+      bearing_rhs += w * basis.transpose() * residual;
+      ++bearing_terms;
+    }
   }
   if (kept < min_inliers) {
     return std::nullopt;
@@ -1070,6 +1185,40 @@ std::optional<AnchorAlignment> align_to_anchors(
   result.spread = std::sqrt(squared / static_cast<double>(kept));
   result.yaw = yaw;
   result.yaw_sigma = applied;
+
+  // The angles, from the sphere. Fitted before the ground-domain regression
+  // below because it is the one that is entitled to them: that one reports a
+  // pitch too, but off a pair of bases that are 98-99 per cent collinear.
+  if (bearing_terms >= 8) {
+    if (bearing_nonholonomic) {
+      // The zeroed column leaves a singular direction; pin it so the solve is
+      // of the four that remain.
+      bearing_normal(4, 4) = 1.0;
+    }
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 5, 5>> solver(bearing_normal);
+    const double smallest = solver.eigenvalues()(0);
+    const double largest = solver.eigenvalues()(4);
+    // A fit standing on a direction the anchors do not span is not a
+    // measurement of anything. The population turns over constantly, so this
+    // fires on its own where the geometry is thin rather than needing a count.
+    if (smallest > 1e-12 && largest / smallest < 1e6) {
+      const Eigen::Matrix<double, 5, 1> fit = bearing_normal.ldlt().solve(bearing_rhs);
+      if (fit.allFinite()) {
+        // Negated on the way out. The bases above are `-w x b`, so the fit
+        // solves for the attitude the assumption is wrong BY; what a caller
+        // wants is the correction to apply, which is its opposite. Confirmed
+        // against the geometry rather than assumed: applying -0.0163 deg moves
+        // the front camera's hop bias by +0.054% where a direct numerical
+        // projection of that angle predicts +0.042%.
+        result.bearing_roll = -fit(0);
+        result.bearing_pitch = -fit(1);
+        result.bearing_yaw = -fit(2);
+        result.bearing_terms = bearing_terms;
+        result.bearing_tx = -fit(3);
+        result.bearing_ty = -fit(4);
+      }
+    }
+  }
 
   // Weighted least squares of the radial residual on the normalised range and
   // its square, with no constant term: a projection that is wrong about where

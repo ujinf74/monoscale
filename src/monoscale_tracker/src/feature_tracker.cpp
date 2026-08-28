@@ -195,7 +195,24 @@ struct GroundModel
   }
 
   // H for a forward step and a turn, both in the body frame.
-  cv::Matx33d homography(double step, double turn) const
+  //
+  // `pitch` and `roll` free the body's tilt over the same hop, and default to
+  // zero so every caller that only knows the turn is untouched. The order is
+  // Rz(turn) Ry(pitch) Rx(roll) -- the same order `AttitudeFilter::body_tilt`
+  // builds its matrix in, so a pitch measured here means what a pitch measured
+  // there means: nose-down positive, right-side-down positive.
+  //
+  // The tilt enters the rotation and not the translation, which is a choice.
+  // Rotating about base_link the way the turn does would add a lever of
+  // h dtheta -- 0.4 mm at 0.3 mrad, a tenth of a per cent of an 8 m/s step, and
+  // it would land straight on top of the one quantity this family is being
+  // asked to measure. That pivot is also known to be the wrong one: the body
+  // pitches about its centre of mass, not the rear axle, and pivoting at
+  // base_link was measured to inflate the front camera's hop 2-3x. Asserting no
+  // pivot leaves whatever translation the tilt really carries to be absorbed by
+  // `step`, which is the honest place for something the image cannot separate.
+  cv::Matx33d homography(
+    double step, double turn, double pitch = 0.0, double roll = 0.0) const
   {
     const cv::Matx33d r_cb = rotation_base_from_camera.t();
     const double c = std::cos(turn);
@@ -216,8 +233,67 @@ struct GroundModel
         }
       }
     }
-    return out;
+    if (pitch == 0.0 && roll == 0.0) {
+      // Returned before the tilt is applied rather than through an identity
+      // matrix, because r_cb * rotation_base_from_camera is an identity only to
+      // rounding and the deployed path must come out bit for bit as it did.
+      return out;
+    }
+    const double cp = std::cos(pitch);
+    const double sp = std::sin(pitch);
+    const double cr = std::cos(roll);
+    const double sr = std::sin(roll);
+    const cv::Matx33d tilt(
+      cp, sp * sr, sp * cr,
+      0.0, cr, -sr,
+      -sp, cp * sr, cp * cr);
+    // Applied on the left, in the second view's camera frame: the plane's
+    // normal belongs to the first view and is untouched by where the body ends
+    // up. What multiplies through to the translation is A t, which is the step
+    // seen from the tilted camera -- a rigid motion, just one whose rotation
+    // pivots at the lens.
+    return r_cb * tilt.t() * rotation_base_from_camera * out;
   }
+};
+
+// What the split bands measure. Near against far is a pitch and left against
+// right is a roll: a pitch error moves a ground point at range R by
+// (R^2+h^2)/h and a height error by R, so the two separate exactly, and roll
+// scales every range by the plane's sideways tilt at that lateral offset. Each
+// pair needs the geometry it sat at to become an angle, and the estimator
+// cannot work that out for itself because the region of interest lives here.
+struct RoadBands
+{
+  double near_step = std::numeric_limits<double>::quiet_NaN();
+  double far_step = std::numeric_limits<double>::quiet_NaN();
+  double near_curve = 0.0;
+  double far_curve = 0.0;
+  double left_step = std::numeric_limits<double>::quiet_NaN();
+  double right_step = std::numeric_limits<double>::quiet_NaN();
+  double near_range = std::numeric_limits<double>::quiet_NaN();
+  double far_range = std::numeric_limits<double>::quiet_NaN();
+  double left_lateral = std::numeric_limits<double>::quiet_NaN();
+  double right_lateral = std::numeric_limits<double>::quiet_NaN();
+  double near_forward = std::numeric_limits<double>::quiet_NaN();
+  double far_forward = std::numeric_limits<double>::quiet_NaN();
+};
+
+// What the four-parameter solve found, when it is asked to run.
+//
+// The bands above reach a pitch and a roll by comparing two one-parameter
+// answers taken over two halves of the region; this reaches them by letting one
+// fit over the whole region carry all four unknowns at once. The plane distance
+// is deliberately not among them: scaling the whole scene about the lens leaves
+// every bearing exactly where it was, so no photometric cost can see it.
+struct RoadSolve
+{
+  double step = std::numeric_limits<double>::quiet_NaN();   // metres over the hop
+  double yaw = std::numeric_limits<double>::quiet_NaN();    // radians, body
+  double pitch = std::numeric_limits<double>::quiet_NaN();
+  double roll = std::numeric_limits<double>::quiet_NaN();
+  double score = std::numeric_limits<double>::quiet_NaN();  // ZNCC at the answer
+  int iterations = 0;
+  bool ok = false;
 };
 
 struct TrackState
@@ -284,9 +360,12 @@ struct TrackState
   // How far apart the across-track tiles' answers are, relative to the step.
   // Large where something that is not the road is in the region.
   double road_spread = 0.0;
-  // The same step over the near and far halves of the band.
-  double road_near = std::numeric_limits<double>::quiet_NaN();
-  double road_far = std::numeric_limits<double>::quiet_NaN();
+  // The same step over the near and far halves of the band, and over its left
+  // and right halves.
+  RoadBands road_bands;
+  // The four-parameter answer, when `road_step_esm` asked for one. Its step
+  // replaces the search's; its three angles are what nothing else here emits.
+  RoadSolve road_esm;
   // Where the next frame's search starts. Smoothed, and never published.
   double road_bracket = std::numeric_limits<double>::quiet_NaN();
 
@@ -462,6 +541,13 @@ public:
     // Also measure the band in halves, so the plane offset and the two
     // mounting pitches can be solved for without truth.
     road_step_calibrate_ = declare_parameter<bool>("road_step_calibrate", false);
+    // Solve the step and the three body angles together, over the same
+    // photometric cost, instead of searching the step alone. Off leaves the
+    // one-dimensional bracket in sole charge and emits no angles at all.
+    road_step_esm_ = declare_parameter<bool>("road_step_esm", false);
+    // Half-width of the band sweep, in pixels of image motion.
+    road_step_band_window_px_ =
+      declare_parameter<double>("road_step_band_window_px", 3.0);
     // The near band, in fractions of the frame, and the default for a camera
     // that does not name its own. Ground from 0.34 m -- the closest row the
     // frame holds -- out to about 1.5 m, one lane wide.
@@ -855,18 +941,32 @@ private:
         if (road_step_calibrate_ && std::isfinite(found)) {
           measure_step_bands(
             model->second, state.previous_gray, gray, turn, reach, found,
-            band_for(name), state.road_near, state.road_far);
+            band_for(name), state.road_bands);
         }
-        if (std::isfinite(found)) {
+        // Then the same region again, with the three angles freed. The bands
+        // above are left where they are: they seed nothing here and they stay
+        // comparable frame to frame whether this runs or not.
+        double answer = found;
+        state.road_esm = RoadSolve();
+        if (road_step_esm_ && std::isfinite(found)) {
+          const double span = std::max(reach, 1e-3);
+          state.road_esm = solve_step_esm(
+            model->second, state.previous_gray, gray, turn, found * span,
+            band_for(name));
+          if (state.road_esm.ok) {
+            answer = state.road_esm.step / span;
+          }
+        }
+        if (std::isfinite(answer)) {
           // Two values, deliberately. The smoothed one brackets the next
           // frame's search, because a bracket wants the best guess available.
           // The raw one is what leaves this node, because smoothing an output
           // correlates consecutive measurements by construction, and correlated
           // hops accumulate as n instead of root n -- measured as the lag-1
           // autocorrelation rising from 0.66 to 0.90 while the bias fell.
-          state.road_step = found;
+          state.road_step = answer;
           state.road_bracket = std::isfinite(state.road_bracket)
-            ? state.road_bracket + 0.7 * (found - state.road_bracket) : found;
+            ? state.road_bracket + 0.7 * (answer - state.road_bracket) : answer;
         }
       }
     }
@@ -1019,7 +1119,7 @@ private:
       name, message, gray.size(), previous_points, current_points, identities,
       road_from_step_ && std::isfinite(state.road_step)
       ? state.road_step * reach : std::numeric_limits<double>::quiet_NaN(),
-      state.road_score, state.road_spread, state.road_near, state.road_far);
+      state.road_score, state.road_spread, state.road_bands, state.road_esm, reach);
 
     stage.publish = lap();
     const double spent = std::chrono::duration<double>(
@@ -1835,9 +1935,10 @@ private:
   // which is what makes scanning over steps affordable.
   void build_warp_roi(
     const GroundModel & model, double step, double turn, int width, int height,
-    const cv::Rect & roi, cv::Mat & map_x, cv::Mat & map_y) const
+    const cv::Rect & roi, cv::Mat & map_x, cv::Mat & map_y,
+    double pitch = 0.0, double roll = 0.0) const
   {
-    const cv::Matx33d inverse = model.homography(step, turn).inv();
+    const cv::Matx33d inverse = model.homography(step, turn, pitch, roll).inv();
     const int stride = std::max(road_step_stride_, 1);
     const int cols = std::max(roi.width / stride, 2);
     const int rows = std::max(roi.height / stride, 2);
@@ -2010,6 +2111,205 @@ private:
     return found;
   }
 
+  // Zero mean, unit norm. The squared distance between two regions normalised
+  // this way is exactly 2(1 - ZNCC), which turns the score the search maximises
+  // into a residual a least-squares step can descend.
+  static bool normalise(const cv::Mat & patch, cv::Mat & out)
+  {
+    cv::Scalar mean;
+    cv::Scalar deviation;
+    cv::meanStdDev(patch, mean, deviation);
+    const double norm = deviation[0] * std::sqrt(static_cast<double>(patch.total()));
+    if (!(norm > 1e-9)) {
+      return false;
+    }
+    patch.convertTo(out, CV_32F, 1.0 / norm, -mean[0] / norm);
+    return true;
+  }
+
+  // The region warped by one candidate (step, yaw, pitch, roll), normalised.
+  bool road_patch(
+    const GroundModel & model, const cv::Mat & previous, const cv::Rect & roi,
+    const double * candidate, cv::Mat & out) const
+  {
+    cv::Mat map_x;
+    cv::Mat map_y;
+    build_warp_roi(
+      model, candidate[0], candidate[1], previous.cols, previous.rows, roi,
+      map_x, map_y, candidate[2], candidate[3]);
+    cv::Mat warped;
+    cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    return normalise(warped, out);
+  }
+
+  // The same photometric cost, with three more unknowns freed.
+  //
+  // The search above holds the rotation at what the gyro said and the plane at
+  // where the mount says it is, and asks only how far the vehicle stepped. The
+  // induced homography H = R + t n^T/d has more in it than that: R is a full
+  // body rotation over the hop, and freeing its pitch and roll alongside its
+  // yaw gives one algorithm that measures all four from the same pixels -- the
+  // step, and the three angles the band split only reaches two of. The camera
+  // height is not among them, and not for want of asking: a scale change of the
+  // whole scene about the lens leaves every bearing exactly where it was, so
+  // no photometric cost anywhere can see `d`.
+  //
+  // Levenberg-Marquardt rather than a bare Gauss-Newton, because the four are
+  // correlated by construction. A nose-down pitch and a longer step move the
+  // near ground the same way and only the far ground tells them apart, so the
+  // normal matrix is near-singular in that direction and an undamped step walks
+  // out of the basin on the first iteration.
+  //
+  // Seeded from the search's own answer and the gyro's turn, and it keeps them
+  // if it cannot beat them: the caller falls back to the one-dimensional
+  // answer, which is the measurement this stack already trusts.
+  RoadSolve solve_step_esm(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double seed_step, const std::array<double, 4> & band) const
+  {
+    RoadSolve out;
+    const cv::Rect roi = cv::Rect(
+      cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
+      cv::Point(cvRound(band[2] * current.cols), cvRound(band[3] * current.rows))) &
+      cv::Rect(0, 0, current.cols, current.rows);
+    if (roi.width < 32 || roi.height < 32) {
+      return out;
+    }
+    cv::Mat target;
+    if (!normalise(current(roi), target)) {
+      return out;
+    }
+    // The geometry that turns a parameter into pixels, taken exactly as the
+    // band sweep takes it.
+    const double lens = std::abs(model.translation_base_from_camera[2]);
+    const double focal = model.fx * current.cols /
+      std::max(model.calibration_width, 1);
+    const double rbar = band_range(model, band, current.cols, current.rows);
+    if (!std::isfinite(rbar) || !(lens > 1e-6) || !(focal > 1.0)) {
+      return out;
+    }
+    const double px_per_m = focal * lens / (rbar * rbar + lens * lens);
+    if (!(px_per_m > 1e-6)) {
+      return out;
+    }
+    // Perturbations for the numerical Jacobian, sized in pixels of image motion
+    // and never as a fraction of the parameter. A metre of step at one metre of
+    // range moves the picture f h/(R^2+h^2) = 131 px and at five metres a
+    // fifteenth of that, so a percentage asks a different question at every
+    // speed and every range -- the trap the band sweep already documents. Half
+    // a pixel is the floor worth using: cv::remap quantises its map to 1/32 of
+    // a pixel, so half a pixel spans sixteen of those steps and the central
+    // difference is measuring the image rather than the quantiser. An angle
+    // moves an equidistant fisheye by at most f d(angle), which is where the
+    // three angular probes come from.
+    const double probe_px = 0.5;
+    const double probe[4] = {
+      probe_px / px_per_m, probe_px / focal, probe_px / focal, probe_px / focal};
+    // How far the fit may travel from where the search left it. The search's
+    // own bracket is 35% of the step, and an answer outside it is not a
+    // refinement of that answer; the angles are bounded by what one hop can
+    // physically hold, about three degrees at 30 ms.
+    const double step_limit = 0.35 * std::max(std::abs(seed_step), 0.01);
+    const double angle_limit = 0.05;
+
+    double at[4] = {seed_step, turn, 0.0, 0.0};
+    cv::Mat patch;
+    if (!road_patch(model, previous, roi, at, patch)) {
+      return out;
+    }
+    cv::Mat residual = patch - target;
+    double cost = residual.dot(residual);
+    const double seeded = cost;
+    double lambda = 1e-3;
+    int taken = 0;
+    for (int iteration = 0; iteration < 10; ++iteration) {
+      cv::Mat column[4];
+      bool built = true;
+      for (int k = 0; k < 4 && built; ++k) {
+        double up[4] = {at[0], at[1], at[2], at[3]};
+        double down[4] = {at[0], at[1], at[2], at[3]};
+        up[k] += probe[k];
+        down[k] -= probe[k];
+        cv::Mat ahead;
+        cv::Mat behind;
+        built = road_patch(model, previous, roi, up, ahead) &&
+          road_patch(model, previous, roi, down, behind);
+        if (built) {
+          column[k] = (ahead - behind) / (2.0 * probe[k]);
+        }
+      }
+      if (!built) {
+        break;
+      }
+      cv::Matx44d normal = cv::Matx44d::zeros();
+      cv::Vec4d gradient;
+      for (int i = 0; i < 4; ++i) {
+        gradient[i] = -column[i].dot(residual);
+        for (int j = i; j < 4; ++j) {
+          normal(i, j) = column[i].dot(column[j]);
+          normal(j, i) = normal(i, j);
+        }
+      }
+      cv::Vec4d delta(0.0, 0.0, 0.0, 0.0);
+      bool accepted = false;
+      for (int attempt = 0; attempt < 6 && !accepted; ++attempt) {
+        cv::Matx44d damped = normal;
+        for (int i = 0; i < 4; ++i) {
+          damped(i, i) += lambda * std::max(normal(i, i), 1e-12);
+        }
+        cv::Vec4d proposal;
+        if (cv::solve(damped, gradient, proposal, cv::DECOMP_CHOLESKY)) {
+          const double trial[4] = {
+            at[0] + proposal[0], at[1] + proposal[1],
+            at[2] + proposal[2], at[3] + proposal[3]};
+          const bool inside =
+            std::abs(trial[0] - seed_step) <= step_limit &&
+            std::abs(trial[1] - turn) <= angle_limit &&
+            std::abs(trial[2]) <= angle_limit && std::abs(trial[3]) <= angle_limit;
+          cv::Mat moved_patch;
+          if (inside && road_patch(model, previous, roi, trial, moved_patch)) {
+            cv::Mat next = moved_patch - target;
+            const double trial_cost = next.dot(next);
+            if (trial_cost < cost) {
+              std::copy(trial, trial + 4, at);
+              residual = next;
+              cost = trial_cost;
+              delta = proposal;
+              accepted = true;
+              ++taken;
+            }
+          }
+        }
+        if (!accepted) {
+          lambda = std::min(lambda * 10.0, 1e6);
+        }
+      }
+      if (!accepted) {
+        break;
+      }
+      lambda = std::max(lambda * 0.3, 1e-9);
+      // Converged when the last accepted step moved the picture by a hundredth
+      // of a pixel, which is well under what the map's own quantisation can
+      // represent -- past there the iteration is polishing rounding.
+      const double moved = std::abs(delta[0]) * px_per_m +
+        (std::abs(delta[1]) + std::abs(delta[2]) + std::abs(delta[3])) * focal;
+      if (moved < 0.01) {
+        break;
+      }
+    }
+    if (taken == 0 || !(cost < seeded)) {
+      return out;
+    }
+    out.step = at[0];
+    out.yaw = at[1];
+    out.pitch = at[2];
+    out.roll = at[3];
+    out.score = 1.0 - 0.5 * cost;
+    out.iterations = taken;
+    out.ok = true;
+    return out;
+  }
+
   // The same one-parameter family, but each across-track tile answers on its
   // own and the median of their answers is taken. Coarse then fine, as the
   // single-region path does, so precision is not traded for the robustness.
@@ -2062,6 +2362,67 @@ private:
            ? answers[half] : 0.5 * (answers[half - 1] + answers[half]);
   }
 
+  // Horizontal range from the lens to the ground under one pixel.
+  double ground_range(
+    const GroundModel & model, const cv::Point2f & at, int width, int height) const
+  {
+    const cv::Vec3d b = model.rotation_base_from_camera * model.bearing(at, width, height);
+    const double z = model.translation_base_from_camera[2];
+    if (!(z > 1e-6) || b[2] >= -1e-9) {
+      return std::numeric_limits<double>::quiet_NaN();
+    }
+    const double t = -z / b[2];
+    return t * std::hypot(b[0], b[1]);
+  }
+
+  // Mean range over a band's rows, at its centre column.
+  double band_range(
+    const GroundModel & model, const std::array<double, 4> & band, int width,
+    int height) const
+  {
+    const double x = 0.5 * (band[0] + band[2]) * width;
+    double total = 0.0;
+    int kept = 0;
+    for (int i = 0; i < 5; ++i) {
+      const double y = (band[1] + (band[3] - band[1]) * (i + 0.5) / 5.0) * height;
+      const double r = ground_range(
+        model, cv::Point2f(static_cast<float>(x), static_cast<float>(y)), width, height);
+      if (std::isfinite(r)) {
+        total += r;
+        ++kept;
+      }
+    }
+    return kept > 0 ? total / kept : std::numeric_limits<double>::quiet_NaN();
+  }
+
+  // Mean lateral offset over a band's columns, at its centre row, in base_link.
+  // Roll tilts the road sideways, so the effective height at lateral offset y
+  // is h + y phi and every range there scales by h / (h + y phi). What
+  // separates the two sides is therefore where they sit across the vehicle,
+  // exactly as range separates near from far. Taken in the body frame, not the
+  // image, so the rear mount's yaw of 180 degrees comes out in the sign.
+  // `axis` 0 is forward, 1 is lateral, both in base_link.
+  double band_offset(
+    const GroundModel & model, const std::array<double, 4> & band, int width,
+    int height, int axis) const
+  {
+    const double y = 0.5 * (band[1] + band[3]) * height;
+    const double z = model.translation_base_from_camera[2];
+    double total = 0.0;
+    int kept = 0;
+    for (int i = 0; i < 5; ++i) {
+      const double x = (band[0] + (band[2] - band[0]) * (i + 0.5) / 5.0) * width;
+      const cv::Vec3d b = model.rotation_base_from_camera * model.bearing(
+        cv::Point2f(static_cast<float>(x), static_cast<float>(y)), width, height);
+      if (!(z > 1e-6) || b[2] >= -1e-9) {
+        continue;
+      }
+      total += (-z / b[2]) * b[axis];
+      ++kept;
+    }
+    return kept > 0 ? total / kept : std::numeric_limits<double>::quiet_NaN();
+  }
+
   // The same step, but over the near half of the band and over the far half.
   //
   // Three unknowns set this camera chain's scale: one plane offset shared by
@@ -2087,14 +2448,25 @@ private:
   void measure_step_bands(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double reach, double centre, const std::array<double, 4> & band,
-    double & near_step, double & far_step) const
+    RoadBands & out) const
   {
     const double split = 0.5 * (band[1] + band[3]);
     std::array<double, 4> far_band{band[0], band[1], band[2], split};
     std::array<double, 4> near_band{band[0], split, band[2], band[3]};
+    // The across-track split, for roll. It cuts the same region the other way,
+    // so the two measurements are of one region and share its texture.
+    const double middle = 0.5 * (band[0] + band[2]);
+    std::array<double, 4> left_band{band[0], band[1], middle, band[3]};
+    std::array<double, 4> right_band{middle, band[1], band[2], band[3]};
     // A short sweep either side of the answer the whole band gave; the two
     // halves cannot disagree by much or the warp would not have fitted at all.
     const double span = std::max(reach, 1e-3);
+    // The peak's curvature comes out with it. Two bands are being compared by
+    // their interpolated peaks, and a parabola's bias depends on how sharp the
+    // peak is; sharpness depends on the texture, which differs between the
+    // bands and between road surfaces. If the two curvatures differ, part of
+    // what reads as pitch is the interpolation and not the geometry.
+    double curve_out = 0.0;
     const auto refine = [&](const std::array<double, 4> & use) {
         const cv::Rect roi = cv::Rect(
           cv::Point(cvRound(use[0] * current.cols), cvRound(use[1] * current.rows)),
@@ -2108,8 +2480,29 @@ private:
         // cent the spacing is half a per cent and the two halves come back
         // bit-identical, which is what the first version did. The peak has to
         // be interpolated, exactly as the main search does.
+        // The window is set by the image, not by the step.
+        //
+        // A percentage of the step was wrong: the alignment stops matching when
+        // the warp has moved the picture by a texture correlation length, which
+        // is a few pixels, and that is a fixed distance on the ground whatever
+        // the speed. At one metre of range a metre of step moves the image
+        // f h/(R^2+h^2) = 131 px, so three pixels is 23 mm -- while one per cent
+        // of the step is 2.5 mm at 8 m/s and 0.6 at 2. Sampling a twenty-fifth
+        // of the peak puts every sample on the apex: the fitted curvature fell
+        // from -0.0066 to -0.0004 between those two speeds, and with it the
+        // band comparison that the calibration rests on.
         const int samples = 9;
-        const double width = 0.01 * std::max(centre, 0.01);
+        const double rbar = band_range(model, use, current.cols, current.rows);
+        const double lens = std::abs(model.translation_base_from_camera[2]);
+        const double focal = model.fx * current.cols /
+          std::max(model.calibration_width, 1);
+        double width = 0.01 * std::max(centre, 0.01);
+        if (std::isfinite(rbar) && lens > 1e-6 && focal > 1.0) {
+          const double px_per_m = focal * lens / (rbar * rbar + lens * lens);
+          if (px_per_m > 1e-6) {
+            width = road_step_band_window_px_ / px_per_m / span;
+          }
+        }
         const double spacing = 2.0 * width / (samples - 1);
         std::vector<double> value(static_cast<size_t>(samples), -2.0);
         int at = 0;
@@ -2124,11 +2517,13 @@ private:
           }
         }
         double best = centre - width + spacing * at;
+        curve_out = 0.0;
         if (at > 0 && at + 1 < samples) {
           const double a = value[static_cast<size_t>(at - 1)];
           const double b = value[static_cast<size_t>(at)];
           const double c = value[static_cast<size_t>(at + 1)];
           const double curve = a - 2.0 * b + c;
+          curve_out = curve;
           if (std::abs(curve) > 1e-12) {
             const double shift = 0.5 * (a - c) / curve;
             if (std::abs(shift) <= 1.0) {
@@ -2138,8 +2533,23 @@ private:
         }
         return best;
       };
-    far_step = refine(far_band);
-    near_step = refine(near_band);
+    out.far_step = refine(far_band);
+    out.far_curve = curve_out;
+    out.near_step = refine(near_band);
+    out.near_curve = curve_out;
+    out.left_step = refine(left_band);
+    out.right_step = refine(right_band);
+    out.near_range = band_range(model, near_band, current.cols, current.rows);
+    out.far_range = band_range(model, far_band, current.cols, current.rows);
+    out.left_lateral = band_offset(model, left_band, current.cols, current.rows, 1);
+    out.right_lateral = band_offset(model, right_band, current.cols, current.rows, 1);
+    // The pitch is set by how far along the vehicle a band sits, not by how far
+    // away: a body pitched nose-down meets the ground ahead sooner and the
+    // ground astern later, so a rear mount's bands answer with the opposite
+    // sign. Taking the longitudinal offset in base_link puts that sign in the
+    // geometry instead of in a special case.
+    out.near_forward = band_offset(model, near_band, current.cols, current.rows, 0);
+    out.far_forward = band_offset(model, far_band, current.cols, current.rows, 0);
   }
 
   // One scalar, voted on by every correspondence this camera kept.
@@ -2381,7 +2791,7 @@ private:
     const std::vector<cv::Point2f> & previous_points,
     const std::vector<cv::Point2f> & current_points,
     const std::vector<int64_t> & identities, double step, double score,
-    double spread, double near_step, double far_step)
+    double spread, const RoadBands & bands, const RoadSolve & esm, double reach)
   {
     std_msgs::msg::Float64MultiArray out;
     out.data.reserve(4 + identities.size() * 5);
@@ -2407,8 +2817,34 @@ private:
       out.data.push_back(step);
       out.data.push_back(score);
       out.data.push_back(spread);
-      out.data.push_back(near_step);
-      out.data.push_back(far_step);
+      // The band steps in metres, like the step above them: they leave here as
+      // a fraction of the reach the search was scaled by, and a consumer that
+      // took them raw would compare two quantities in different units.
+      out.data.push_back(bands.near_step * reach);
+      out.data.push_back(bands.far_step * reach);
+      out.data.push_back(bands.near_curve);
+      out.data.push_back(bands.far_curve);
+      out.data.push_back(bands.left_step * reach);
+      out.data.push_back(bands.right_step * reach);
+      // Where those bands sat, so the estimator can turn a disagreement into
+      // an angle without knowing this node's region of interest.
+      out.data.push_back(bands.near_range);
+      out.data.push_back(bands.far_range);
+      out.data.push_back(bands.left_lateral);
+      out.data.push_back(bands.right_lateral);
+      out.data.push_back(bands.near_forward);
+      out.data.push_back(bands.far_forward);
+      // The three body angles the four-parameter solve freed, in radians over
+      // this hop, appended after everything that was already here so the two
+      // parsers that index this block positionally keep their offsets. Only
+      // when the solve was asked for: with `road_step_esm` off the message is
+      // the message it always was, byte for byte. NaN inside that when the fit
+      // failed to beat its own seed and the search's answer was kept.
+      if (road_step_esm_) {
+        out.data.push_back(esm.yaw);
+        out.data.push_back(esm.pitch);
+        out.data.push_back(esm.roll);
+      }
     }
     publishers_[name]->publish(std::move(out));
     {
@@ -2454,6 +2890,8 @@ private:
   bool road_step_photometric_ = false;
   bool road_from_step_ = false;
   bool road_step_calibrate_ = false;
+  bool road_step_esm_ = false;
+  double road_step_band_window_px_ = 3.0;
   std::array<double, 4> road_step_roi_{0.25, 0.60, 0.75, 1.00};
   std::map<std::string, std::array<double, 4>> road_bands_;
   int road_step_samples_ = 13;

@@ -167,6 +167,32 @@ struct Estimator::Camera
   double photometric_since_solve = 0.0;
   bool photometric_valid = false;
   bool photometric_broken = false;
+  // This camera's tilt against the road, from the split bands. Held as running
+  // means because the measurement's noise is per frame and independent while
+  // what it measures is not.
+  double band_pitch = 0.0;
+  double band_roll = 0.0;
+  double band_stamp = 0.0;
+  bool band_ready = false;
+  // The same two angles from the anchor alignment's bearing residuals.
+  double anchor_roll = 0.0;
+  double anchor_pitch = 0.0;
+  // The photometric solve's rotation, summed over the frames a solve spans --
+  // the same accumulation the step needs, for the same reason.
+  double esm_yaw_since_solve = 0.0;
+  double esm_pitch_since_solve = 0.0;
+  double esm_roll_since_solve = 0.0;
+  bool esm_valid = false;
+  // The tilt those increments integrate to, leaked toward the absolute source.
+  double esm_tilt_pitch = 0.0;
+  double esm_tilt_roll = 0.0;
+  double anchor_yaw_last = 0.0;
+  bool anchor_yaw_fresh = false;
+  double anchor_roll_last = 0.0;
+  double anchor_pitch_last = 0.0;
+  double anchor_tx_last = 0.0;
+  double anchor_ty_last = 0.0;
+  bool anchor_ready = false;
   // Where this camera's own map last said the vehicle was, and whether that
   // was the immediately preceding solve. The hop the map path reports is
   // `placed - pose_`, which is a pose *correction*, not a displacement: any
@@ -232,6 +258,9 @@ struct Estimator::Solved
   Eigen::Vector2d pitch_gain = Eigen::Vector2d::Zero();
   double mean_range = std::numeric_limits<double>::quiet_NaN();
   double point_count = 0.0;
+  // The rotation this hop turned through, whether it was handed in or solved
+  // from the road. NaN where neither was available.
+  double solved_yaw = std::numeric_limits<double>::quiet_NaN();
 };
 
 // The information the ground points carry about a translation, as a 2x2.
@@ -358,6 +387,8 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.max_anchors = settings.max_ground_anchors;
   anchor_settings.rebuild_measure_only = settings.rebuild_measure_only;
   anchor_settings.link_radius_m = settings.anchor_link_radius_m;
+  anchor_settings.link_cross_source_only = settings.anchor_link_cross_source_only;
+  anchor_settings.density_replace_margin = settings.anchor_density_replace_margin;
   anchor_settings.link_measure_only = settings.anchor_link_measure_only;
   anchor_settings.link_adopter_writes = settings.anchor_link_adopter_writes;
   anchor_settings.link_rebind_grace_frames = settings.anchor_link_rebind_grace;
@@ -445,7 +476,27 @@ Estimator::Estimator(const EstimatorSettings & settings)
         camera->settings.range_scale = height / left;
       }
     }
+  }  if (settings.ground_common_scale != 1.0) {
+    // A ratio, not a length. The plane offset above is a common *distance* --
+    // the road sits that far above the datum the mounts are measured from --
+    // and it divides by the height, so it gives the two cameras a bias in the
+    // ratio 1/0.89 to 1/1.26, which is 1.42. What is actually left over is in
+    // the ratio 1.10, measured on three straights: 0.262/0.237, 0.271/0.255,
+    // 0.325/0.289. That is a common *fraction*, which no offset can express and
+    // which the same three candidates separate cleanly -- a common length
+    // predicts 1.42, a body pitch predicts -1.00, and a fraction predicts 1.00.
+    //
+    // Its likely name is the lens: the rotation channel, which does not depend
+    // on depth and so cannot confuse a focal length with a plane, measures the
+    // model's focal length 0.42% large. Applied here rather than to `k` because
+    // the tracks are already extracted against the recorded camera_info, and
+    // because a scale is what the projection wants -- the bearing correction
+    // would have to be re-run through the tracker.
+    for (auto & camera : cameras_) {
+      camera->settings.range_scale *= settings.ground_common_scale;
+    }
   }
+
   map_ready_ = !settings.require_map_before_translating;
 }
 
@@ -524,10 +575,29 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
     (settings_.photometric_max_spread <= 0.0 ||
     incoming.photometric_spread <= settings_.photometric_max_spread))
   {
-    camera.photometric_since_solve += incoming.photometric_step;
+    camera.photometric_since_solve +=
+      settings_.photometric_scale * incoming.photometric_step;
     camera.photometric_valid = true;
   } else {
     camera.photometric_broken = true;
+  }
+
+  if (settings_.band_attitude) {
+    ingest_bands(camera, incoming);
+  }
+
+  // The photometric rotation, gathered the same way. A frame that did not solve
+  // voids the interval rather than contributing nothing: a missing rotation is
+  // not a zero rotation, and summing it as one bends the heading.
+  if (std::isfinite(incoming.esm_yaw) && std::isfinite(incoming.esm_pitch) &&
+    std::isfinite(incoming.esm_roll))
+  {
+    camera.esm_yaw_since_solve += incoming.esm_yaw;
+    camera.esm_pitch_since_solve += incoming.esm_pitch;
+    camera.esm_roll_since_solve += incoming.esm_roll;
+    camera.esm_valid = true;
+  } else {
+    camera.esm_valid = false;
   }
 
   Frame frame;
@@ -891,6 +961,120 @@ void Estimator::override_tilt(double roll, double pitch)
   tilt_override_ = level;
 }
 
+// What a focal length error costs a step measured over a band at this range.
+// A model focal length larger than the truth by `scale` reads every bearing as
+// that much shallower, and a ground range h cot(theta) grows by (R^2 + h^2)/h
+// per radian of that. Carried through a step the way the pitch is --
+// `bias = g + R g'` for a range distortion g -- the arctangent survives and
+// the rest collapses:
+//
+//     bias = scale (2 R atan(h/R) / h - 1)
+//
+// It is not linear in R, which is exactly why a two-band difference cannot
+// tell it from a pitch on its own and needs the rotation channel to price it.
+double lens_step_bias(double range, double height, double scale)
+{
+  if (!(range > 1e-6) || !(height > 1e-6)) {
+    return 0.0;
+  }
+  return scale * (2.0 * range * std::atan2(height, range) / height - 1.0);
+}
+
+void Estimator::ingest_bands(Camera & camera, const TrackFrame & incoming)
+{
+  const double height = std::abs(camera.model.translation_base_from_camera.z());
+  if (!(height > 1e-6)) {
+    return;
+  }
+  // Both halves are of one region and one motion, so the whole region's own
+  // answer is what says whether a half landed on the road at all.
+  const double whole = incoming.photometric_step;
+  if (!std::isfinite(whole) || std::abs(whole) < 1e-3) {
+    return;
+  }
+  const auto landed = [&](double half) {
+      return std::isfinite(half) &&
+             std::abs(half / whole - 1.0) <= settings_.band_max_disagreement;
+    };
+  const double dt = camera.band_stamp > 0.0 ? incoming.stamp - camera.band_stamp : 0.0;
+  const double gain = (dt > 0.0 && settings_.band_attitude_tau_sec > 0.0)
+    ? std::min(1.0, dt / settings_.band_attitude_tau_sec) : 1.0;
+
+  // Near against far is the pitch. A pitch moves a ground point at range R by
+  // (R^2 + h^2)/h and a height error by R; carried through the step both keep
+  // only their leading behaviour -- `2 R p / h` against a constant -- because
+  // the h/R terms cancel exactly. So the difference between two bands is the
+  // pitch and cannot be a height, whatever the height is.
+  //
+  // Sign: nose-down is positive here, as it is in the inertial filter. A body
+  // pitched nose-down meets the ground nearer than a level projection computes,
+  // so the level assumption reads long and `bias = +2 R p / h`.
+  // Divided by how far apart the bands are *along* the vehicle, not by how far
+  // apart in range. The two are the same number on a forward mount and
+  // opposite on a rear one, which is exactly the asymmetry the pitch has.
+  const double reach = incoming.band_far_forward - incoming.band_near_forward;
+  if (landed(incoming.band_near) && landed(incoming.band_far) &&
+    std::isfinite(reach) && std::abs(reach) > 1e-3)
+  {
+    double difference = incoming.band_far / incoming.band_near - 1.0;
+    difference -=
+      lens_step_bias(incoming.band_far_range, height, settings_.band_lens_scale) -
+      lens_step_bias(incoming.band_near_range, height, settings_.band_lens_scale);
+    const double pitch = height * difference / (2.0 * reach);
+    if (std::isfinite(pitch)) {
+      camera.band_pitch += camera.band_ready ? gain * (pitch - camera.band_pitch)
+        : pitch - camera.band_pitch;
+      camera.band_ready = true;
+    }
+  }
+
+  // Left against right is the roll, on the same footing: a roll puts the road
+  // at depth `h + y phi` at lateral offset y, so every range there scales by
+  // `h / (h + y phi)` and the step with it. The offsets come in body
+  // coordinates, so the rear mount's yaw of 180 degrees is already in their
+  // signs and the same expression serves both cameras.
+  const double across = incoming.band_right_lateral - incoming.band_left_lateral;
+  if (landed(incoming.band_left) && landed(incoming.band_right) &&
+    std::isfinite(across) && std::abs(across) > 1e-3)
+  {
+    const double difference = incoming.band_right / incoming.band_left - 1.0;
+    const double roll = -height * difference / across;
+    if (std::isfinite(roll)) {
+      camera.band_roll += camera.band_ready ? gain * (roll - camera.band_roll) : roll;
+    }
+  }
+  camera.band_stamp = incoming.stamp;
+}
+
+std::optional<Eigen::Matrix3d> Estimator::camera_tilt(const Camera & camera) const
+{
+  if (settings_.esm_attitude) {
+    return Eigen::Matrix3d(
+      Eigen::AngleAxisd(camera.esm_tilt_roll, Eigen::Vector3d::UnitX()) *
+      Eigen::AngleAxisd(camera.esm_tilt_pitch, Eigen::Vector3d::UnitY()));
+  }
+  if (settings_.anchor_attitude) {
+    if (!camera.anchor_ready) {
+      return std::nullopt;
+    }
+    return Eigen::Matrix3d(
+      Eigen::AngleAxisd(camera.anchor_roll, Eigen::Vector3d::UnitX()) *
+      Eigen::AngleAxisd(camera.anchor_pitch, Eigen::Vector3d::UnitY()));
+  }
+  if (!settings_.band_attitude) {
+    return body_tilt();
+  }
+  if (!camera.band_ready) {
+    // Level until the road has said otherwise. Falling back to the inertial
+    // attitude here would put the very term this replaces back into the first
+    // seconds of every drive, which is where it peaks.
+    return std::nullopt;
+  }
+  return Eigen::Matrix3d(
+    Eigen::AngleAxisd(camera.band_roll, Eigen::Vector3d::UnitX()) *
+    Eigen::AngleAxisd(camera.band_pitch, Eigen::Vector3d::UnitY()));
+}
+
 std::optional<Eigen::Matrix3d> Estimator::body_tilt() const
 {
   if (tilt_override_.has_value()) {
@@ -943,7 +1127,12 @@ void Estimator::replay_inertial(
 void Estimator::remember_solve_pixels(Camera & camera)
 {
   const Eigen::Index count = camera.track_ids.size();
-  camera.solve_tilt = body_tilt();
+  // The tilt this frame was captured under, for the next solve to project its
+  // earlier frame with. It has to be the same tilt the projection will use --
+  // taking the inertial one here while the projection takes the road's puts a
+  // different attitude on each frame of every hop, which is the frame-mixing
+  // defect this field was added to remove.
+  camera.solve_tilt = camera_tilt(camera);
   if (count == 0 || camera.track_pixels.rows() != count) {
     camera.solve_ids.resize(0);
     camera.solve_points.resize(0, 2);
@@ -1039,8 +1228,23 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   solved.track_ids = track_ids;
   solved.current_pixels = current_pixels;
 
-  const auto tilt = body_tilt();
+  const auto tilt = camera_tilt(camera);
   const Eigen::Matrix3d * tilt_ptr = tilt.has_value() ? &tilt.value() : nullptr;
+  // A band or anchor tilt is the camera's angle against the road, not the
+  // body's attitude against gravity. A mounting error tilts the camera without
+  // moving it, and a road that is not level does not move it either, so
+  // swinging the mount on a lever about the pitch centre here would invent a
+  // motion that never happened -- a height change, which is the larger of the
+  // two ways a tilt reaches a range, and a displacement of the lens with it.
+  //
+  // Both have to follow this one switch. A rigid body rotating about a point
+  // cannot move its camera along the road while holding its height: the swing
+  // is x_p*(1 - cos t) horizontally against x_p*sin t vertically, so taking
+  // the second-order term while dropping the first-order one is not a model of
+  // anything. The lens displacement was being applied while the height was
+  // not, which is that split exactly.
+  const bool tilt_moves_camera = settings_.ground_height_from_tilt &&
+    !settings_.band_attitude && !settings_.anchor_attitude;
   // The band is fixed. An adaptive one keyed on speed was measured on the
   // original recordings and lost to it -- park came out at 2.518 m with the
   // scale at 0.776 against 0.110 m and 0.996 held fixed -- and it was left
@@ -1061,7 +1265,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       current_pixels, camera.model, band, camera.settings.ground_min_distance_m,
       tilt_ptr, camera.settings.range_scale * camera.range_scale_learned * imu_scale_,
       solved.current_ground, valid_current, settings_.pitch_centre_x_m,
-      settings_.ground_height_from_tilt);
+      tilt_moves_camera);
     // The earlier frame gets the tilt it was taken under, not this one's.
     const Eigen::Matrix3d * then_ptr = tilt_ptr;
     if (settings_.tilt_at_capture && camera.solve_tilt.has_value()) {
@@ -1071,21 +1275,150 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       previous_pixels, camera.model, band, camera.settings.ground_min_distance_m,
       then_ptr, camera.settings.range_scale * camera.range_scale_learned * imu_scale_,
       solved.previous_ground, valid_previous, settings_.pitch_centre_x_m,
-      settings_.ground_height_from_tilt);
+      tilt_moves_camera);
   }
   solved.ground_valid = valid_previous && valid_current;
 
   solved.motion_inliers = Mask::Constant(count, false);
-  if (!yaw_delta.has_value() || !solved.ground_valid.any()) {
+
+  // The heading, from the road if it was not handed in. The similarity fit
+  // below recovers a rotation as well as a translation and its rotation has
+  // always been discarded, because a heading was always supplied; when it is
+  // not, this is where it comes from.
+  std::optional<double> yaw = yaw_delta;
+  // The photometric rotation first where it is being solved: the two-frame fit
+  // below reads the same motion off a correspondence set that goes asymmetric
+  // as the patch overlap shrinks, and pays for it with a bias that grows with
+  // the step.
+  if (!yaw.has_value() && settings_.esm_yaw_source && camera.esm_valid &&
+    std::isfinite(camera.esm_yaw_since_solve) &&
+    std::abs(camera.esm_yaw_since_solve) <= settings_.max_yaw_per_frame_rad)
+  {
+    yaw = camera.esm_yaw_since_solve;
+  }
+  if (!yaw.has_value() && settings_.vision_yaw && solved.ground_valid.any()) {
+    Eigen::Index usable_pairs = 0;
+    for (Eigen::Index i = 0; i < count; ++i) {
+      if (solved.ground_valid(i)) {
+        ++usable_pairs;
+      }
+    }
+    if (usable_pairs >= settings_.ground_min_inliers) {
+      Points2 before(usable_pairs, 2);
+      Points2 after(usable_pairs, 2);
+      Eigen::Index at = 0;
+      for (Eigen::Index i = 0; i < count; ++i) {
+        if (!solved.ground_valid(i)) {
+          continue;
+        }
+        before.row(at) = solved.previous_ground.row(i);
+        after.row(at) = solved.current_ground.row(i);
+        ++at;
+      }
+      const auto free_fit = estimate_planar_motion(
+        before, after, settings_.ground_ransac_threshold_m,
+        settings_.ground_min_inliers, settings_.max_scale_error);
+      if (free_fit.has_value() && std::isfinite(free_fit->motion.yaw) &&
+        std::abs(free_fit->motion.yaw) <= settings_.max_yaw_per_frame_rad)
+      {
+        yaw = free_fit->motion.yaw;
+        // The similarity fit carries a scale as well, and the ground's scale is
+        // set by the camera height rather than by this hop. With a patch held
+        // four metres off the rotation centre a yaw and a sideways slide are
+        // already nearly the same thing -- conditioning 45.5 against 2.4 for a
+        // patch about the origin -- and a free scale is a third direction for
+        // them to trade against. So the rotation is taken again rigidly, over
+        // the correspondences that fit agreed on, with the scale held at one.
+        if (settings_.vision_yaw_rigid && free_fit->inliers.size() == before.rows()) {
+          Eigen::Vector2d mean_before = Eigen::Vector2d::Zero();
+          Eigen::Vector2d mean_after = Eigen::Vector2d::Zero();
+          double kept_terms = 0.0;
+          for (Eigen::Index i = 0; i < before.rows(); ++i) {
+            if (!free_fit->inliers(i)) {
+              continue;
+            }
+            mean_before += before.row(i).transpose();
+            mean_after += after.row(i).transpose();
+            kept_terms += 1.0;
+          }
+          if (kept_terms >= 3.0) {
+            mean_before /= kept_terms;
+            mean_after /= kept_terms;
+            double cross = 0.0;
+            double dot = 0.0;
+            for (Eigen::Index i = 0; i < before.rows(); ++i) {
+              if (!free_fit->inliers(i)) {
+                continue;
+              }
+              const double bx = before(i, 0) - mean_before.x();
+              const double by = before(i, 1) - mean_before.y();
+              const double ax = after(i, 0) - mean_after.x();
+              const double ay = after(i, 1) - mean_after.y();
+              // The similarity fit above maps the current cloud onto the
+              // earlier one, so this has to turn the same way round or the two
+              // disagree by exactly a sign.
+              cross += ax * by - ay * bx;
+              dot += bx * ax + by * ay;
+            }
+                const double rigid = std::atan2(cross, dot);
+            if (std::isfinite(rigid) &&
+              std::abs(rigid) <= settings_.max_yaw_per_frame_rad)
+            {
+              yaw = rigid;
+            }
+          }
+          if (settings_.vision_yaw_vehicle) {
+            // The vehicle's own two freedoms, over the same inliers. To first
+            // order a step s and a yaw d move a ground point at (x, y) by
+            // (-s + d*y, -d*x), which is linear in both, so this is two normal
+            // equations and no search.
+            double a11 = 0.0;
+            double a12 = 0.0;
+            double a22 = 0.0;
+            double b1 = 0.0;
+            double b2 = 0.0;
+            for (Eigen::Index i = 0; i < before.rows(); ++i) {
+              if (!free_fit->inliers(i)) {
+                continue;
+              }
+              const double px = before(i, 0);
+              const double py = before(i, 1);
+              const double dx = after(i, 0) - px;
+              const double dy = after(i, 1) - py;
+              // Row for dx: -1 * s + py * d.  Row for dy: 0 * s + (-px) * d.
+              a11 += 1.0;
+              a12 += -py;
+              a22 += py * py + px * px;
+              b1 += -dx;
+              b2 += py * dx - px * dy;
+            }
+            const double det = a11 * a22 - a12 * a12;
+            if (std::abs(det) > 1e-12) {
+              const double vehicle = (a11 * b2 - a12 * b1) / det;
+              if (std::isfinite(vehicle) &&
+                std::abs(vehicle) <= settings_.max_yaw_per_frame_rad)
+              {
+                yaw = vehicle;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  solved.solved_yaw = yaw.value_or(std::numeric_limits<double>::quiet_NaN());
+
+  if (!yaw.has_value() || !solved.ground_valid.any()) {
     remember_solve_pixels(camera);
     return solved;
   }
+  const std::optional<double> & yaw_for_solve = yaw;
 
   Stopwatch watch(diagnostics_, "solve");
 
   // Widened by whatever this hop turns through, for both solve paths.
   const double gate = settings_.ground_ransac_threshold_m +
-    settings_.ground_rotation_threshold_m * std::abs(*yaw_delta);
+    settings_.ground_rotation_threshold_m * std::abs(*yaw_for_solve);
 
   // Prefer the accumulated map; fall back to the previous frame alone. Matching
   // against anchors averaged over a feature's whole life is what stops a burst
@@ -1101,7 +1434,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   const double solve_band = settings_.solve_max_distance_m > 0.0
     ? settings_.solve_max_distance_m : std::numeric_limits<double>::infinity();
   Eigen::Vector3d mount_in_frame = camera.model.translation_base_from_camera;
-  if (settings_.level_frame_origin && tilt.has_value()) {
+  if (settings_.level_frame_origin && tilt_moves_camera && tilt.has_value()) {
     const Eigen::Vector3d centre(settings_.pitch_centre_x_m, 0.0, 0.0);
     mount_in_frame = tilt.value() * (mount_in_frame - centre) + centre;
   }
@@ -1314,7 +1647,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     // filter's own propagated heading rather than the instrument's, and the
     // solve is asked to improve on it -- the improvement is the measurement.
     const double handed = yaw_guess.has_value()
-      ? *yaw_guess : wrap_pi(pose_.yaw + *yaw_delta);
+      ? *yaw_guess : wrap_pi(pose_.yaw + *yaw_for_solve);
     // The alignment solves for where the camera *is*, not for how far it
     // moved, so the inertial expectation has to be carried onto the last
     // solved position before it can gate anything. Comparing a hop against an
@@ -1353,10 +1686,35 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         ? &*camera.last_translation : nullptr),
         settings_.align_restarts, settings_.align_ambiguity_ratio,
         gate_centre.has_value() ? &*gate_centre : nullptr,
-        settings_.inertial_gate_m, scale);
+        settings_.inertial_gate_m, scale,
+        settings_.anchor_bearing_nonholonomic);
     }
     if (aligned.has_value()) {
       camera.last_translation = aligned->translation;
+      if (aligned->bearing_terms > 0) {
+        camera.anchor_yaw_last = aligned->bearing_yaw;
+        camera.anchor_yaw_fresh = true;
+        camera.anchor_roll_last = aligned->bearing_roll;
+        camera.anchor_pitch_last = aligned->bearing_pitch;
+        camera.anchor_tx_last = aligned->bearing_tx;
+        camera.anchor_ty_last = aligned->bearing_ty;
+      }
+      if (settings_.anchor_attitude && aligned->bearing_terms > 0) {
+        const double gain = settings_.anchor_attitude_solves > 1.0
+          ? 1.0 / settings_.anchor_attitude_solves : 1.0;
+        const double roll = settings_.anchor_attitude_gain * aligned->bearing_roll;
+        const double pitch = settings_.anchor_attitude_gain * aligned->bearing_pitch;
+        if (std::isfinite(roll) && std::isfinite(pitch)) {
+          if (camera.anchor_ready) {
+            camera.anchor_roll += gain * (roll - camera.anchor_roll);
+            camera.anchor_pitch += gain * (pitch - camera.anchor_pitch);
+          } else {
+            camera.anchor_roll = roll;
+            camera.anchor_pitch = pitch;
+            camera.anchor_ready = true;
+          }
+        }
+      }
       camera.radial_height_sum += aligned->radial_height;
       camera.radial_pitch_sum += aligned->radial_pitch;
       ++camera.radial_terms;
@@ -1463,7 +1821,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     }
   }
   const auto estimate = estimate_planar_motion_with_yaw(
-    previous_ground, current_ground, *yaw_delta, gate,
+    previous_ground, current_ground, *yaw_for_solve, gate,
     settings_.ground_min_inliers, softness_for(camera, settings_.ground_pair_softness_m),
     pair_weights,
     settings_.ground_pair_passes);
@@ -1487,8 +1845,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       solved.motion_inliers(pairs[static_cast<size_t>(i)]) = estimate->inliers(i);
     }
     // Spread of the pairwise solution, on the same footing as the map one.
-    const double c = std::cos(*yaw_delta);
-    const double s = std::sin(*yaw_delta);
+    const double c = std::cos(*yaw_for_solve);
+    const double s = std::sin(*yaw_for_solve);
     double squared = 0.0;
     int kept = 0;
     for (Eigen::Index i = 0; i < paired; ++i) {
@@ -1637,6 +1995,22 @@ void Estimator::process_pair()
   if (imu_available) {
     for (size_t i = 0; i < count; ++i) {
       solved[i] = solve_camera(*cameras_[i], yaw_delta, yaw_guess);
+    }
+  }
+  if (!yaw_delta.has_value()) {
+    // What the road said the hop turned through, averaged over whichever
+    // cameras found it. They are measuring one body rotation, so a
+    // disagreement between them is noise and not two different answers.
+    double total = 0.0;
+    int terms = 0;
+    for (const auto & entry : solved) {
+      if (entry.has_value() && std::isfinite(entry->solved_yaw)) {
+        total += entry->solved_yaw;
+        ++terms;
+      }
+    }
+    if (terms > 0) {
+      yaw_delta = total / static_cast<double>(terms);
     }
   }
   // Nothing else. The solve frame stays where it is, deliberately: the vision
@@ -1891,10 +2265,42 @@ void Estimator::process_pair()
       ++diagnostics_.photometric_uses;
     }
   }
+  // Integrate the photometric tilt increments, and leak them back toward
+  // whatever absolute source is running. The leak is not smoothing: over a
+  // drive whose true attitude never moves these increments still read a
+  // hundredth of a degree a frame, so integrating them alone walks off, and
+  // what stops it has to be a measurement of the angle itself rather than of
+  // its rate. Where no absolute source is enabled the leak goes to level,
+  // which for a road vehicle is the next best statement available.
+  if (settings_.esm_attitude) {
+    const double leak = settings_.esm_attitude_leak_sec > 0.0 && dt > 0.0
+      ? std::min(1.0, dt / settings_.esm_attitude_leak_sec) : 1.0;
+    for (auto & held : cameras_) {
+      double target_pitch = 0.0;
+      double target_roll = 0.0;
+      if (settings_.anchor_attitude && held->anchor_ready) {
+        target_pitch = held->anchor_pitch;
+        target_roll = held->anchor_roll;
+      } else if (settings_.band_attitude && held->band_ready) {
+        target_pitch = held->band_pitch;
+        target_roll = held->band_roll;
+      }
+      if (held->esm_valid) {
+        held->esm_tilt_pitch += held->esm_pitch_since_solve;
+        held->esm_tilt_roll += held->esm_roll_since_solve;
+      }
+      held->esm_tilt_pitch += leak * (target_pitch - held->esm_tilt_pitch);
+      held->esm_tilt_roll += leak * (target_roll - held->esm_tilt_roll);
+    }
+  }
   for (auto & held : cameras_) {
     held->photometric_since_solve = 0.0;
     held->photometric_valid = false;
     held->photometric_broken = false;
+    held->esm_yaw_since_solve = 0.0;
+    held->esm_pitch_since_solve = 0.0;
+    held->esm_roll_since_solve = 0.0;
+    held->esm_valid = false;
   }
 
   // The lateral each camera's own scale error contributes through the turn,
@@ -2227,6 +2633,24 @@ void Estimator::process_pair()
         pose_.yaw = wrap_pi(pose_.yaw + offset);
       }
     }
+    // The map's own reading of the heading, applied where there is no
+    // instrument to hold it. Taken only from cameras whose anchors answered
+    // this solve -- a carried-over value is the same measurement applied twice.
+    if (settings_.anchor_heading_gain != 0.0) {
+      double total = 0.0;
+      int terms = 0;
+      for (auto & camera : cameras_) {
+        if (camera->anchor_yaw_fresh) {
+          total += camera->anchor_yaw_last;
+          ++terms;
+          camera->anchor_yaw_fresh = false;
+        }
+      }
+      if (terms > 0 && std::isfinite(total)) {
+        pose_.yaw = wrap_pi(
+          pose_.yaw + settings_.anchor_heading_gain * total / static_cast<double>(terms));
+      }
+    }
     last_accept_stamp_ = current_stamp;
 
     double vx = 0.0;
@@ -2298,9 +2722,37 @@ void Estimator::process_pair()
 
   update.pose = pose_;
   update.twist = twist;
+  if (!cameras_.empty()) {
+    update.bearing_yaw = cameras_.front()->anchor_yaw_last;
+    update.bearing_roll_raw = cameras_.front()->anchor_roll_last;
+    update.bearing_pitch_raw = cameras_.front()->anchor_pitch_last;
+    update.bearing_tx = cameras_.front()->anchor_tx_last;
+    update.bearing_ty = cameras_.front()->anchor_ty_last;
+  }
   if (attitude_ && attitude_->started()) {
     update.roll = attitude_->roll();
     update.pitch = attitude_->pitch();
+    update.tilt_valid = true;
+  }
+  if (settings_.esm_attitude && !cameras_.empty()) {
+    // What the leaked integrator is actually holding, so a steady-state offset
+    // shows up as a number rather than as a score.
+    update.roll = cameras_.front()->esm_tilt_roll;
+    update.pitch = cameras_.front()->esm_tilt_pitch;
+    update.tilt_valid = true;
+  } else if (settings_.anchor_attitude && !cameras_.empty() &&
+    cameras_.front()->anchor_ready)
+  {
+    update.roll = cameras_.front()->anchor_roll;
+    update.pitch = cameras_.front()->anchor_pitch;
+    update.tilt_valid = true;
+  } else if (settings_.band_attitude && !cameras_.empty() &&
+    cameras_.front()->band_ready)
+  {
+    // The attitude actually in use, which is the first camera's own reading of
+    // the road rather than anything inertial.
+    update.roll = cameras_.front()->band_roll;
+    update.pitch = cameras_.front()->band_pitch;
     update.tilt_valid = true;
   }
   if (displacement_filter_ && dt > 1e-4) {

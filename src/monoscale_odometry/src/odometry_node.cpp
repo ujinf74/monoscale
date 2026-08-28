@@ -270,6 +270,39 @@ private:
       frame.pixels(i, 0) = data[at + 3];
       frame.pixels(i, 1) = data[at + 4];
     }
+    // The photometric block the tracker appends after the features. The live
+    // path read none of it until now, so every measurement built on the road
+    // region existed only under replay -- the gain that consumes it defaults
+    // to zero, so parsing it here changes nothing on its own.
+    const size_t after = static_cast<size_t>(4 + 5 * count);
+    if (data.size() > after) {
+      frame.photometric_step = data[after];
+      if (data.size() > after + 1) {
+        frame.photometric_score = data[after + 1];
+      }
+      if (data.size() > after + 2) {
+        frame.photometric_spread = data[after + 2];
+      }
+      if (data.size() > after + 12) {
+        frame.band_near = data[after + 3];
+        frame.band_far = data[after + 4];
+        frame.band_left = data[after + 7];
+        frame.band_right = data[after + 8];
+        frame.band_near_range = data[after + 9];
+        frame.band_far_range = data[after + 10];
+        frame.band_left_lateral = data[after + 11];
+        frame.band_right_lateral = data[after + 12];
+      }
+      if (data.size() > after + 14) {
+        frame.band_near_forward = data[after + 13];
+        frame.band_far_forward = data[after + 14];
+      }
+      if (data.size() > after + 17) {
+        frame.esm_yaw = data[after + 15];
+        frame.esm_pitch = data[after + 16];
+        frame.esm_roll = data[after + 17];
+      }
+    }
     ++received_[camera];
 
     // Published under the same lock the updates came out of. Each camera and

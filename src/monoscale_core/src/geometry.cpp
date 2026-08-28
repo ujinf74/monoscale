@@ -179,7 +179,7 @@ void pixels_to_ground(
   const Points2 & pixels, const CameraModel & model, double max_distance,
   double min_distance, const Eigen::Matrix3d * tilt, double range_scale,
   Points2 & ground_out, Mask & valid_out, double pitch_centre_x,
-  bool height_from_tilt)
+  bool tilt_moves_camera)
 {
   const Eigen::Index count = pixels.rows();
   ground_out.resize(count, 2);
@@ -205,7 +205,13 @@ void pixels_to_ground(
   Eigen::Vector3d normal(0.0, 0.0, 1.0);
   // The camera's own position, in whichever frame the points come out in.
   Eigen::Vector3d reference = origin;
-  if (tilt != nullptr && model.level_frame_origin) {
+  // Only when the tilt is the body turning. A mounting error or a road that is
+  // not level tilts the camera without moving it, and swinging the mount then
+  // invents a displacement -- the same claim the height below refuses, and the
+  // two have to refuse it together. The swing's horizontal part is
+  // x_p*(1 - cos t) and its vertical part x_p*sin t, so keeping one without the
+  // other is second order without its own first order.
+  if (tilt != nullptr && model.level_frame_origin && tilt_moves_camera) {
     reference = (*tilt) * arm + centre;
   }
   if (tilt != nullptr) {
@@ -222,7 +228,7 @@ void pixels_to_ground(
   // the larger of the two ways the tilt reaches a range (-10.4 m/rad against
   // the normal's -7.9 on the front mount) and it is spurious for every bit of
   // the tilt that is road slope. Holding the height nominal drops it.
-  const double height = height_from_tilt ? arm.dot(normal) + centre.z() : origin.z();
+  const double height = tilt_moves_camera ? arm.dot(normal) + centre.z() : origin.z();
 
   for (Eigen::Index i = 0; i < count; ++i) {
     const Eigen::Vector3d homogeneous(corrected(i, 0), corrected(i, 1), 1.0);

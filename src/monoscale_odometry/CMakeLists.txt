@@ -52,4 +52,14 @@ install(DIRECTORY launch config rviz DESTINATION share/${PROJECT_NAME})
 ament_export_targets(export_monoscale_odometry HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp monoscale_core)
 
+if(BUILD_TESTING)
+  # The sensor kit that spawns the cameras lives in another package, and the
+  # extrinsics the estimator projects with live here. Nothing publishes a
+  # transform tree in this simulator, so there is no third source to fall back
+  # on; this is what keeps the two files from drifting apart unnoticed.
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_sensor_kit_consistency
+    test/test_sensor_kit_consistency.py)
+endif()
+
 ament_package()

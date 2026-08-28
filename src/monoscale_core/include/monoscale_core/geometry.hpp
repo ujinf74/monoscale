@@ -145,7 +145,10 @@ void pixels_to_ground(
   const Points2 & pixels, const CameraModel & model, double max_distance,
   double min_distance, const Eigen::Matrix3d * tilt, double range_scale,
   Points2 & ground_out, Mask & valid_out, double pitch_centre_x = 0.0,
-  bool height_from_tilt = true);
+  // Whether this tilt is the body rotating, in which case it both swings the
+  // mount on its lever and changes the height over the road, or the camera's
+  // angle against a road it still rides on, in which case it does neither.
+  bool tilt_moves_camera = true);
 
 // Same, allocating its own results. The caller that runs this every solve
 // should prefer the form above and keep its buffers.

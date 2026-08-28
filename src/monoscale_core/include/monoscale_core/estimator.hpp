@@ -88,6 +88,50 @@ struct EstimatorSettings
   int pair_queue_depth = 12;
 
   bool use_imu_yaw = true;
+  // Solve the hop's rotation from the ground points instead of reading it off
+  // the instrument. The two-frame similarity fit already recovers it -- it is
+  // thrown away because a heading has always been supplied. Without this the
+  // stack cannot run at all without an orientation from outside, and on this
+  // simulator that orientation is the truth, so nothing here is tested against
+  // a heading a real vehicle would have.
+  bool vision_yaw = false;
+  // How much of the anchors' own opinion of the heading to apply each solve.
+  // Without an instrument the hop's rotation is all there is, and the two-frame
+  // fit carries a bias of a tenth of a degree a hop -- tens of degrees over a
+  // drive. The map is the absolute reference the hop does not have: its bearing
+  // residual says how far the heading has slid against the anchors, and that
+  // error does not accumulate the way the hop's does. Small, because one
+  // measurement of it is worth about 0.08 degrees.
+  double anchor_heading_gain = 0.0;
+  // Take the vision heading from a rigid fit rather than the similarity one.
+  bool vision_yaw_rigid = true;
+  // Fit the hop as the vehicle's own two freedoms -- a forward step and a yaw
+  // about base_link -- instead of as a free similarity.
+  //
+  // The similarity has four: a rotation, two translations and a scale, where
+  // the vehicle has two. base_link is the rear axle, so a vehicle that does not
+  // slip has no lateral freedom there at all, and the ground's scale is set by
+  // the camera height rather than by this hop. Leaving those two in is what
+  // costs the heading: a yaw and a sideways slide look alike through a patch a
+  // metre wide held four metres out, and the leftovers land in the yaw as a
+  // bias of 0.177 deg a hop at 7.5 m/s. The photometric warp has always had
+  // this constraint -- its translation is (step, 0, 0) and its yaw carries the
+  // mount on its own lever -- which is why its yaw bias is 0.0025 deg against
+  // the same drive's 0.177.
+  bool vision_yaw_vehicle = false;
+  // Take the hop's rotation from the photometric solve rather than from the
+  // two-frame similarity fit. The fit's rotation carries a bias that grows with
+  // the step -- 0.001 deg a hop at 2 m/s against 0.173 at 7.5 -- because the
+  // correspondence set goes asymmetric as the patch overlap shrinks. The
+  // photometric answer uses whatever overlaps, weighted by the image.
+  bool esm_yaw_source = false;
+  // Carry the photometric solve's pitch and roll increments into the camera's
+  // tilt, leaked back toward whatever absolute source is enabled. Integrating
+  // them alone runs away -- on a drive whose true attitude never moves the
+  // increments still read -0.038 deg a frame -- so the leak is not smoothing,
+  // it is the only thing bounding them.
+  bool esm_attitude = false;
+  double esm_attitude_leak_sec = 2.0;
   double imu_max_age_sec = 0.02;
   double imu_max_gap_sec = 0.12;
 
@@ -436,6 +480,19 @@ struct EstimatorSettings
   // carries no map and cannot replace that. What it does carry is scale, at
   // 0.011-0.077% per hop against the corner path's 1.06-1.62% -- so this
   // splits the two along the axis where each is better.
+  // A ratio applied to the road region's own step, and to nothing else.
+  //
+  // Measured against truth on three straights the photometric step reads long
+  // by +0.262 / +0.271 / +0.325 per cent, front, and +0.237 / +0.255 / +0.289
+  // rear -- a ratio of 1.10 between the cameras, which is a common *fraction*
+  // rather than a common length (an offset would give 1.42, a body pitch
+  // -1.00). Correcting it in the projection was tried and does not work: the
+  // map path reports `placed - pose_`, a correction against a fused pose that
+  // is the mean of the two cameras, so any change common to both arrives at
+  // each of them with the opposite sign and the front/rear split widens
+  // instead of closing. Applied here the step is corrected where it is
+  // measured and the map is left alone.
+  double photometric_scale = 1.0;
   double photometric_step_gain = 0.0;
   // Frames whose road did not land on itself this well are not used. The
   // alignment reads 0.93 to 0.99 when it has the surface; the tail events that
@@ -485,16 +542,56 @@ struct EstimatorSettings
   int pose_graph_sweeps = 8;
   bool rebuild_measure_only = false;
   double anchor_link_radius_m = 0.0;
+  bool anchor_link_cross_source_only = false;
+  bool anchor_bearing_nonholonomic = false;
+  double anchor_density_replace_margin = 0.0;
   bool anchor_link_adopter_writes = false;
   int anchor_link_rebind_grace = 1;
   bool anchor_link_measure_only = false;
   double ground_plane_offset_m = 0.0;
+  // A common ratio applied to every camera's range after the plane offset.
+  double ground_common_scale = 1.0;
   double pair_scale_gain = 0.0;
   double pitch_centre_x_m = 0.0;
   // Let the body tilt move the camera's height over the road. True is what the
   // projection has always done; false holds the height at its nominal value and
   // leaves the tilt to set only the plane's direction.
   bool ground_height_from_tilt = true;
+  // Take the ground projection's tilt from the road bands rather than from the
+  // inertial attitude. The band measurement is of the camera against the road
+  // it is projecting onto, which is the quantity the projection needs; the
+  // inertial one is of the body against gravity, which carries neither the
+  // mounting error nor the road, and on this simulator reports a tilt the
+  // vehicle does not have.
+  bool band_attitude = false;
+  // How long the band angles are averaged over. They are measured per frame
+  // with independent noise, while what they carry here -- mounting, plane,
+  // and whatever the body is doing -- moves slowly.
+  double band_attitude_tau_sec = 3.0;
+  // The lens scale error, as a fraction, positive where the model's focal
+  // length is larger than the truth. A wrong focal length bends the range
+  // curve, and the bend is not linear in range, so a band difference reads
+  // part of it as a pitch. Measured on the rotation channel, which does not
+  // depend on depth and so cannot confuse a lens with a plane.
+  double band_lens_scale = 0.0;
+  // How far a half may sit from the whole region's step and still be taken as
+  // a measurement of geometry. Both halves see the same motion, and a tenth of
+  // a degree of tilt moves them by well under one per cent, so anything beyond
+  // this is a half that missed the road rather than a half that disagrees. A
+  // running mean has no defence against that: ungated, the first version held
+  // -0.29 degrees where the median of the very same frames was -0.08.
+  double band_max_disagreement = 0.05;
+  // Take the tilt from the anchor alignment's bearing residuals instead. The
+  // map spans 0.5 to 5.8 m where the road region spans 0.34 to 1.14, and over
+  // that reach the same estimator is three and a half times sharper; the
+  // residuals are already computed and were being thrown away.
+  bool anchor_attitude = false;
+  // How many solves the angles are averaged over. Count rather than seconds
+  // because solves arrive at ten to fifty a second depending on the drive, and
+  // what this smooths is a per-solve measurement, not a per-second one.
+  double anchor_attitude_solves = 100.0;
+  // Sign and strength of what is applied. 1 takes the fit as it comes.
+  double anchor_attitude_gain = 1.0;
   double attitude_slope_tau_sec = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;
@@ -567,6 +664,36 @@ struct TrackFrame
   double photometric_score = 0.0;
   // Spread of the across-track tiles' answers, relative to the step.
   double photometric_spread = 0.0;
+  // The same step measured over the near and far halves of the road region and
+  // over its left and right halves, in metres, with the geometry each half sat
+  // at. Near against far is a pitch and left against right is a roll -- of the
+  // camera against the road it is projecting onto, which is the quantity the
+  // projection actually needs and the one an inertial attitude cannot reach,
+  // because this one carries the mounting error and the road surface as well
+  // as the body.
+  double band_near = std::numeric_limits<double>::quiet_NaN();
+  double band_far = std::numeric_limits<double>::quiet_NaN();
+  double band_left = std::numeric_limits<double>::quiet_NaN();
+  double band_right = std::numeric_limits<double>::quiet_NaN();
+  double band_near_range = std::numeric_limits<double>::quiet_NaN();
+  double band_far_range = std::numeric_limits<double>::quiet_NaN();
+  double band_left_lateral = std::numeric_limits<double>::quiet_NaN();
+  double band_right_lateral = std::numeric_limits<double>::quiet_NaN();
+  // Where along the vehicle the two range bands sit. The pitch is set by this,
+  // not by the range: a nose-down body meets the ground ahead sooner and the
+  // ground astern later, so a rear mount answers with the opposite sign and
+  // the longitudinal offset carries that without a special case.
+  double band_near_forward = std::numeric_limits<double>::quiet_NaN();
+  double band_far_forward = std::numeric_limits<double>::quiet_NaN();
+  // What the four-parameter photometric solve freed: the body's rotation over
+  // this one frame pair, in radians. An increment, not an attitude -- the solve
+  // holds the plane's normal fixed, so it measures how the camera turned
+  // between two pictures and not how it sits against the road. The absolute
+  // tilt has to come from something that reads the range dependence, which is
+  // what the split bands and the anchor bearings are for.
+  double esm_yaw = std::numeric_limits<double>::quiet_NaN();
+  double esm_pitch = std::numeric_limits<double>::quiet_NaN();
+  double esm_roll = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct ImuSample
@@ -611,6 +738,14 @@ struct Update
   double roll = 0.0;
   double pitch = 0.0;
   bool tilt_valid = false;
+  // The yaw correction the first camera's anchors last asked for, raw. With an
+  // exact heading in front of it this is the measurement's own noise and
+  // nothing else, which is what says whether the map could carry the heading.
+  double bearing_yaw = 0.0;
+  double bearing_roll_raw = 0.0;
+  double bearing_pitch_raw = 0.0;
+  double bearing_tx = 0.0;
+  double bearing_ty = 0.0;
   // What the estimator claims to know, so that a consumer can weigh it.
   //
   // The pose is dead reckoned, so its covariance grows without bound: this is
@@ -846,6 +981,15 @@ public:
 
 private:
   struct Camera;
+
+  // Turn this frame's split bands into the camera's tilt against the road, and
+  // fold it into the running means. Near against far is the pitch, left
+  // against right the roll.
+  void ingest_bands(Camera & camera, const TrackFrame & incoming);
+  // The tilt the ground projection should use for this camera: its own, from
+  // the road, where that is being measured, and the body's inertial one
+  // otherwise.
+  std::optional<Eigen::Matrix3d> camera_tilt(const Camera & camera) const;
   struct Frame;
   struct Solved;
 

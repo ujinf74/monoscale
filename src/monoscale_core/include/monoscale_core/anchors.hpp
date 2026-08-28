@@ -186,6 +186,46 @@ struct AnchorSettings
   // spends it on the pose. Let the adopter write and the same gap is spent
   // moving the map instead, which is drift laundered into the landmark.
   bool link_adopter_writes = false;
+  // Refuse to adopt an anchor this source founded itself. The point of the link
+  // is that one camera meets ground another one mapped; binding a fresh
+  // sighting to a position this same camera laid down earlier is a different
+  // thing wearing the same mechanism.
+  //
+  // Named by the founder rather than by which camera is which, because which
+  // camera leads is a property of the direction of travel and not of the rig.
+  // Reverse and the rear camera is the one seeing new ground -- an index would
+  // then have the rule exactly backwards, and nothing in the benchmark would
+  // notice, because `segment_gears` is 'drive' on every recording in it.
+  bool link_cross_source_only = false;
+  // Solve the bearing residuals for a rotation about base_link with no sideways
+  // slide, rather than for a free rotation and translation of the lens.
+  //
+  // base_link is the rear axle centre, which on a vehicle that does not slip is
+  // the one point with no lateral velocity. Leaving that freedom in the model
+  // costs the yaw everything: a lens rotation and a lens slide look alike
+  // through a patch a metre wide, and the fit trades them -- measured at
+  // r = -0.82 to -0.89 between the two. Taking the slide out leaves the yaw
+  // with nothing to hide behind. Conditioned over the front camera's band the
+  // yaw's sigma goes 0.1515 -> 0.0339 dropping the slide, and 0.0116 dropping
+  // the roll as well; the rear, being 0.82 m from the axle rather than 3.694,
+  // barely moves, which is the same asymmetry the physics has.
+  bool bearing_nonholonomic = false;
+  // What a full density cell does with a fresh sighting. Off, it refuses the
+  // birth and the cell keeps whatever it has, however old and however far
+  // astern -- so the map's capacity settles on the ground it has already
+  // driven past, which is where its longitudinal information is *lowest*:
+  // measured, 92% of anchors sit within fifteen degrees of straight astern
+  // holding 9.7% of it, and 0.2% abreast hold 57%.
+  //
+  // On, the cell's least informative anchor is compared against the candidate
+  // and gives way if the candidate beats it by this margin. This is not the
+  // global eviction that lost every time it was tried -- age, weight,
+  // information, unseen count -- because it never changes how many anchors a
+  // cell holds, so the accumulated sightings the alignment weighs by are not
+  // churned wholesale; one anchor is exchanged for a better-placed one.
+  //
+  // 1.0 replaces on any improvement. Higher is stickier.
+  double density_replace_margin = 0.0;
   // Look for the crossing and record it, but do not bind it. Adoption itself
   // was measured and lost; the measurement it makes possible is separate.
   // Weigh an anchor in the registration by what is known about its position
@@ -390,6 +430,9 @@ private:
   int64_t adoptable(int source, double x, double y) const;
   double weight_at(int64_t slot) const;
   double longitudinal_information(int64_t slot) const;
+  // The same, for a position that has no slot yet -- what a candidate birth
+  // would be worth if it were admitted.
+  double longitudinal_information_at(double x, double y) const;
   void forget(int64_t slot);
   void prune();
 
@@ -450,6 +493,9 @@ private:
   std::unordered_map<int64_t, std::vector<int64_t>> grid_;
   // Live anchors per density cell, kept alongside births and deaths.
   std::unordered_map<int64_t, int> density_;
+  // Which slots each density cell holds, so a full cell can be asked what its
+  // least valuable anchor is rather than only how many it has.
+  std::unordered_map<int64_t, std::vector<int64_t>> density_slots_;
   int64_t density_cell_of(double x, double y) const;
   int polar_cell_of(double x, double y) const;
   void rebuild_polar_counts();
@@ -526,6 +572,34 @@ struct AnchorAlignment
   // 0.34-1.14 m it moves them 1.34 mm.
   double radial_height = 0.0;
   double radial_pitch = 0.0;
+
+  // The same residuals read on the sphere instead of on the ground.
+  //
+  // Two reasons it is the better domain. A ground residual is the bearing
+  // residual multiplied by (R^2 + h^2)/h, which over this band runs from 4 mm
+  // at a metre to 73 mm at 5.8, so an unweighted least squares on the ground
+  // is weighted by the wrong thing and the far anchors carry the fit. On the
+  // sphere the noise is the sensor's own and does not depend on range at all.
+  //
+  // And the signatures separate: an attitude error turns every bearing by the
+  // same `-w x b` whatever its range, while a translation error moves it by
+  // `-(I - b b^T) t / rho`, which falls away with distance. No scale error can
+  // imitate a rigid rotation of the field -- scaling the anchors about the lens
+  // leaves every bearing exactly where it was -- so the angle comes out
+  // independent of whatever the map's own scale is doing. The height does not,
+  // which is why only the angles are reported here.
+  double bearing_roll = 0.0;
+  double bearing_pitch = 0.0;
+  double bearing_yaw = 0.0;
+  // How many bearings the fit stood on, 0 where it did not run.
+  int bearing_terms = 0;
+  // The two in-plane translations the same fit solved for. Carried out only to
+  // ask whether they are taking the yaw with them: a yaw about the lens and a
+  // sideways slide look alike through a patch held four metres off the rotation
+  // centre, and if that degeneracy is what costs the yaw its precision, these
+  // two move against it solve by solve.
+  double bearing_tx = 0.0;
+  double bearing_ty = 0.0;
 };
 
 // Translation that places the current ground view onto its world anchors.
@@ -587,7 +661,10 @@ std::optional<AnchorAlignment> align_to_anchors(
   // measurement's metric error scales with its range, so a landmark twenty
   // metres out needs ten times the tolerance of one at two to be judged on the
   // same angle.
-  const Weights & residual_scale = Weights());
+  const Weights & residual_scale = Weights(),
+  // Solve the bearing residuals for a rotation about base_link with no sideways
+  // slide. See AnchorSettings::bearing_nonholonomic for why.
+  bool bearing_nonholonomic = false);
 
 struct CameraTranslation
 {

@@ -84,6 +84,13 @@ Configuration declare_and_read(rclcpp::Node & node)
 
   topics.imu = declare_string("imu_topic", topics.imu);
   settings.use_imu_yaw = declare_bool("use_imu_yaw", true);
+  settings.vision_yaw = declare_bool("vision_yaw", false);
+  settings.anchor_heading_gain = declare_double("anchor_heading_gain", 0.0);
+  settings.vision_yaw_rigid = declare_bool("vision_yaw_rigid", true);
+  settings.vision_yaw_vehicle = declare_bool("vision_yaw_vehicle", false);
+  settings.esm_yaw_source = declare_bool("esm_yaw_source", false);
+  settings.esm_attitude = declare_bool("esm_attitude", false);
+  settings.esm_attitude_leak_sec = declare_double("esm_attitude_leak_sec", 2.0);
   // The CARLA bridge publishes the IMU against simulation time.
   settings.imu_max_age_sec = declare_double("imu_max_age_sec", 0.02);
   // Largest gap between IMU samples still worth interpolating across.
@@ -346,6 +353,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.rebuild_measure_only = declare_bool("rebuild_measure_only", false);
   settings.fusion_gain_mode = declare_int("fusion_gain_mode", 0);
   settings.equalise_reach = declare_bool("equalise_reach", false);
+  settings.photometric_scale = declare_double("photometric_scale", 1.0);
   settings.photometric_step_gain =
     declare_double("photometric_step_gain", 0.0);
   settings.photometric_min_score =
@@ -363,6 +371,12 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_double("pose_graph_loop_weight", 1.0);
   settings.pose_graph_sweeps = declare_int("pose_graph_sweeps", 8);
   settings.anchor_link_radius_m = declare_double("anchor_link_radius_m", 0.0);
+  settings.anchor_link_cross_source_only =
+    declare_bool("anchor_link_cross_source_only", false);
+  settings.anchor_bearing_nonholonomic =
+    declare_bool("anchor_bearing_nonholonomic", false);
+  settings.anchor_density_replace_margin =
+    declare_double("anchor_density_replace_margin", 0.0);
   settings.anchor_link_adopter_writes =
     declare_bool("anchor_link_adopter_writes", false);
   settings.anchor_link_rebind_grace = declare_int("anchor_link_rebind_grace", 1);
@@ -370,10 +384,19 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_bool("anchor_link_measure_only", false);
   settings.ground_plane_offset_m =
     declare_double("ground_plane_offset_m", 0.0);
+  settings.ground_common_scale =
+    declare_double("ground_common_scale", 1.0);
   settings.pair_scale_gain = declare_double("pair_scale_gain", 0.0);
   settings.pitch_centre_x_m = declare_double("pitch_centre_x_m", 0.0);
   settings.ground_height_from_tilt =
     declare_bool("ground_height_from_tilt", true);
+  settings.band_attitude = declare_bool("band_attitude", false);
+  settings.band_attitude_tau_sec = declare_double("band_attitude_tau_sec", 3.0);
+  settings.band_lens_scale = declare_double("band_lens_scale", 0.0);
+  settings.band_max_disagreement = declare_double("band_max_disagreement", 0.05);
+  settings.anchor_attitude = declare_bool("anchor_attitude", false);
+  settings.anchor_attitude_solves = declare_double("anchor_attitude_solves", 100.0);
+  settings.anchor_attitude_gain = declare_double("anchor_attitude_gain", 1.0);
   settings.attitude_slope_tau_sec = declare_double("attitude_slope_tau_sec", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);

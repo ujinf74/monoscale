@@ -231,6 +231,25 @@ bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::T
     if (data.size() > after + 2) {
       out.photometric_spread = data[after + 2];
     }
+    if (data.size() > after + 12) {
+      out.band_near = data[after + 3];
+      out.band_far = data[after + 4];
+      out.band_left = data[after + 7];
+      out.band_right = data[after + 8];
+      out.band_near_range = data[after + 9];
+      out.band_far_range = data[after + 10];
+      out.band_left_lateral = data[after + 11];
+      out.band_right_lateral = data[after + 12];
+    }
+    if (data.size() > after + 14) {
+      out.band_near_forward = data[after + 13];
+      out.band_far_forward = data[after + 14];
+    }
+    if (data.size() > after + 17) {
+      out.esm_yaw = data[after + 15];
+      out.esm_pitch = data[after + 16];
+      out.esm_roll = data[after + 17];
+    }
   }
   return true;
 }
@@ -265,6 +284,18 @@ int main(int argc, char ** argv)
   // because it is the right number, not because it measured better.
   double truth_offset_m = 1.399;
   bool truth_tilt = false;
+  // Do not feed the estimator any inertial sample at all. The point is not to
+  // switch off one consumer but to ask what the cameras can do alone, and on
+  // this simulator the instrument's orientation is the recorded truth, so
+  // every score taken with it is a score no real vehicle would repeat.
+  bool no_imu = false;
+  // Replace the instrument's orientation with its own gyro, integrated from the
+  // first sample. CARLA reports the recorded truth as the orientation -- the
+  // yaw error against truth measures 0.000000 degrees -- so every score taken
+  // with it is a score no vehicle with a real part would repeat. Integrated,
+  // the same drives drift 0.006 to 0.29 degrees over a minute, which is what a
+  // heading actually costs.
+  bool gyro_yaw = false;
   std::string hops_path;
   std::string revisits_path;
   std::string anchors_path;
@@ -294,6 +325,10 @@ int main(int argc, char ** argv)
       tolerance = std::stod(next());
     } else if (argument == "--truth-tilt") {
       truth_tilt = true;
+    } else if (argument == "--no-imu") {
+      no_imu = true;
+    } else if (argument == "--gyro-yaw") {
+      gyro_yaw = true;
     } else if (argument == "--hops") {
       hops_path = next();
     } else if (argument == "--anchors") {
@@ -385,7 +420,28 @@ int main(int argc, char ** argv)
         imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z);
       sample.linear_acceleration = Eigen::Vector3d(
         imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z);
-      estimator.ingest_imu(sample);
+      if (gyro_yaw) {
+        // Seeded on the first sample and carried by the rate from there. Roll
+        // and pitch are left as reported: this asks about the heading, and
+        // changing two things at once would not answer it.
+        static bool seeded = false;
+        static double heading = 0.0;
+        static double last = 0.0;
+        const double w = 2.0 * std::atan2(sample.orientation.z(), sample.orientation.w());
+        if (!seeded) {
+          heading = w;
+          last = sample.stamp;
+          seeded = true;
+        } else if (sample.stamp > last) {
+          heading += sample.angular_velocity.z() * (sample.stamp - last);
+          last = sample.stamp;
+        }
+        sample.orientation = Eigen::Vector4d(
+          0.0, 0.0, std::sin(0.5 * heading), std::cos(0.5 * heading));
+      }
+      if (!no_imu) {
+        estimator.ingest_imu(sample);
+      }
     } else if (info_topics.count(message->topic_name) > 0) {
       const auto info = deserialize<sensor_msgs::msg::CameraInfo>(serialized);
       if (info.width > 0 && info.height > 0 && info.k[0] > 0.0) {
@@ -702,7 +758,7 @@ int main(int argc, char ** argv)
         // drivers instead of binned by the one the correction already assumes.
         std::FILE * f = std::fopen(hops_path.c_str(), "w");
         if (f != nullptr) {
-          std::fprintf(f, "t0,t1,dt,length,dyaw,curvature,bias,lat,front,rear,fmap,rmap,fwd,yawsign,fcond,fweak,rcond,rweak,fhx,fhy,fpx,fpy,rhx,rhy,rpx,rpy,frng,fn,rrng,rn,pdist,flen,fh,fp,rh,rp\n");
+          std::fprintf(f, "t0,t1,dt,length,dyaw,curvature,bias,lat,front,rear,fmap,rmap,fwd,yawsign,fcond,fweak,rcond,rweak,fhx,fhy,fpx,fpy,rhx,rhy,rpx,rpy,frng,fn,rrng,rn,pdist,flen,fh,fp,rh,rp,roll,pitch,byaw,broll,bpitch,btx,bty\n");
           for (const auto & hop : hops) {
             if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
               continue;
@@ -741,7 +797,7 @@ int main(int argc, char ** argv)
               f, "%.6f,%.6f,%.4f,%.5f,%.6f,%.5f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.5f,%+d,"
               "%.4f,%.5f,%.4f,%.5f,"
               "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
-              "%.4f,%.0f,%.4f,%.0f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f\n",
+              "%.4f,%.0f,%.4f,%.0f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.8f,%.8f,%.8f,%.8f,%.8f\n",
               hop.previous_stamp, hop.stamp, hop.stamp - hop.previous_stamp, length, std::abs(step.yaw),
               std::abs(step.yaw) / length, along(hop.fused_hop), across(hop.fused_hop),
               camera(0), camera(1),
@@ -756,7 +812,10 @@ int main(int argc, char ** argv)
               pick(hop.camera_mean_range, 1), pick(hop.camera_point_count, 1),
               hop.photometric_distance, hop.fused_length,
               pick(hop.radial_height, 0), pick(hop.radial_pitch, 0),
-              pick(hop.radial_height, 1), pick(hop.radial_pitch, 1));
+              pick(hop.radial_height, 1), pick(hop.radial_pitch, 1),
+              hop.roll, hop.pitch, hop.bearing_yaw,
+              hop.bearing_roll_raw, hop.bearing_pitch_raw,
+              hop.bearing_tx, hop.bearing_ty);
           }
           std::fclose(f);
         }
