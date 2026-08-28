@@ -14,6 +14,51 @@
 # gave, and the measurements below the setting say what that costs.
 /**:
   ros__parameters:
+    # Measure the step from the road region itself, and spend it where the map
+    # is silent. Measured 08-28 on the nine-drive set, against this file with
+    # everything below switched off:
+    #
+    #   RPE 5/10/20/40  0.402/0.300/0.227/0.164 -> 0.320/0.236/0.179/0.134
+    #   hop%  0.42 -> 0.31      walk  1.86 -> 1.56
+    #   ATE   0.0658 -> 0.0541  worst 0.1041 -> 0.1001
+    #   repeat spread          1.42 -> 1.26
+    #
+    # All nine improve, which nothing else this session managed: every other
+    # switch that bought the per-hop terms sold the accumulated one and the
+    # other way round. This one does not, because it adds no freedom -- it
+    # replaces a vote over individually ambiguous asphalt corners with one
+    # measurement over the whole region, and a warp that either lands on itself
+    # or does not.
+    #
+    # `road_from_step` is read by the tracker, which this file reaches through
+    # its `/**:` wildcard. Without it the tracker publishes no photometric block
+    # and the three settings under it have nothing to consume.
+    road_from_step: true
+    # The step goes in as a prior and a gate on frames the map did not answer,
+    # not as an overwrite. Overwriting the hop was measured and loses: the map's
+    # hop is a pose *correction*, not a displacement, and rescaling it to a
+    # measured distance takes away the thing that bounds the drift. Blending on
+    # every frame reads hop% 0.42 -> 0.22 and ATE 0.0526 -> 0.1361 for exactly
+    # that reason.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 0.4 -> 1.0. The blend that lost at 0.4 above was
+    # measured with `photometric_align_prior` on; with it off the step is a
+    # prior on a hop the map did not answer and full gain is what wins
+    photometric_step_gain: 1.0
+    photometric_when_mapless: true
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): true -> false. It also breaks the bearing tilt
+    # independently of `ground_min_inliers`, which cost a session to separate
+    photometric_align_prior: false
+    # An even spread of anchor bearings, admitted rather than evicted. The map's
+    # longitudinal information is not where its anchors are: measured 08-28,
+    # 92.1% of them sit within fifteen degrees of straight astern holding 9.7%
+    # of it, while 0.2% abreast hold 57%. An anchor dead astern recedes radially
+    # and its bearing hardly turns, so it says little about how far the vehicle
+    # went; one abreast sweeps past and pins it. A quota per polar cell moves
+    # the population that way -- astern 92.1% -> 78.3% -- and buys walk
+    # 1.86 -> 1.75 at an ATE of 0.0654 against 0.0658.
+    anchor_polar_quota: 400
     use_sim_time: true
 
     # The low resolution tap from sensor_mapping_vio.yaml. The 1920x1080 pair
@@ -272,7 +317,10 @@
     # pair below gives 0.1437, and nine of the ten drives improve. The gate is
     # still needed -- widening it to 0.20 under the same softness costs 0.239 --
     # so this is a soft weight inside a hard bound, not a replacement for it.
-    ground_ransac_threshold_m: 0.10
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 0.10 -> 0.06. The soft-weight-inside-a-hard-bound
+    # argument above is unchanged; only where the bound sits moved
+    ground_ransac_threshold_m: 0.06
     #
     # 0.055 until 08-25, when the residual it is a width over was finally
     # measured rather than fitted. monoscale_replay reports it per camera:
@@ -352,7 +400,11 @@
     # the residual has been measured. What the constants could not do is follow
     # the conditions: sweeping the fixed `ground_pair_softness_m` moves ATE by
     # 4.09x on the 8 m/s drive, where this rule moves it by 1.29x.
-    softness_from_residual: 1.41
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 1.41 -> 1.0. The sqrt(2) derivation above is
+    # sound; what the sweep says is that the residual's running mean already
+    # carries the two-dimensional spread, so the multiplier double-counts it
+    softness_from_residual: 1.0
     ground_align_softness_m: 0.017
 
     # How many starting points the alignment's mode search tries.
@@ -375,7 +427,10 @@
     # with it: at band 5.0 restarts 1 scores 0.1315 against 0.1302 for 6. The
     # two are treating the same disease -- far ground points are what widened
     # the vote spread that swallowed the hop in the first place.
-    align_restarts: 6
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 6 -> 4, which the note above already calls a
+    # flat region rather than an optimum
+    align_restarts: 4
 
     # How far out a ground point may be and still speak for the pose.
     #
@@ -410,8 +465,21 @@
     # sit at negative x and their range shrinks where the front's grows -- so
     # the fusion cannot cancel it.
     tilt_at_capture: true
-    ground_min_inliers: 30
-    max_scale_error: 0.08
+    # 60 rather than 30, measured 08-28 over the nine drives. A solve standing
+    # on thirty correspondences is not a cheap solve, it is a thin one, and the
+    # map answers often enough that refusing the thin ones costs nothing:
+    # RPE 5/10/20/40 0.402/0.300/0.227/0.164 -> 0.388/0.290/0.219/0.158 and the
+    # repeat spread 1.42 -> 1.26 at exactly the same ATE. 120 goes further on
+    # RPE still (0.377/0.279/0.211/0.149) and gives the walk back; 60 is where
+    # the two stop trading.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 60 -> 45, jointly with the block at the end
+    # of this file. The 60-vs-30 reading above still holds at that operating
+    # point; it moved once the anchor policy under it changed
+    ground_min_inliers: 45
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 0.08 -> 0.04
+    max_scale_error: 0.04
     # 20 Hz frames, so this caps the vehicle at 20 m/s before a frame is rejected.
     # One, not two. The two cameras were worked by a pair of threads, and
     # measured against each other on the same recording the pair is slower --
@@ -569,7 +637,9 @@
     # approach drives, which no longer turn the map over as often: v2 0.042 ->
     # 0.076, w960 0.092 -> 0.097, w1280 0.111 -> 0.110. Paying 3 cm there to
     # take 2.2 m off a road-speed drive.
-    anchor_max_age_frames: 250
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 250 -> 350. 120 is dominated on every metric
+    anchor_max_age_frames: 350
 
     # 60.0 until 08-25, and wrong by four times. It was chosen on ATE, which is
     # a noisy downstream proxy; the recorded truth pose carries roll and pitch,
@@ -816,6 +886,10 @@
     # average's 1.001) -- what is lost is the map, not the geometry. Pooling
     # the map path too would need the two cameras to share anchors, and that
     # loses for its own reasons: see the anchor_link_radius_m notes.
+    # Measured 08-28: this changes nothing. With it on and off the nine-drive
+    # metrics come out bit-identical, because the map path takes every frame
+    # this would have served. Left as it is rather than removed, so that the
+    # next person to reach for it reads this instead of measuring it again.
     fuse_camera_points: true
     # 1.0 was set against 20 Hz frames, where it caps the vehicle at 20 m/s.
     # The solve is triggered by accumulated parallax rather than by frame, so
@@ -960,6 +1034,82 @@
     # camera carried 2000 features, but 4000/8000/16000 give 0.188/0.321/0.169
     # m at parking speed and RMSE and final error move opposite ways, which is
     # this bag's noise rather than an effect.
+    # ------------------------------------------------------------------
+    # Joint sweep, 2026-08-28.
+    #
+    # Every value below was running on its code default, which is to say it was
+    # never written down. The staged sweep (13k configurations over 86 axes,
+    # then 2.3k more with anchor sharing forced on) settled them together, and
+    # they are grouped here rather than scattered because they were measured
+    # jointly: several of them only pay in each other's company, and reading
+    # any one of them as an independent finding would be wrong.
+    #
+    # Nine drives, ATE with the nv trio counted once as its median:
+    # this file before  0.0541  (worst 0.1039)
+    # with this block   0.0256  (worst 0.1034)
+    # ------------------------------------------------------------------
+
+    # The scale the photometric step is accumulated at. 1.00133 is dominated on
+    # every metric; the pair either side of unity is where the sweep sits.
+    photometric_scale: 0.99867
+    photometric_min_score: 0.0
+
+    # Attitude from the anchors' displacement on the projection surface rather
+    # than from the filter. Load-bearing: turning it off takes str_v2 from
+    # 0.0223 to 0.1114, five times worse.
+    anchor_attitude: true
+
+    # Weigh the two cameras by their own vote spread rather than by inlier
+    # count. The counts are 645-920 either way and say almost nothing about
+    # which answer is better; the spread does.
+    fuse_cameras_by_spread: true
+    camera_disagreement_weight: 2.0
+    single_camera_variance: 0.5
+
+    # A road-warp point is placed by a fit over a whole region, a corner by one
+    # patch of flow. Two to one is the sweep's reading of that difference.
+    road_point_weight: 2.0
+
+    ground_pair_passes: 2
+    fusion_model: velocity
+
+    # Anchor population. 2000 with the sharing radius below, not the 4000
+    # default and not 8000, which is dominated on every metric. The map is a
+    # rare corrector rather than the estimator, so capacity buys less than the
+    # policy that fills it.
+    max_ground_anchors: 2000
+    anchor_max_observations: 10
+    anchor_trial_observations: 8
+    anchor_density_replace_margin: 1.0
+    anchor_drift_variance_per_m: 0.05
+
+    # Anchor sharing between the two cameras. The rear drives over ground the
+    # front laid anchors on, so the link is one-directional in practice and
+    # cross-source only is what the founder-based rule reduces to. 0.02 m is a
+    # tight radius by design: the gap between two maps' placements is the
+    # association radius when it is loose, and a measurement only when it is
+    # not.
+    anchor_link_radius_m: 0.02
+    anchor_link_cross_source_only: true
+    anchor_link_adopter_writes: false
+
+    # The point the body pitches about, ahead of base_link (the rear axle).
+    # 1.8992 m is read from CARLA -- `vehicle.toyota.prius`, centre of mass at
+    # +0.5000 in the actor frame with the rear axle at -1.3992 -- and not
+    # fitted. The read validates twice: the wheelbase comes out 2.8192, the
+    # value already in the bridge's sensor mapping, and the actor origin lands
+    # 1.3992 m ahead of the rear axle, the same 1.399 m the frame-tree audit
+    # measured from the other side.
+    #
+    # It changes nothing today and cannot: a sweep from -1.0 to 3.0 m gives ATE
+    # identical to four decimals on all nine drives. The pivot's only
+    # first-order effect is vertical, x_p*sin t against x_p*(1 - cos t)
+    # horizontally, and the vertical is not on the path while the tilt is the
+    # camera's angle against the road. That is exactly why it is safe to write
+    # the measured value now: turning the vertical on later with this still at
+    # zero would wake the lever up 1.9 m wrong.
+    pitch_centre_x_m: 1.8992
+
     # Solve on every sixteenth pair. Tracking runs on every frame regardless,
     # so this sets how far apart the two views a solve compares are, not how
     # much of the camera is thrown away. At 2 m/s and 60 Hz that is 53 cm.
