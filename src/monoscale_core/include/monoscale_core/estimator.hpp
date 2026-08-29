@@ -188,7 +188,6 @@ struct EstimatorSettings
   bool coast_on_reject = true;
   double twist_lowpass_tau = 0.12;
 
-  double mapping_baseline_m = 0.35;
   double mapping_min_period_sec = 0.04;
   double obstacle_min_height_m = 0.2;
   double obstacle_max_height_m = 2.5;
@@ -202,8 +201,8 @@ struct EstimatorSettings
   // deployed default produced obstacles by crashing. On is the only setting
   // that means anything here.
   //
-  // 0.35 is inherited from `mapping_baseline_m` and is not measured for this
-  // method. The slip's own note reports that baseline as marginal: a 0.15 m
+  // 0.35 was inherited from a `mapping_baseline_m` that nothing read, and was
+  // never measured for this method. The slip's own note reports that baseline as marginal: a 0.15 m
   // obstacle slides 68 mm over it, which the pitch wobble buries, and that
   // scored precision 0.455 at recall 0.016. What fixed it was letting each
   // feature accumulate its own baseline over as many frames as it survives,
@@ -349,6 +348,39 @@ struct EstimatorSettings
   double anchor_information_power = 0.0;
   // Weigh anchors in the registration by information rather than sightings.
   bool anchor_weight_by_information = false;
+  double anchor_lookahead_m = 0.0;
+  double anchor_lookahead_sec = 0.0;
+  // Time constant of the heading the anchor weights are judged from. 0 uses the
+  // pose's own heading, which is what every measurement before this used.
+  double anchor_weight_yaw_tau_sec = 0.0;
+  double anchor_geometry_power = 0.0;
+  bool anchor_weight_by_variance = false;
+  double anchor_bearing_variance = 3.6e-6;
+  bool anchor_weight_by_trend = false;
+  double anchor_trend_gain = 0.05;
+  double anchor_trend_power = 0.0;
+  double anchor_trend_evict_variance = 0.0;
+  // Let photometric road-grid points into the anchor map ahead of corners.
+  bool anchor_road_priority = false;
+  // Spend the map's scarce free slots on the most informative candidates.
+  bool anchor_admit_by_information = false;
+  // Spend them on the clearest patches instead. Needs `publish_clarity` on the
+  // tracker; without it the message carries no clarity block and this is inert.
+  bool anchor_admit_by_clarity = false;
+  // Turn the road warp's leftover parallax into obstacle points. Needs the
+  // tracker's `parallax_grid` to be non-zero; without it there is nothing to
+  // read and this is inert.
+  bool parallax_height = false;
+  // A cell whose residual is under this many pixels is the road, not an
+  // obstacle: the warp is not exact and its own error lands here too.
+  double parallax_min_pixels = 1.0;
+  // Which way a point above the plane slips against the plane's prediction.
+  // Derivable, but cheaper to settle by measurement than to argue about.
+  double parallax_sign = -1.0;
+  // Consecutive sightings a candidate must survive before it may found an
+  // anchor. 1 is founding on first sight, which is what every measurement
+  // before this was taken with.
+  int anchor_found_after_observations = 1;
 
   // Measure a ground point's distance from the camera, and hand the anchor
   // alignment the mount, in the same frame the points are in.
@@ -595,6 +627,18 @@ struct EstimatorSettings
   double attitude_slope_tau_sec = 0.0;
   double vision_scale = 1.0;
   double map_solve_weight = 1.0;
+
+  // How much of the map's correction to apply. The map path reports
+  // `relative_motion(pose_, placed)`, which is a displacement with this map's
+  // disagreement with the fused pose folded in; the two-frame solve over the
+  // same features is that displacement without it. This blends between them:
+  //
+  //   reported = pair + gain * (map - pair)
+  //
+  // 1.0 is what the map path has always done and costs nothing extra (the pair
+  // solve is skipped). 0.0 keeps the map's inlier selection and drops its
+  // correction. Above 1.0 over-applies it.
+  double map_correction_gain = 1.0;
   bool anchor_select_by_consistency = true;
   double anchor_seed_travel_m = 0.0;
 
@@ -694,6 +738,15 @@ struct TrackFrame
   double esm_yaw = std::numeric_limits<double>::quiet_NaN();
   double esm_pitch = std::numeric_limits<double>::quiet_NaN();
   double esm_roll = std::numeric_limits<double>::quiet_NaN();
+  // How distinct each feature is against its surroundings, from the tracker's
+  // corner response. Empty when the tracker is not publishing it, which is the
+  // default and what every measurement before this was taken with.
+  Weights clarity;
+  // What the road warp could not explain, one row per grid cell:
+  // (x, y, dx, dy) in pixels of the full frame. A point on the plane is put
+  // back exactly and reads zero; the residual is the parallax of everything
+  // that is not on the plane, which is what carries its height.
+  Eigen::MatrixXd parallax;
 };
 
 struct ImuSample
@@ -823,6 +876,24 @@ struct Update
 
 struct Diagnostics
 {
+  // Where the map's capacity sits, in six 30-degree sectors off the heading.
+  // Counts and the summed solve weight, so the two questions -- how many
+  // anchors are there and how much do they carry -- can be read apart.
+  std::array<int64_t, 6> anchor_sector_count{};
+  std::array<double, 6> anchor_sector_weight{};
+  std::array<double, 6> anchor_sector_range{};
+  // How many times the live anchors have actually been seen again: 1, 2, 3-4,
+  // 5-8, 9-16, 17+. Re-observation is what corrects an anchor and what a trend
+  // in its scatter could be read from, so this says whether either is possible.
+  std::array<int64_t, 6> anchor_sightings{};
+  // How many live anchors were founded on a photometric road patch.
+  int64_t anchor_road = 0;
+  // Obstacle points made from the road warp's leftover parallax.
+  int64_t parallax_points = 0;
+  // Live anchors past trial and still self-consistent: what a solve can use.
+  int64_t anchor_usable = 0;
+  // Position scatter in six decades: <1e-6, 1e-5, 1e-4, 1e-3, 1e-2, >=1e-2 m^2.
+  std::array<int64_t, 6> anchor_scatter{};
   int64_t pairs_seen = 0;
   int64_t frames_processed = 0;
   int64_t frames_evicted = 0;
@@ -1025,12 +1096,13 @@ public:
   };
   std::vector<RevisitAudit> revisit_audit() const;
   // Live anchors as range, bearing off the heading, weight, solves unseen.
-  void anchor_polar(std::vector<std::array<double, 4>> & out) const;
+  void anchor_polar(std::vector<std::array<double, 7>> & out) const;
 
 private:
   void integrate_points(
     const std::vector<std::optional<Solved>> & solved, const Pose2 & previous_pose,
     Update & update);
+  void integrate_parallax(Camera & camera, const Solved & entry, Update & update);
   void integrate_obstacle_slip(Camera & camera, const Solved & solved, Update & update);
   CameraModel frame_model(const Camera & camera, int width, int height) const;
 
@@ -1079,6 +1151,7 @@ private:
   // Every pose an anchor sighting was taken from, in order.
   std::vector<std::array<double, 3>> pose_history_;
   std::vector<double> pose_time_;
+  std::optional<double> anchor_weight_yaw_;
   Eigen::Vector3d filtered_twist_ = Eigen::Vector3d::Zero();
   // Accumulated dead-reckoning covariance for the absolute pose.
   Eigen::Matrix3d pose_covariance_ = Eigen::Matrix3d::Zero();

@@ -270,6 +270,38 @@ private:
       frame.pixels(i, 0) = data[at + 3];
       frame.pixels(i, 1) = data[at + 4];
     }
+    // The parallax block: four values a cell, then the cell count, then the
+    // marker. Read before the clarity block because it sits behind it.
+    size_t tail = data.size();
+    if (tail > 2 && data[tail - 1] == -8.125e7) {
+      const int cells = static_cast<int>(data[tail - 2]);
+      const size_t need = static_cast<size_t>(cells) * 4;
+      if (cells > 0 && tail >= need + 2 && tail - need - 2 >= static_cast<size_t>(4 + 5 * count)) {
+        const size_t first = tail - need - 2;
+        frame.parallax.resize(cells, 4);
+        for (int i = 0; i < cells; ++i) {
+          for (int j = 0; j < 4; ++j) {
+            frame.parallax(i, j) = data[first + static_cast<size_t>(i) * 4 + j];
+          }
+        }
+        tail = first;
+      }
+    }
+    // The clarity block, if the tracker appended one: `count` values then the
+    // count itself, so a message without it is read exactly as before and one
+    // with it identifies itself rather than being inferred from a length.
+    const size_t after_features = static_cast<size_t>(4 + 5 * count);
+    if (count > 0 && tail >= after_features + static_cast<size_t>(count) + 1 &&
+      static_cast<int>(data[tail - 1]) == count)
+    {
+      const size_t first = tail - 1 - static_cast<size_t>(count);
+      if (first >= after_features) {
+        frame.clarity.resize(count);
+        for (int i = 0; i < count; ++i) {
+          frame.clarity(i) = data[first + static_cast<size_t>(i)];
+        }
+      }
+    }
     // The photometric block the tracker appends after the features. The live
     // path read none of it until now, so every measurement built on the road
     // region existed only under replay -- the gain that consumes it defaults

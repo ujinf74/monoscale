@@ -16,6 +16,8 @@ GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings, int sources)
   position_.setZero(capacity, 2);
   observation_.setZero(capacity);
   variance_.setZero(capacity);
+  variance_slow_.setZero(capacity);
+  pending_.assign(static_cast<size_t>(std::max(sources, 1)), {});
   seen_.setZero(capacity);
   information_.setZero(capacity);
   identifier_.setConstant(capacity, -1);
@@ -192,10 +194,10 @@ double GroundAnchorMap::longitudinal_information_at(double x, double y) const
   if (!(lens_height_ > 1e-6)) {
     return 1.0;
   }
-  const double c = std::cos(yaw_);
-  const double s = std::sin(yaw_);
-  const double dx = x - at_x_;
-  const double dy = y - at_y_;
+  const double c = std::cos(weight_yaw_);
+  const double s = std::sin(weight_yaw_);
+  const double dx = x - (at_x_ + look_f_ * c - look_l_ * s);
+  const double dy = y - (at_y_ + look_f_ * s + look_l_ * c);
   const double f = c * dx + s * dy;
   const double l = -s * dx + c * dy;
   const double range = std::hypot(f, l);
@@ -213,10 +215,10 @@ double GroundAnchorMap::longitudinal_information(int64_t slot) const
   if (!(lens_height_ > 1e-6)) {
     return 1.0;
   }
-  const double c = std::cos(yaw_);
-  const double s = std::sin(yaw_);
-  const double dx = position_(slot, 0) - at_x_;
-  const double dy = position_(slot, 1) - at_y_;
+  const double c = std::cos(weight_yaw_);
+  const double s = std::sin(weight_yaw_);
+  const double dx = position_(slot, 0) - (at_x_ + look_f_ * c - look_l_ * s);
+  const double dy = position_(slot, 1) - (at_y_ + look_f_ * s + look_l_ * c);
   const double f = c * dx + s * dy;
   const double l = -s * dx + c * dy;
   const double range = std::hypot(f, l);
@@ -229,12 +231,76 @@ double GroundAnchorMap::longitudinal_information(int64_t slot) const
   return cosb * cosb / (radial * radial) + sinb * sinb / (range * range);
 }
 
+// What this anchor's next sighting is expected to scatter by, in m^2: the fast
+// average carried one step along the trend the slow one reveals.
+double GroundAnchorMap::predicted_variance(int64_t slot) const
+{
+  const double fast = std::max(variance_(slot), 1e-9);
+  if (!(settings_.trend_power > 0.0)) {
+    return fast;
+  }
+  const double slow = std::max(variance_slow_(slot), 1e-9);
+  return fast * std::pow(fast / slow, settings_.trend_power);
+}
+
+double GroundAnchorMap::scatter_at(int64_t slot) const
+{
+  return slot >= 0 && slot < variance_.size() ? variance_(slot) : -1.0;
+}
+
+bool GroundAnchorMap::usable_at(int64_t slot) const
+{
+  if (slot < 0 || slot >= identifier_.size() || identifier_(slot) < 0) {
+    return false;
+  }
+  if (observation_(slot) < settings_.trial_observations) {
+    return false;
+  }
+  return !settings_.select_by_consistency || variance_(slot) <= settings_.max_variance;
+}
+
 double GroundAnchorMap::weight_at(int64_t slot) const
 {
+  if (settings_.weight_by_trend) {
+    // No bearing. An anchor that sits where the geometry is poor scatters when
+    // it is seen again, and that is already what this measures.
+    const double sightings = static_cast<double>(
+      std::max<int64_t>(
+        std::min<int64_t>(observation_(slot), settings_.max_observations), 1));
+    const double position = predicted_variance(slot) / (2.0 * sightings) +
+      settings_.drift_variance_per_m * std::max(path_ - founded_path_(slot), 0.0);
+    return 1.0 / std::max(position, 1e-12);
+  }
+  if (settings_.weight_by_variance) {
+    // What this frame's sighting of the anchor is worth, in metres squared of
+    // longitudinal uncertainty, plus what the anchor's own position is worth.
+    const double geometric = std::max(longitudinal_information(slot), 1e-18);
+    const double measured = settings_.bearing_variance / geometric;
+    // `variance_` is the running mean of `dx^2 + dy^2` between a sighting and
+    // the stored position -- the scatter of the sightings, not the variance of
+    // the position they average to. The position is a mean, so its variance is
+    // that over the number of sightings, and over two because the scatter is a
+    // squared distance in the plane and this is per axis.
+    //
+    // `max_observations` is the right count to divide by and this is the first
+    // use that earns it: the sightings are not independent (each is written in
+    // the world frame the estimate had just settled on), so the window has to
+    // be finite, which is exactly what that setting bounds.
+    const double sightings = static_cast<double>(
+      std::max<int64_t>(
+        std::min<int64_t>(observation_(slot), settings_.max_observations), 1));
+    const double position = std::max(variance_(slot), 0.0) / (2.0 * sightings) +
+      settings_.drift_variance_per_m * std::max(path_ - founded_path_(slot), 0.0);
+    return 1.0 / std::max(measured + position, 1e-12);
+  }
   double count = settings_.weight_by_information
     ? information_(slot)
     : static_cast<double>(
     std::min<int64_t>(observation_(slot), settings_.max_observations));
+  if (settings_.geometry_power > 0.0) {
+    count *= std::pow(
+      std::max(longitudinal_information(slot), 1e-18), settings_.geometry_power);
+  }
   // What the anchor has stopped being sure of since it was written.
   //
   // An anchor is a world position, and the pose that put it there has moved on
@@ -259,7 +325,7 @@ double GroundAnchorMap::weight_at(int64_t slot) const
 }
 
 void GroundAnchorMap::polar(
-  double x, double y, double yaw, std::vector<std::array<double, 4>> & out) const
+  double x, double y, double yaw, std::vector<std::array<double, 7>> & out) const
 {
   out.clear();
   out.reserve(static_cast<size_t>(live_));
@@ -275,7 +341,9 @@ void GroundAnchorMap::polar(
     const double l = -s * dx + c * dy;
     out.push_back(
       {std::hypot(f, l), std::atan2(l, f), weight_at(slot),
-        static_cast<double>(frame_ - seen_(slot))});
+        static_cast<double>(observation_(slot)),
+        static_cast<double>(identifier_(slot)),
+        variance_(slot), usable_at(slot) ? 1.0 : 0.0});
   }
 }
 
@@ -355,9 +423,10 @@ void GroundAnchorMap::anchor_view(
 
 void GroundAnchorMap::update(
   int source, const Identities & ids, const Points2 & world_points, bool allow_new,
-  const Weights & information, const Points2 & body_points, int32_t pose_index)
+  const Weights & information, const Points2 & body_points, int32_t pose_index,
+  const Weights & clarity)
 {
-  update(source, ids, world_points, allow_new, information);
+  update(source, ids, world_points, allow_new, information, clarity);
   const Eigen::Index count = ids.size();
   if (body_points.rows() != count) {
     return;
@@ -426,7 +495,7 @@ void GroundAnchorMap::rebuild(const std::vector<std::array<double, 3>> & poses)
 
 void GroundAnchorMap::update(
   int source, const Identities & ids, const Points2 & world_points, bool allow_new,
-  const Weights & information)
+  const Weights & information, const Weights & clarity)
 {
   const Eigen::Index count = ids.size();
   const bool weighted = information.size() == count;
@@ -480,6 +549,20 @@ void GroundAnchorMap::update(
         slot = adopted;
       } else {
         if (allow_new) {
+          // Earn the slot first. See `found_after_observations`.
+          if (settings_.found_after_observations > 1) {
+            auto & table = pending_[static_cast<size_t>(source)];
+            auto held = table.find(ids(i));
+            int32_t run = 1;
+            if (held != table.end()) {
+              run = held->second.second + 1 == frame_ ? held->second.first + 1 : 1;
+            }
+            if (run < settings_.found_after_observations) {
+              table[ids(i)] = {run, frame_};
+              continue;
+            }
+            table.erase(ids(i));
+          }
           fresh.push_back(i);
         }
         continue;
@@ -517,6 +600,13 @@ void GroundAnchorMap::update(
     const double dy = y - position_(slot, 1);
     const double residual = dx * dx + dy * dy;
     variance_(slot) += gain * (residual - variance_(slot));
+    // The slow companion. Its gain is fixed rather than shared with the fast
+    // one, because what the ratio has to measure is the change over a longer
+    // window than the fast average can remember.
+    if (settings_.weight_by_trend) {
+      const double slow = std::min(settings_.trend_gain, gain);
+      variance_slow_(slot) += slow * (residual - variance_slow_(slot));
+    }
     grid_erase(slot);
     position_(slot, 0) += gain * dx;
     position_(slot, 1) += gain * dy;
@@ -561,6 +651,29 @@ void GroundAnchorMap::update(
   }
   if (live_ >= settings_.max_anchors) {
     saturated_ = true;
+  }
+  // Clearest first, if asked and if the tracker gave us the means.
+  if (settings_.admit_by_clarity && clarity.size() == count && fresh.size() > 1) {
+    std::stable_sort(
+      fresh.begin(), fresh.end(),
+      [&](Eigen::Index a, Eigen::Index b) {return clarity(a) > clarity(b);});
+  }
+  // Best first, if asked. Sorting before the identity partition so that the
+  // partition still wins where both are on.
+  if (settings_.admit_by_information && fresh.size() > 1) {
+    std::stable_sort(
+      fresh.begin(), fresh.end(),
+      [&](Eigen::Index a, Eigen::Index b) {
+        return longitudinal_information_at(world_points(a, 0), world_points(a, 1)) >
+        longitudinal_information_at(world_points(b, 0), world_points(b, 1));
+      });
+  }
+  // Priority candidates first, stably, so the rest keep the order the frame
+  // gave them. See `priority_identity_floor`.
+  if (settings_.priority_identity_floor > 0 && fresh.size() > 1) {
+    std::stable_partition(
+      fresh.begin(), fresh.end(),
+      [&](Eigen::Index i) {return ids(i) >= settings_.priority_identity_floor;});
   }
   size_t room = std::min(fresh.size(), free_.size());
   if (settings_.admit_per_update > 0) {
@@ -626,7 +739,19 @@ void GroundAnchorMap::update(
       position_(slot, 0) = world_points(i, 0);
       position_(slot, 1) = world_points(i, 1);
       observation_(slot) = 1;
-      variance_(slot) = settings_.initial_variance;
+      // What the sighting that founded it was worth, not a chosen number. The
+      // anchor's position is that one measurement, so its variance is that
+      // measurement's -- `sigma_b^2 / I` at the geometry it was seen from,
+      // doubled back into the squared-distance convention `variance_` keeps.
+      // An anchor born at the far edge of the band therefore starts believed
+      // to a fraction of one born close, which is the difference the fixed
+      // `initial_variance` could not express.
+      variance_slow_(slot) = settings_.initial_variance;
+      variance_(slot) = settings_.weight_by_variance
+        ? 2.0 * settings_.bearing_variance /
+        std::max(
+          longitudinal_information_at(world_points(i, 0), world_points(i, 1)), 1e-18)
+        : settings_.initial_variance;
       seen_(slot) = frame_;
       identifier_(slot) = ids(i);
       information_(slot) = weighted ? std::max(information(i), 1e-9) : 1.0;
@@ -722,9 +847,17 @@ void GroundAnchorMap::prune()
     }
     // Given a few sightings to settle, an anchor that still scatters is not a
     // landmark and should not be registered against.
-    const bool scattered = settings_.select_by_consistency &&
+    bool scattered = settings_.select_by_consistency &&
       observation_(slot) >= settings_.trial_observations &&
       variance_(slot) > settings_.max_variance;
+    // The weight-threshold eviction. An anchor whose predicted scatter has
+    // passed this is not a landmark, and waiting for it to go stale or for the
+    // map to overflow is waiting for the wrong thing.
+    if (settings_.trend_evict_variance > 0.0 && observation_(slot) >= 2 &&
+      predicted_variance(slot) > settings_.trend_evict_variance)
+    {
+      scattered = true;
+    }
     if (!stale && !scattered && !astern) {
       continue;
     }

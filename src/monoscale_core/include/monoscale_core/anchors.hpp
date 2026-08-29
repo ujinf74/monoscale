@@ -240,6 +240,124 @@ struct AnchorSettings
   // to the 4-5 m one. `min_update_gain` already bounds how far the accumulated
   // information can run, so using it here is bounded too.
   bool weight_by_information = false;
+  // Metres ahead of the vehicle at which an anchor's information is valued.
+  // An anchor is not used where it is now; it is used where it will be when the
+  // solve next reaches it. Valued at the current position a feature entering
+  // the band from ahead scores nothing, which is exactly the anchor about to
+  // become the most informative one there is. Negative values look astern,
+  // which is the control this wants.
+  //
+  // Metres rather than seconds so the law does not change with speed: the band
+  // is geometry and so is this.
+  double lookahead_m = 0.0;
+  // The same thing in seconds of travel, added to the metres above and resolved
+  // against the speed each frame. Which of the two is right is an open
+  // question: an anchor's usable life is a fixed stretch of band, which argues
+  // metres, but how long the solve takes to reach it is a time.
+  double lookahead_sec = 0.0;
+  // Exponent on the anchor's geometric worth in the solve weight:
+  //   I(b, R) = cos^2 b / radial(R)^2 + sin^2 b / R^2,  radial = (R^2+h^2)/h
+  // evaluated `lookahead_m` ahead. Astern the first term dominates and falls as
+  // R^4; abeam the second holds at R^2, so close side ground keeps its worth
+  // where distant ground behind loses it -- continuously, with no cutoff.
+  double geometry_power = 0.0;
+
+  // Weight an anchor by the inverse variance of what it measures, instead of by
+  // a count divided by a variance.
+  //
+  // A bearing error is homoscedastic -- the lens is equidistant, so half a
+  // pixel is the same angle everywhere -- and reaches the ground as
+  // `sigma_b * radial` radially and `sigma_b * R` tangentially. Projected on
+  // the heading, the Fisher information about longitudinal displacement is
+  // `I(b,R)/sigma_b^2` with I as above, so this frame's measurement of the
+  // anchor has variance `sigma_b^2 / I`. The anchor's own stored position
+  // carries a second, independent variance. They add:
+  //
+  //   w = 1 / ( sigma_b^2 / I(b_T,R_T)  +  variance_(slot) + drift * travelled )
+  //
+  // Everything the old weight tried to say is in there and nothing is said
+  // twice. The observation count is gone because `variance_` already falls with
+  // observations -- counting both was counting maturity twice, and the count
+  // was capped at `max_observations` anyway, which left it a 1.25x range over
+  // a population spanning 400:1. The drift is a variance growing linearly with
+  // the path, which is what a random walk does, rather than a hyperbolic
+  // discount that only reached 8x at 139 m. And the geometry is present at its
+  // own strength rather than behind an exponent that existed to trade against
+  // those two faults.
+  bool weight_by_variance = false;
+  // Variance of a tracked bearing, rad^2. Measured, not chosen: half a pixel at
+  // the 640-wide processing width is 1.9e-3 rad against fx_eff 262.95 px/rad.
+  double bearing_variance = 3.6e-6;
+
+  // Weight an anchor by whether its re-observations agree with where it said it
+  // would be, and by whether that agreement is getting better or worse.
+  //
+  // The bearing model above says where an anchor *ought* to be informative.
+  // This says nothing about geometry and measures the same thing instead: an
+  // anchor that is far, or on a bad patch, or not really a landmark, scatters
+  // when it is seen again, and that scatter is already what `variance_` holds.
+  // Modelling the noise is replaced by measuring it.
+  //
+  // The second EWMA is the part the level alone cannot give. Two anchors at the
+  // same scatter are not worth the same if one is settling and the other coming
+  // apart, and which one it is decides whether re-observing is buying anything.
+  //
+  //   sigma2_pred = fast * (fast / slow)^trend_power
+  //
+  // The ratio is below one while the residuals shrink, so the anchor is
+  // credited with the improvement it is on course for rather than the one it
+  // has banked; above one it is charged for the decline. `trend_power` 0 leaves
+  // the level alone, 1 extrapolates one step of it.
+  bool weight_by_trend = false;
+  // Gain of the slow average. Smaller is a longer memory; it must be slower
+  // than the fast one or the ratio carries no information.
+  double trend_gain = 0.05;
+  double trend_power = 0.0;
+  // An anchor whose predicted scatter passes this is not a landmark and goes,
+  // whatever its age and whatever room there is. In metres squared, so it is
+  // the same quantity `max_variance` already gates on.
+  double trend_evict_variance = 0.0;
+
+  // Identities at or above this go to the front of the admission queue.
+  //
+  // A full map frees only the handful of slots ageing gives back, and the queue
+  // that competes for them carries ~1500 corner candidates a frame. A road-grid
+  // point is not refused, it is outvoted: measured, every source founds anchors
+  // at the same ~2% rate, so a lattice offering 117 candidates over a drive
+  // founds none while one offering 1774 founds 38. Feeding more of them fixes
+  // admission and breaks the solve, because a lattice is one homography sampled
+  // many times. This is the other way round -- offer few and let those few in.
+  //
+  // 0 leaves the queue in whatever order the frame built it.
+  int64_t priority_identity_floor = 0;
+
+  // Admit the most informative candidates rather than whichever the frame
+  // happened to list first.
+  //
+  // A saturated map frees a handful of slots per update and ~1500 corner
+  // candidates queue for them, so which 2% get in is decided by array order --
+  // which is to say, not decided. Sorting by `longitudinal_information_at`
+  // spends the scarce slots on the ground that will carry the solve, evaluated
+  // at the lookahead point like every other use of that law.
+  bool admit_by_information = false;
+  // Admit the clearest candidates -- the ones the tracker's corner response
+  // says are really landmarks -- rather than the first ones the frame listed.
+  // Ranking by position was measured worse than not ranking at all; this ranks
+  // by whether the patch is distinct, which the estimator has never had.
+  bool admit_by_clarity = false;
+
+  // How many consecutive sightings a candidate must survive before it may take
+  // a slot. 1 founds on first sight, which is what this map has always done.
+  //
+  // Standard KLT practice does not do that: VINS-Mono only puts a feature into
+  // the optimisation once it has been observed several times, and an MSCKF
+  // triangulates a track only when it ends with enough observations and
+  // baseline. Neither spends state on a feature that has proven nothing. Ours
+  // does, and on the fast straight 46% of the anchors it founds are never seen
+  // again -- so nearly half the map's capacity is committed to features that
+  // did not survive one frame, and committed in the first ten metres, after
+  // which nothing else can get in.
+  int found_after_observations = 1;
   bool link_measure_only = false;
   // Compute the rebuild but do not apply it.
   bool rebuild_measure_only = false;
@@ -271,11 +389,12 @@ public:
   // `band` of it, and the spread of all of them along and across its heading.
   // The map holds thousands of slots; this says how many of them the next solve
   // could possibly use.
-  // Every live anchor as (range, bearing off the heading, weight, age in
-  // solves), for asking where the map's capacity actually sits.
+  // Every live anchor as (range, bearing off the heading, weight, sightings,
+  // identity), for asking where the map's capacity actually sits and what kind
+  // of observation put it there.
   void polar(
     double x, double y, double yaw,
-    std::vector<std::array<double, 4>> & out) const;
+    std::vector<std::array<double, 7>> & out) const;
   void extent(
     double x, double y, double yaw, double band, int & within, double & along,
     double & across) const;
@@ -316,9 +435,50 @@ public:
   }
   // Where the vehicle is, so a crossing can be resolved along its heading and
   // dated by how far it has come.
-  void set_frame_pose(double path, double yaw) {path_ = path; yaw_ = yaw;}
+  // `weight_yaw` is the heading an anchor's worth is judged from, and it should
+  // be a filtered one. Every anchor's bearing turns with the vehicle at once,
+  // so an unfiltered heading collapses the whole map's weight together on a
+  // swerve the vehicle may be about to come back out of. The bearing is a claim
+  // about where anchors will be useful; it should not follow a transient.
+  void set_frame_pose(double path, double yaw, double weight_yaw)
+  {
+    path_ = path;
+    yaw_ = yaw;
+    weight_yaw_ = weight_yaw;
+  }
+  void set_frame_pose(double path, double yaw) {set_frame_pose(path, yaw, yaw);}
   // Where the vehicle is, so an anchor's worth can be asked of its geometry
   // rather than only of its history.
+  // Where an anchor's worth is valued: `lookahead_m` plus `lookahead_sec` of
+  // travel at the speed handed in. Resolved here so the map does not have to
+  // know how fast the vehicle is going.
+  // The vehicle does not travel along its current heading, it travels along an
+  // arc, so projecting the evaluation point down the tangent puts it off the
+  // road on anything that turns. `turn_rate` is the yaw rate in rad/s and must
+  // be a *filtered* one: the raw per-hop rate carries the solve's own noise,
+  // and squaring that into a position two seconds out is how a prediction
+  // becomes worse than no prediction.
+  void set_lookahead(double speed, double turn_rate)
+  {
+    const double distance =
+      settings_.lookahead_m + settings_.lookahead_sec * std::max(speed, 0.0);
+    if (!(distance > 0.0)) {
+      look_f_ = 0.0;
+      look_l_ = 0.0;
+      return;
+    }
+    // How long the vehicle takes to cover it, and how far it turns in that time.
+    const double seconds = speed > 1e-3 ? distance / speed : 0.0;
+    const double swept = turn_rate * seconds;
+    if (std::abs(swept) < 1e-6) {
+      look_f_ = distance;
+      look_l_ = 0.0;
+      return;
+    }
+    const double radius = distance / swept;
+    look_f_ = radius * std::sin(swept);
+    look_l_ = radius * (1.0 - std::cos(swept));
+  }
   void set_frame_position(double x, double y, double height)
   {
     at_x_ = x; at_y_ = y; lens_height_ = height;
@@ -361,16 +521,20 @@ public:
 
   void update(
     int source, const Identities & ids, const Points2 & world_points, bool allow_new,
-    const Weights & information);
+    const Weights & information, const Weights & clarity = Weights());
 
   // The same, remembering where each sighting was taken from. An anchor is a
   // running average, and folding a sighting in destroys which pose it came
   // from -- which is why a corrected trajectory cannot be pushed back into the
   // map. Keeping `(pose index, body point)` per sighting is the smallest thing
   // that makes the map re-derivable.
+  // `clarity` is how distinct each candidate's patch is, from the tracker's
+  // corner response. It orders admission when `admit_by_clarity` is set and is
+  // ignored otherwise; empty means the tracker is not publishing it.
   void update(
     int source, const Identities & ids, const Points2 & world_points, bool allow_new,
-    const Weights & information, const Points2 & body_points, int32_t pose_index);
+    const Weights & information, const Points2 & body_points, int32_t pose_index,
+    const Weights & clarity = Weights());
 
   // Recompute every anchor from the poses its sightings were taken at. `poses`
   // is indexed by the same `pose_index` handed to `update`.
@@ -430,6 +594,12 @@ private:
   int64_t adoptable(int source, double x, double y) const;
   double weight_at(int64_t slot) const;
   double longitudinal_information(int64_t slot) const;
+  double predicted_variance(int64_t slot) const;
+  // Position scatter of a live anchor, m^2. What `variance_` holds.
+  double scatter_at(int64_t slot) const;
+  // Slot is live, past trial, and still agreeing with itself: what the solve
+  // will actually register against.
+  bool usable_at(int64_t slot) const;
   // The same, for a position that has no slot yet -- what a candidate birth
   // would be worth if it were admitted.
   double longitudinal_information_at(double x, double y) const;
@@ -444,6 +614,12 @@ private:
   // How much this anchor's position is worth knowing, summed over every
   // sighting that went into it.
   Eigen::VectorXd information_;
+  // The slow companion to `variance_`, for the trend. Same units.
+  Eigen::VectorXd variance_slow_;
+  // Candidates that have not earned a slot yet: identity -> (run, last frame).
+  // The run resets when a candidate misses a frame, so what it counts is a
+  // track that survived, not a track that reappeared.
+  std::vector<std::unordered_map<int64_t, std::pair<int32_t, int64_t>>> pending_;
   Eigen::Matrix<int64_t, Eigen::Dynamic, 1> identifier_;
   std::vector<int64_t> free_;
   // Slot of each identity, per source. Track identities restart per camera, so
@@ -484,6 +660,10 @@ private:
   double rebuild_shift_ = 0.0;
   int64_t rebuild_slots_ = 0;
   int sources_ = 1;
+  // The evaluation point relative to the vehicle, forward and left.
+  double look_f_ = 0.0;
+  double look_l_ = 0.0;
+  double weight_yaw_ = 0.0;
   double at_x_ = 0.0;
   double at_y_ = 0.0;
   double lens_height_ = 0.0;

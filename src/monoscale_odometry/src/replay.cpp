@@ -14,9 +14,11 @@
 
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -222,6 +224,36 @@ bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::T
     out.pixels(i, 0) = data[at + 3];
     out.pixels(i, 1) = data[at + 4];
   }
+    // The parallax block: four values a cell, then the cell count, then the
+    // marker. Read before the clarity block because it sits behind it.
+    size_t tail = data.size();  // NOLINT
+    if (tail > 2 && data[tail - 1] == -8.125e7) {
+      const int cells = static_cast<int>(data[tail - 2]);
+      const size_t need = static_cast<size_t>(cells) * 4;
+      if (cells > 0 && tail >= need + 2 && tail - need - 2 >= static_cast<size_t>(4 + 5 * count)) {
+        const size_t first = tail - need - 2;
+        out.parallax.resize(cells, 4);
+        for (int i = 0; i < cells; ++i) {
+          for (int j = 0; j < 4; ++j) {
+            out.parallax(i, j) = data[first + static_cast<size_t>(i) * 4 + j];
+          }
+        }
+        tail = first;
+      }
+    }
+  // The clarity block, self-describing, appended after everything else. See
+  // the same parse in odometry_node.
+  if (count > 0 && tail >= static_cast<size_t>(4 + 5 * count + count + 1) &&
+    static_cast<int>(data[tail - 1]) == count)
+  {
+    const size_t first = tail - 1 - static_cast<size_t>(count);
+    if (first >= static_cast<size_t>(4 + 5 * count)) {
+      out.clarity.resize(count);
+      for (int i = 0; i < count; ++i) {
+        out.clarity(i) = data[first + static_cast<size_t>(i)];
+      }
+    }
+  }
   const size_t after = static_cast<size_t>(4 + 5 * count);
   if (data.size() > after) {
     out.photometric_step = data[after];
@@ -254,6 +286,97 @@ bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::T
   return true;
 }
 
+// The bag, deserialized once.
+//
+// Reading and parsing the bag is the whole cost of a replay: scoring one metre
+// of a 109 m drive takes the same 1.6 s as scoring all of it, because the bag
+// is walked either way, while the estimator itself is 0.36 ms a pair. So the
+// events are decoded once into these vectors and the estimator is run over
+// them -- once normally, or once per line of `--configs`, which is what makes
+// a parameter sweep affordable.
+//
+// Nothing here depends on the estimator's settings. The transforms that depend
+// on the command line rather than on settings (`--gyro-yaw`, `--until`,
+// `--no-imu`) are applied while filling this, because they describe the input
+// stream and not the estimator.
+struct Buffered
+{
+  enum class Kind { Track, Imu, Calibration, Tilt };
+  struct Event
+  {
+    Kind kind;
+    size_t index;
+  };
+  struct Calibration
+  {
+    size_t camera;
+    Eigen::Matrix3d k;
+    Eigen::VectorXd d;
+    monoscale::Lens lens;
+    int width;
+    int height;
+  };
+  std::vector<Event> order;
+  std::vector<std::pair<size_t, monoscale::TrackFrame>> tracks;
+  std::vector<monoscale::ImuSample> imu;
+  std::vector<Calibration> calibrations;
+  std::vector<std::pair<double, double>> tilts;
+  std::vector<Sample> truth;
+};
+
+// What one pass over the buffer produces.
+struct Outcome
+{
+  std::vector<Sample> estimates;
+  std::vector<monoscale::Update> hops;
+  std::vector<monoscale::LabelledPoint> points;
+  double claimed_position = 0.0;
+  double claimed_yaw = 0.0;
+};
+
+void replay_into(
+  monoscale::Estimator & estimator, const Buffered & buffered, Outcome & outcome,
+  bool keep_points)
+{
+  for (const auto & event : buffered.order) {
+    if (event.kind == Buffered::Kind::Calibration) {
+      const auto & c = buffered.calibrations[event.index];
+      estimator.set_calibration(c.camera, c.k, c.d, c.lens, c.width, c.height);
+      continue;
+    }
+    if (event.kind == Buffered::Kind::Tilt) {
+      estimator.override_tilt(
+        buffered.tilts[event.index].first, buffered.tilts[event.index].second);
+      continue;
+    }
+    if (event.kind == Buffered::Kind::Track) {
+      const auto & entry = buffered.tracks[event.index];
+      estimator.ingest_tracks(entry.first, entry.second);
+    } else {
+      estimator.ingest_imu(buffered.imu[event.index]);
+    }
+    for (const auto & update : estimator.take_updates()) {
+      if (keep_points && !update.points.empty()) {
+        outcome.points.insert(
+          outcome.points.end(), update.points.begin(), update.points.end());
+      }
+      if (update.hops_valid && update.previous_stamp > 0.0) {
+        outcome.hops.push_back(update);
+      }
+      if (!update.pose_valid) {
+        continue;
+      }
+      outcome.estimates.push_back(
+        Sample{update.stamp, update.pose.x, update.pose.y, update.pose.yaw});
+      if (update.covariance_valid) {
+        outcome.claimed_position = std::sqrt(
+          std::max(update.pose_covariance(0, 0) + update.pose_covariance(1, 1), 0.0));
+        outcome.claimed_yaw = std::sqrt(std::max(update.pose_covariance(2, 2), 0.0));
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char ** argv)
@@ -262,6 +385,14 @@ int main(int argc, char ** argv)
   std::string truth_topic = "/carla/ground_truth/pose";
   std::string label;
   std::string tum_directory;
+  // One parameter set per line, each a whitespace separated list of
+  // `name:=value`. The bag is decoded once and every line is run over that one
+  // buffer, which is the whole point: the decode is 1.4 s and the estimator is
+  // 0.05 s, so a sweep that re-reads the bag per configuration spends 96% of
+  // itself on the same work. Writes `<tum>/<line>/estimate.tum` and
+  // `truth.tum`, one directory per line, and prints the line's index and its
+  // ate_rmse. `--distance` is not applied here; a sweep scores whole drives.
+  std::string configs_path;
   // Score the whole drive. This was 34.0, which fitted the approach bags
   // (24-32 m) and silently truncated anything longer: a 110 m straight scored
   // its first 34 m and reported that as the drive. The cut is still available
@@ -297,6 +428,7 @@ int main(int argc, char ** argv)
   // heading actually costs.
   bool gyro_yaw = false;
   std::string hops_path;
+  std::string points_path;
   std::string revisits_path;
   std::string anchors_path;
   double until_seconds = 0.0;
@@ -315,6 +447,8 @@ int main(int argc, char ** argv)
       truth_topic = next();
     } else if (argument == "--label") {
       label = next();
+    } else if (argument == "--configs") {
+      configs_path = next();
     } else if (argument == "--tum") {
       tum_directory = next();
     } else if (argument == "--distance") {
@@ -329,6 +463,8 @@ int main(int argc, char ** argv)
       no_imu = true;
     } else if (argument == "--gyro-yaw") {
       gyro_yaw = true;
+    } else if (argument == "--points") {
+      points_path = next();
     } else if (argument == "--hops") {
       hops_path = next();
     } else if (argument == "--anchors") {
@@ -380,14 +516,11 @@ int main(int argc, char ** argv)
   rosbag2_cpp::Reader reader;
   reader.open(bag);
 
-  std::vector<Sample> estimates;
-  std::vector<monoscale::Update> hops;
+  Buffered buffered;
+  Outcome outcome;
   // What the estimator claims to know about its own pose by the end, so the
   // claim can be laid beside the error it actually made. A covariance that
   // does not match is worse than none: it is a lie a consumer will act on.
-  double claimed_position = 0.0;
-  double claimed_yaw = 0.0;
-  std::vector<Sample> truth;
   // Header time of the first IMU sample. `--until` is measured from there, so
   // it is on the same clock as everything the diagnostics report.
   double first_header_stamp = 0.0;
@@ -400,7 +533,8 @@ int main(int argc, char ** argv)
     if (track != track_topics.end()) {
       monoscale::TrackFrame frame;
       if (parse_tracks(deserialize<std_msgs::msg::Float64MultiArray>(serialized), frame)) {
-        estimator.ingest_tracks(track->second, frame);
+        buffered.order.push_back({Buffered::Kind::Track, buffered.tracks.size()});
+        buffered.tracks.emplace_back(track->second, std::move(frame));
       }
     } else if (message->topic_name == configuration.topics.imu) {
       const auto imu = deserialize<sensor_msgs::msg::Imu>(serialized);
@@ -440,7 +574,8 @@ int main(int argc, char ** argv)
           0.0, 0.0, std::sin(0.5 * heading), std::cos(0.5 * heading));
       }
       if (!no_imu) {
-        estimator.ingest_imu(sample);
+        buffered.order.push_back({Buffered::Kind::Imu, buffered.imu.size()});
+        buffered.imu.push_back(sample);
       }
     } else if (info_topics.count(message->topic_name) > 0) {
       const auto info = deserialize<sensor_msgs::msg::CameraInfo>(serialized);
@@ -455,10 +590,13 @@ int main(int argc, char ** argv)
         for (size_t n = 0; n < info.d.size(); ++n) {
           d(static_cast<Eigen::Index>(n)) = info.d[n];
         }
-        estimator.set_calibration(
-          info_topics[message->topic_name], k, d,
-          monoscale::lens_from_name(info.distortion_model),
-          static_cast<int>(info.width), static_cast<int>(info.height));
+        buffered.order.push_back(
+          {Buffered::Kind::Calibration, buffered.calibrations.size()});
+        buffered.calibrations.push_back(
+          Buffered::Calibration{
+            info_topics[message->topic_name], k, d,
+            monoscale::lens_from_name(info.distortion_model),
+            static_cast<int>(info.width), static_cast<int>(info.height)});
       }
       continue;
     } else if (message->topic_name == truth_topic) {
@@ -472,11 +610,12 @@ int main(int argc, char ** argv)
         const double sr = 2.0 * (q.w * q.x + q.y * q.z);
         const double cr = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
         const double sp = std::clamp(2.0 * (q.w * q.y - q.z * q.x), -1.0, 1.0);
-        estimator.override_tilt(std::atan2(sr, cr), std::asin(sp));
+        buffered.order.push_back({Buffered::Kind::Tilt, buffered.tilts.size()});
+        buffered.tilts.emplace_back(std::atan2(sr, cr), std::asin(sp));
       }
       // The truth reports the box centre; the stack estimates the rear axle,
       // so it is shifted back along the heading.
-      truth.push_back(
+      buffered.truth.push_back(
         Sample{
           stamp_of(pose.header),
           pose.pose.pose.position.x - truth_offset_m * std::cos(yaw),
@@ -485,23 +624,100 @@ int main(int argc, char ** argv)
     } else {
       continue;
     }
-
-    for (const auto & update : estimator.take_updates()) {
-      if (update.hops_valid && update.previous_stamp > 0.0) {
-        hops.push_back(update);
-      }
-      if (!update.pose_valid) {
-        continue;
-      }
-      estimates.push_back(
-        Sample{update.stamp, update.pose.x, update.pose.y, update.pose.yaw});
-      if (update.covariance_valid) {
-        claimed_position = std::sqrt(
-          std::max(update.pose_covariance(0, 0) + update.pose_covariance(1, 1), 0.0));
-        claimed_yaw = std::sqrt(std::max(update.pose_covariance(2, 2), 0.0));
-      }
-    }
   }
+
+  if (!configs_path.empty()) {
+    if (tum_directory.empty()) {
+      std::cerr << "--configs 는 --tum <디렉터리> 를 함께 요구한다.\n";
+      return 2;
+    }
+    std::ifstream list(configs_path);
+    std::string line;
+    int index = -1;
+    while (std::getline(list, line)) {
+      ++index;
+      std::vector<std::string> arguments = ros_arguments;
+      std::istringstream tokens(line);
+      std::string token;
+      while (tokens >> token) {
+        arguments.push_back("-p");
+        arguments.push_back(token);
+      }
+      rclcpp::NodeOptions per_config;
+      per_config.arguments(arguments);
+      auto config_node =
+        std::make_shared<rclcpp::Node>("monoscale_replay_sweep", per_config);
+      const auto settings = monoscale_ros::declare_and_read(*config_node);
+      monoscale::Estimator one(settings.estimator);
+      Outcome result;
+      replay_into(one, buffered, result, false);
+
+      // The same origin alignment the scoring below uses, without the metrics
+      // it also accumulates: a sweep only needs the matched pairs.
+      const std::string directory = tum_directory + "/" + std::to_string(index);
+      std::filesystem::create_directories(directory);
+      std::ofstream estimate_file(directory + "/estimate.tum");
+      std::ofstream truth_file(directory + "/truth.tum");
+      double square = 0.0;
+      size_t matched = 0;
+      size_t at = 0;
+      bool have_origin = false;
+      Sample origin_truth{};
+      Sample origin_estimate{};
+      for (const auto & estimate : result.estimates) {
+        if (buffered.truth.empty()) {
+          break;
+        }
+        while (at + 1 < buffered.truth.size() &&
+          buffered.truth[at + 1].stamp <= estimate.stamp)
+        {
+          ++at;
+        }
+        const size_t next_index = std::min(at + 1, buffered.truth.size() - 1);
+        const size_t nearest =
+          std::abs(buffered.truth[at].stamp - estimate.stamp) <=
+          std::abs(buffered.truth[next_index].stamp - estimate.stamp) ? at : next_index;
+        if (std::abs(buffered.truth[nearest].stamp - estimate.stamp) > tolerance) {
+          continue;
+        }
+        if (!have_origin) {
+          origin_truth = buffered.truth[nearest];
+          origin_estimate = estimate;
+          have_origin = true;
+        }
+        const Sample aligned = compose_pose(
+          origin_estimate, relative_pose(origin_truth, buffered.truth[nearest]));
+        const double dx = estimate.x - aligned.x;
+        const double dy = estimate.y - aligned.y;
+        square += dx * dx + dy * dy;
+        ++matched;
+        const auto write = [](std::ofstream & file, const Sample & pose) {
+            const double yaw = wrap_pi(pose.yaw);
+            file << std::fixed;
+            file.precision(6);
+            file << pose.stamp << " " << pose.x << " " << pose.y
+                 << " 0.000000 0.000000 0.000000 " << std::sin(0.5 * yaw) << " "
+                 << std::cos(0.5 * yaw) << "\n";
+          };
+        write(estimate_file, estimate);
+        write(truth_file, aligned);
+      }
+      std::printf(
+        "%d ate_rmse=%.6f n=%zu\n", index,
+        matched > 0 ? std::sqrt(square / static_cast<double>(matched)) : 0.0, matched);
+      std::fflush(stdout);
+    }
+    rclcpp::shutdown();
+    return 0;
+  }
+
+  replay_into(estimator, buffered, outcome, !points_path.empty());
+  const std::vector<Sample> & estimates = outcome.estimates;
+  const std::vector<monoscale::Update> & hops = outcome.hops;
+  const std::vector<monoscale::LabelledPoint> & collected_points = outcome.points;
+  const std::vector<Sample> & truth = buffered.truth;
+  const double claimed_position = outcome.claimed_position;
+  const double claimed_yaw = outcome.claimed_yaw;
   rclcpp::shutdown();
 
   // Each camera's hop against the hop the vehicle actually made. Nothing else
@@ -737,7 +953,7 @@ int main(int argc, char ** argv)
         }
       }
       if (!anchors_path.empty()) {
-    std::vector<std::array<double, 4>> polar;
+    std::vector<std::array<double, 7>> polar;
     estimator.anchor_polar(polar);
     std::ofstream out(anchors_path);
     out << "range,bearing,weight,unseen\n";
@@ -751,6 +967,19 @@ int main(int argc, char ** argv)
     for (const auto & r : estimator.revisit_audit()) {
       out << r.time_from << "," << r.time_to << "," << r.edge_dx << "," << r.edge_dy
           << "," << r.odometry_dx << "," << r.odometry_dy << "," << r.weight << "\n";
+    }
+  }
+  if (!points_path.empty() && !collected_points.empty()) {
+    std::FILE * f = std::fopen(points_path.c_str(), "w");
+    if (f != nullptr) {
+      std::fprintf(f, "x,y,z,label,origin_x,origin_y\n");
+      for (const auto & point : collected_points) {
+        std::fprintf(
+          f, "%.4f,%.4f,%.4f,%.0f,%.4f,%.4f\n",
+          point.x, point.y, point.z, point.label, point.origin_x, point.origin_y);
+      }
+      std::fclose(f);
+      std::printf("점 %zu 개 -> %s\n", collected_points.size(), points_path.c_str());
     }
   }
   if (!hops_path.empty()) {
@@ -1159,12 +1388,42 @@ int main(int argc, char ** argv)
   const auto & diagnostics = estimator.diagnostics();
   std::printf(
     "pairs=%ld solves=%ld estimates=%zu failures=%ld (nosolve=%ld trans=%ld yaw=%ld) "
+    "sector[0-30 30-60 60-90 90-120 120-150 150-180] "
+    "n=%ld/%ld/%ld/%ld/%ld/%ld w=%.0f/%.0f/%.0f/%.0f/%.0f/%.0f "
+    "r=%.1f/%.1f/%.1f/%.1f/%.1f/%.1f\n"
+    "seen[1 2 3-4 5-8 9-16 17+]=%ld/%ld/%ld/%ld/%ld/%ld road_anchors=%ld usable=%ld parallax_pts=%ld scatter[<1e-6 1e-5 1e-4 1e-3 1e-2 +]=%ld/%ld/%ld/%ld/%ld/%ld\n"
     "coasted=%ld yaw_misses=%ld anchors=%d(도달 %d, 종평균 %+.1fm 종퍼짐 %.1fm) "
     "map_frames=%ld evicted=%ld "
     "link[n=%ld gap=%.4fm range=%.2fm gap/range=%.5f]\n",
     diagnostics.pairs_seen, diagnostics.frames_processed, estimates.size(),
     diagnostics.motion_failures, diagnostics.fail_no_solve, diagnostics.fail_translation,
-    diagnostics.fail_yaw, diagnostics.coasted, diagnostics.imu_yaw_misses, diagnostics.anchors,
+    diagnostics.fail_yaw,
+    diagnostics.anchor_sector_count[0], diagnostics.anchor_sector_count[1],
+    diagnostics.anchor_sector_count[2], diagnostics.anchor_sector_count[3],
+    diagnostics.anchor_sector_count[4], diagnostics.anchor_sector_count[5],
+    diagnostics.anchor_sector_weight[0], diagnostics.anchor_sector_weight[1],
+    diagnostics.anchor_sector_weight[2], diagnostics.anchor_sector_weight[3],
+    diagnostics.anchor_sector_weight[4], diagnostics.anchor_sector_weight[5],
+    diagnostics.anchor_sector_count[0] > 0
+      ? diagnostics.anchor_sector_range[0] / diagnostics.anchor_sector_count[0] : 0.0,
+    diagnostics.anchor_sector_count[1] > 0
+      ? diagnostics.anchor_sector_range[1] / diagnostics.anchor_sector_count[1] : 0.0,
+    diagnostics.anchor_sector_count[2] > 0
+      ? diagnostics.anchor_sector_range[2] / diagnostics.anchor_sector_count[2] : 0.0,
+    diagnostics.anchor_sector_count[3] > 0
+      ? diagnostics.anchor_sector_range[3] / diagnostics.anchor_sector_count[3] : 0.0,
+    diagnostics.anchor_sector_count[4] > 0
+      ? diagnostics.anchor_sector_range[4] / diagnostics.anchor_sector_count[4] : 0.0,
+    diagnostics.anchor_sector_count[5] > 0
+      ? diagnostics.anchor_sector_range[5] / diagnostics.anchor_sector_count[5] : 0.0,
+    diagnostics.anchor_sightings[0], diagnostics.anchor_sightings[1],
+    diagnostics.anchor_sightings[2], diagnostics.anchor_sightings[3],
+    diagnostics.anchor_sightings[4], diagnostics.anchor_sightings[5],
+    diagnostics.anchor_road, diagnostics.anchor_usable, diagnostics.parallax_points,
+    diagnostics.anchor_scatter[0], diagnostics.anchor_scatter[1],
+    diagnostics.anchor_scatter[2], diagnostics.anchor_scatter[3],
+    diagnostics.anchor_scatter[4], diagnostics.anchor_scatter[5],
+    diagnostics.coasted, diagnostics.imu_yaw_misses, diagnostics.anchors,
     diagnostics.anchors_within, diagnostics.anchors_along, diagnostics.anchors_across,
     diagnostics.map_aligned_frames, diagnostics.frames_evicted,
     diagnostics.anchors_adopted, diagnostics.link_gap_m, diagnostics.link_range_m,

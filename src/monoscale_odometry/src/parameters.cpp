@@ -197,15 +197,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   declare_double("feature_refill_ratio", 0.7);
   declare_int("detection_grid_columns", 0);
   declare_int("detection_grid_rows", 0);
-  declare_int("detection_oversample", 3);
-  declare_bool("forward_backward_on_hops", true);
-  declare_int("backward_check_stride", 1);
-  declare_int("camera_workers", 2);
-  declare_bool("allow_fov_fallback", false);
-  declare_bool("anchor_reassociation", false);
-  declare_double("anchor_reassociation_radius_m", 0.5);
-  declare_int("anchor_reassociation_max_hamming", 40);
-  declare_int("anchor_reassociation_min_observations", 3);
 
   settings.ground_max_distance_m = declare_double("ground_max_distance_m", 25.0);
   // `min_ground_flow_px` is not declared. The adaptive ground band it keyed
@@ -259,10 +250,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   // Triangulation settings, kept so the parameter files load unchanged. The
   // keyframe path they serve needs images; on the track path obstacle height
   // comes from `obstacle_slip_baseline_m` instead.
-  declare_double("triangulation_min_parallax_deg", 1.0);
-  declare_double("triangulation_reprojection_error_px", 2.5);
-  declare_double("triangulation_min_distance_m", 0.5);
-  declare_double("triangulation_max_distance_m", 30.0);
 
   settings.obstacle_min_height_m = declare_double("obstacle_min_height_m", 0.2);
   settings.obstacle_max_height_m = declare_double("obstacle_max_height_m", 2.5);
@@ -277,7 +264,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   // stops short of it.
   settings.obstacle_height_margin = declare_double("obstacle_height_margin", 0.7);
   settings.obstacle_slip_patience = declare_int("obstacle_slip_patience", 30);
-  settings.mapping_baseline_m = declare_double("mapping_baseline_m", 0.35);
   // The occupancy grid is the deliverable, not part of the pose loop, and it
   // cost more per frame than the odometry it rode along with. A parking grid
   // does not improve by being rebuilt at the camera rate.
@@ -330,6 +316,30 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.road_point_weight = declare_double("road_point_weight", 1.0);
   settings.anchor_information_power = declare_double("anchor_information_power", 0.0);
   settings.anchor_weight_by_information = declare_bool("anchor_weight_by_information", false);
+  settings.anchor_lookahead_m = declare_double("anchor_lookahead_m", 0.0);
+  settings.anchor_lookahead_sec = declare_double("anchor_lookahead_sec", 0.0);
+  settings.anchor_weight_yaw_tau_sec =
+    declare_double("anchor_weight_yaw_tau_sec", 0.0);
+  settings.anchor_geometry_power = declare_double("anchor_geometry_power", 0.0);
+  settings.anchor_weight_by_variance =
+    declare_bool("anchor_weight_by_variance", false);
+  settings.anchor_bearing_variance =
+    declare_double("anchor_bearing_variance", 3.6e-6);
+  settings.anchor_weight_by_trend = declare_bool("anchor_weight_by_trend", false);
+  settings.anchor_trend_gain = declare_double("anchor_trend_gain", 0.05);
+  settings.anchor_trend_power = declare_double("anchor_trend_power", 0.0);
+  settings.anchor_trend_evict_variance =
+    declare_double("anchor_trend_evict_variance", 0.0);
+  settings.anchor_road_priority = declare_bool("anchor_road_priority", false);
+  settings.anchor_admit_by_information =
+    declare_bool("anchor_admit_by_information", false);
+  settings.anchor_admit_by_clarity =
+    declare_bool("anchor_admit_by_clarity", false);
+  settings.parallax_height = declare_bool("parallax_height", false);
+  settings.parallax_min_pixels = declare_double("parallax_min_pixels", 1.0);
+  settings.parallax_sign = declare_double("parallax_sign", -1.0);
+  settings.anchor_found_after_observations =
+    declare_int("anchor_found_after_observations", 1);
   settings.level_frame_origin = declare_bool("level_frame_origin", true);
   settings.range_weight_power = declare_double("range_weight_power", 0.0);
   settings.pixel_region_x0 = declare_double("pixel_region_x0", 0.0);
@@ -400,6 +410,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.attitude_slope_tau_sec = declare_double("attitude_slope_tau_sec", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.map_solve_weight = declare_double("map_solve_weight", 1.0);
+  settings.map_correction_gain = declare_double("map_correction_gain", 1.0);
   settings.imu_translation_base_from_imu = vector_of(
     node.declare_parameter<std::vector<double>>(
       "imu_translation_base_from_imu", std::vector<double>{0.0, 0.0, 0.0}));
@@ -440,9 +451,6 @@ Configuration declare_and_read(rclcpp::Node & node)
 
   settings.use_inertial_prediction = declare_bool("use_inertial_prediction", true);
   settings.inertial_use_acceleration = declare_bool("inertial_use_acceleration", true);
-  declare_double("inertial_gate_absolute_m", 0.08);
-  declare_double("inertial_gate_relative", 0.35);
-  declare_double("inertial_gate_minimum_m", 0.05);
   settings.inertial_max_acceleration_mps2 =
     declare_double("inertial_max_acceleration_mps2", 12.0);
   settings.inertial_acceleration_median_window =
@@ -528,7 +536,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   // Hz at which queued pairs are solved, decoupled from arrival.
   topics.solve_timer_hz = declare_double("solve_timer_hz", 200.0);
   topics.executor_threads = declare_int("executor_threads", 1);
-  declare_string("filter_debug_csv", "");
 
   return configuration;
 }

@@ -80,6 +80,10 @@ struct Estimator::Frame
   double disparity = 0.0;
   Points2 pixels;
   Identities ids;
+  // How distinct each feature's patch is. Empty unless the tracker publishes it.
+  Weights clarity;
+  // (x, y, dx, dy) per grid cell: the road warp's leftover parallax.
+  Eigen::MatrixXd parallax;
 };
 
 struct Estimator::Camera
@@ -113,6 +117,9 @@ struct Estimator::Camera
 
   Points2 track_pixels;
   Identities track_ids;
+  // Per track, how distinct its patch is. Empty unless the tracker publishes it.
+  Weights track_clarity;
+  Eigen::MatrixXd track_parallax;
 
   // Where each surviving feature sat, and which frame that was, the last time
   // a pose was solved. Tracking runs every frame so each hop stays small, but
@@ -401,6 +408,20 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.trial_observations = settings.anchor_trial_observations;
   anchor_settings.min_update_gain = settings.anchor_min_update_gain;
   anchor_settings.weight_by_information = settings.anchor_weight_by_information;
+  anchor_settings.lookahead_m = settings.anchor_lookahead_m;
+  anchor_settings.lookahead_sec = settings.anchor_lookahead_sec;
+  anchor_settings.geometry_power = settings.anchor_geometry_power;
+  anchor_settings.weight_by_variance = settings.anchor_weight_by_variance;
+  anchor_settings.bearing_variance = settings.anchor_bearing_variance;
+  anchor_settings.weight_by_trend = settings.anchor_weight_by_trend;
+  anchor_settings.trend_gain = settings.anchor_trend_gain;
+  anchor_settings.trend_power = settings.anchor_trend_power;
+  anchor_settings.trend_evict_variance = settings.anchor_trend_evict_variance;
+  anchor_settings.admit_by_information = settings.anchor_admit_by_information;
+  anchor_settings.admit_by_clarity = settings.anchor_admit_by_clarity;
+  anchor_settings.found_after_observations = settings.anchor_found_after_observations;
+  anchor_settings.priority_identity_floor =
+    settings.anchor_road_priority ? kRoadIdentity : 0;
   anchor_settings.evict_by_age = settings.anchor_evict_by_age;
   anchor_settings.evict_for_new = settings.anchor_evict_for_new;
   anchor_settings.evict_by_weight = settings.anchor_evict_by_weight;
@@ -604,6 +625,8 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
   frame.stamp = incoming.stamp;
   frame.pixels = incoming.pixels;
   frame.ids = incoming.ids;
+  frame.clarity = incoming.clarity;
+  frame.parallax = incoming.parallax;
   frame.disparity = percentile_90(incoming.previous_pixels, incoming.pixels);
 
   camera.queue.push_back(std::move(frame));
@@ -882,6 +905,8 @@ void Estimator::try_process_pairs()
       // the camera has received since.
       camera.track_pixels = camera.latest->pixels;
       camera.track_ids = camera.latest->ids;
+      camera.track_clarity = camera.latest->clarity;
+      camera.track_parallax = camera.latest->parallax;
     }
 
     ++diagnostics_.pairs_seen;
@@ -1433,6 +1458,9 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // reach, which is what ground_max_distance_m is for.
   const double solve_band = settings_.solve_max_distance_m > 0.0
     ? settings_.solve_max_distance_m : std::numeric_limits<double>::infinity();
+  // Held when the map answered and its correction is to be scaled rather than
+  // taken whole. See `map_correction_gain`.
+  std::optional<PlanarMotion> map_motion;
   Eigen::Vector3d mount_in_frame = camera.model.translation_base_from_camera;
   if (settings_.level_frame_origin && tilt_moves_camera && tilt.has_value()) {
     const Eigen::Vector3d centre(settings_.pitch_centre_x_m, 0.0, 0.0);
@@ -1778,11 +1806,18 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         }
       }
       remember_solve_pixels(camera);
-      return solved;
+      // At unit gain this is the whole answer and the pair solve is not worth
+      // its cost. Below or above it, the pair solve is needed as the other end
+      // of the blend, so fall through and take it.
+      if (settings_.map_correction_gain == 1.0) {
+        return solved;
+      }
+      map_motion = motion;
     }
   }
 
-  // The map could not answer. Fall back to comparing the two frames directly.
+  // The map could not answer -- or it did and the correction is being scaled
+  // against this, which is the same two-frame solve either way.
   std::vector<Eigen::Index> pairs;
   pairs.reserve(static_cast<size_t>(count));
   for (Eigen::Index i = 0; i < count; ++i) {
@@ -1825,6 +1860,28 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     settings_.ground_min_inliers, softness_for(camera, settings_.ground_pair_softness_m),
     pair_weights,
     settings_.ground_pair_passes);
+  if (estimate.has_value() && map_motion.has_value()) {
+    // What the map path actually reports is a displacement with a correction
+    // folded into it: `relative_motion(pose_, placed)` is where this camera
+    // has moved *plus* this map's standing disagreement with the fused pose.
+    // The two-frame solve is the same displacement with no correction at all,
+    // so their difference is the correction alone and this scales that and
+    // nothing else. Unit gain is what the map path did before this existed;
+    // zero leaves the displacement with the correction removed.
+    //
+    // This is the knob `map_solve_weight` was mistaken for. That one moved how
+    // much of the *camera* the fusion listened to, which conflates correction
+    // strength with throwing away the other camera's measurement -- and it was
+    // being discarded anyway.
+    const double gain = settings_.map_correction_gain;
+    PlanarMotion blended = *map_motion;
+    blended.x = estimate->motion.x + gain * (map_motion->x - estimate->motion.x);
+    blended.y = estimate->motion.y + gain * (map_motion->y - estimate->motion.y);
+    solved.motion = blended;
+    // The map branch's spread and inlier mask stand: they describe the answer
+    // this hop is anchored on.
+    return solved;
+  }
   if (estimate.has_value()) {
     solved.motion = estimate->motion;
     // The road's own length for this interval, where the hop really is one.
@@ -2664,6 +2721,18 @@ void Estimator::process_pair()
     filtered_twist_ += alpha * (raw - filtered_twist_);
     twist = filtered_twist_;
 
+    // The heading the anchor weights are judged from, filtered. See
+    // `GroundAnchorMap::set_frame_pose`.
+    if (!anchor_weight_yaw_.has_value()) {
+      anchor_weight_yaw_ = pose_.yaw;
+    } else {
+      const double yaw_alpha = settings_.anchor_weight_yaw_tau_sec <= 0.0
+        ? 1.0
+        : dt / (settings_.anchor_weight_yaw_tau_sec + dt);
+      anchor_weight_yaw_ = wrap_pi(
+        *anchor_weight_yaw_ + yaw_alpha * wrap_pi(pose_.yaw - *anchor_weight_yaw_));
+    }
+
     {
       Stopwatch watch(diagnostics_, "anchor");
       update_anchors(solved);
@@ -2707,6 +2776,39 @@ void Estimator::process_pair()
   diagnostics_.camera_looks = camera_looks_;
   diagnostics_.camera_anchored = camera_anchored_;
   diagnostics_.anchors = anchors_ ? anchors_->size() : 0;
+  if (anchors_ != nullptr) {
+    std::vector<std::array<double, 7>> polar;
+    anchors_->polar(pose_.x, pose_.y, pose_.yaw, polar);
+    diagnostics_.anchor_sector_count.fill(0);
+    diagnostics_.anchor_sector_weight.fill(0.0);
+    diagnostics_.anchor_sector_range.fill(0.0);
+    diagnostics_.anchor_sightings.fill(0);
+    diagnostics_.anchor_road = 0;
+    diagnostics_.anchor_usable = 0;
+    diagnostics_.anchor_scatter.fill(0);
+    for (const auto & entry : polar) {
+      // `polar` reports the bearing in radians.
+      const int sector = std::min(
+        5, static_cast<int>(std::abs(entry[1]) * 180.0 / M_PI / 30.0));
+      diagnostics_.anchor_sector_count[static_cast<size_t>(sector)] += 1;
+      diagnostics_.anchor_sector_weight[static_cast<size_t>(sector)] += entry[2];
+      diagnostics_.anchor_sector_range[static_cast<size_t>(sector)] += entry[0];
+      const int seen = static_cast<int>(entry[3]);
+      const int bucket = seen <= 1 ? 0 : (seen == 2 ? 1 : (seen <= 4 ? 2
+        : (seen <= 8 ? 3 : (seen <= 16 ? 4 : 5))));
+      diagnostics_.anchor_sightings[static_cast<size_t>(bucket)] += 1;
+      if (entry[4] >= static_cast<double>(kRoadIdentity)) {
+        ++diagnostics_.anchor_road;
+      }
+      if (entry[6] > 0.5) {
+        ++diagnostics_.anchor_usable;
+      }
+      const double v = entry[5];
+      const int band = v < 1e-6 ? 0 : (v < 1e-5 ? 1 : (v < 1e-4 ? 2
+        : (v < 1e-3 ? 3 : (v < 1e-2 ? 4 : 5))));
+      diagnostics_.anchor_scatter[static_cast<size_t>(band)] += 1;
+    }
+  }
   if (anchors_) {
     anchors_->extent(
       pose_.x, pose_.y, pose_.yaw, settings_.solve_max_distance_m,
@@ -2813,7 +2915,7 @@ void Estimator::process_pair()
 // Yaw is not a variable. The IMU's heading is exact on this rig
 // (correlation 0.985-0.9997 against truth), so the graph is two independent
 // linear problems in x and y.
-void Estimator::anchor_polar(std::vector<std::array<double, 4>> & out) const
+void Estimator::anchor_polar(std::vector<std::array<double, 7>> & out) const
 {
   out.clear();
   if (anchors_) {
@@ -2859,7 +2961,7 @@ void Estimator::solve_pose_graph()
   }
   const int64_t first = held - window;
   const auto loops = anchors_->revisits();
-  std::vector<std::array<double, 4>> edges;   // from, to, dx, dy (relative index)
+  std::vector<std::array<double, 7>> edges;   // from, to, dx, dy (relative index)
   std::vector<double> weight;
   for (const auto & loop : loops) {
     if (loop.from < first || loop.to < first || loop.from == loop.to) {
@@ -2964,7 +3066,17 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
   // property of the frame; with a map per camera it did not matter who counted
   // it, and with one shared map counting it twice halves every lifetime.
   anchors_->advance();
-  anchors_->set_frame_pose(fused_path_, pose_.yaw);
+  anchors_->set_frame_pose(
+    fused_path_, pose_.yaw, anchor_weight_yaw_.value_or(pose_.yaw));
+  {
+    const auto velocity = fused_world_velocity();
+    // The filtered yaw rate, not the raw one. `filtered_twist_` already carries
+    // it -- it was only ever used to smooth the twist this node publishes, so
+    // `twist_lowpass_tau` has had no effect on the trajectory at all. Here it
+    // does: it is the rate the lookahead's arc is predicted with.
+    anchors_->set_lookahead(
+      velocity.has_value() ? velocity->norm() : 0.0, filtered_twist_.z());
+  }
   anchors_->set_frame_position(
     pose_.x, pose_.y,
     cameras_.empty() ? 0.0
@@ -3045,6 +3157,15 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
         information(n) = scale * scale;
       }
     }
+    // The same candidates' clarity, in the same order, so the map can spend its
+    // free slots on landmarks rather than on whichever the frame listed first.
+    Weights clarity;
+    if (camera.track_clarity.size() == entry.ground_valid.size()) {
+      clarity.resize(count);
+      for (Eigen::Index n = 0; n < count; ++n) {
+        clarity(n) = camera.track_clarity(usable[static_cast<size_t>(n)]);
+      }
+    }
     const Points3 world = transform_points_to_world(body, pose_);
     Points2 flat(count, 2);
     flat.col(0) = world.col(0);
@@ -3057,9 +3178,10 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
       pose_time_.push_back(last_accept_stamp_.value_or(0.0));
       anchors_->update(
         camera.source, ids, flat, allow_new, information, body_flat,
-        static_cast<int32_t>(pose_history_.size() - 1));
+        static_cast<int32_t>(pose_history_.size() - 1), clarity);
     } else {
-      anchors_->update(camera.source, ids, flat, allow_new, information);
+      anchors_->update(camera.source, ids, flat, allow_new, information,
+        Points2(), -1, clarity);
     }
   }
 }
@@ -3111,6 +3233,9 @@ void Estimator::integrate_points(
 
     if (settings_.obstacle_slip_baseline_m > 0.0) {
       integrate_obstacle_slip(camera, entry, update);
+    }
+    if (settings_.parallax_height) {
+      integrate_parallax(camera, entry, update);
     } else {
       // The other way of placing an obstacle is to triangulate the current view
       // against a held keyframe, and that needs the images this path does not
@@ -3118,6 +3243,139 @@ void Estimator::integrate_points(
       // has no picture in it. Say nothing rather than crash, and count it.
       ++diagnostics_.obstacles_unavailable;
     }
+  }
+}
+
+// The road warp's leftover parallax, turned into height.
+//
+// The sparse path holds each feature's first sighting and reads the slip
+// between then and now. This does not have to: the warp has already put every
+// point that lies on the plane back where it came from, so what dense flow
+// still finds *is* the slip, in one frame, everywhere at once.
+//
+// The relation is the same one. A point at height z, seen from a lens at
+// height h, projects onto the plane further out than it is, and that error
+// walks with the vehicle:
+//
+//     ratio = -(slip . travel) / reach^2 ,    z = h * ratio / (1 + ratio)
+//
+// then the point is walked back along its own ray by (h - z) / h.
+void Estimator::integrate_parallax(Camera & camera, const Solved & entry, Update & update)
+{
+  const Eigen::Index cells = camera.track_parallax.rows();
+  if (cells == 0 || camera.track_parallax.cols() != 4 || !entry.motion.has_value()) {
+    return;
+  }
+  const double height = camera.model.translation_base_from_camera.z();
+  if (!(height > 1e-6)) {
+    return;
+  }
+  // Where the vehicle went over this hop, in the body frame it started in.
+  const Eigen::Vector2d travel(entry.motion->x, entry.motion->y);
+  const double travelled = travel.norm();
+  if (!(travelled > 1e-4)) {
+    return;
+  }
+  // Both ends of each cell's residual, projected onto the plane. The pair is
+  // taken through the same projection so anything the projection gets wrong
+  // cancels in their difference.
+  Points2 here_pixels(cells, 2);
+  Points2 there_pixels(cells, 2);
+  for (Eigen::Index i = 0; i < cells; ++i) {
+    here_pixels(i, 0) = camera.track_parallax(i, 0);
+    here_pixels(i, 1) = camera.track_parallax(i, 1);
+    there_pixels(i, 0) = camera.track_parallax(i, 0) - camera.track_parallax(i, 2);
+    there_pixels(i, 1) = camera.track_parallax(i, 1) - camera.track_parallax(i, 3);
+  }
+  const auto tilt = camera_tilt(camera);
+  const Eigen::Matrix3d * tilt_ptr = tilt.has_value() ? &tilt.value() : nullptr;
+  const bool moves = settings_.ground_height_from_tilt &&
+    !settings_.band_attitude && !settings_.anchor_attitude;
+  const double scale =
+    camera.settings.range_scale * camera.range_scale_learned * imu_scale_;
+  Points2 here_ground;
+  Points2 there_ground;
+  Mask here_valid;
+  Mask there_valid;
+  pixels_to_ground(
+    here_pixels, camera.model, settings_.ground_max_distance_m,
+    camera.settings.ground_min_distance_m, tilt_ptr, scale, here_ground, here_valid,
+    settings_.pitch_centre_x_m, moves);
+  pixels_to_ground(
+    there_pixels, camera.model, settings_.ground_max_distance_m,
+    camera.settings.ground_min_distance_m, tilt_ptr, scale, there_ground, there_valid,
+    settings_.pitch_centre_x_m, moves);
+
+  const Eigen::Vector2d lens = camera.model.translation_base_from_camera.head<2>();
+  Points3 mount(1, 3);
+  mount.row(0) = camera.model.translation_base_from_camera.transpose();
+  const Points3 mount_world = transform_points_to_world(mount, pose_);
+  const Eigen::Vector2d origin(mount_world(0, 0), mount_world(0, 1));
+  const double ceiling = std::min(
+    settings_.obstacle_max_height_m, height * settings_.obstacle_height_margin);
+
+  Points3 body(cells, 3);
+  std::vector<double> heights;
+  std::vector<Eigen::Index> kept;
+  for (Eigen::Index i = 0; i < cells; ++i) {
+    if (!here_valid(i) || !there_valid(i)) {
+      continue;
+    }
+    const double residual = std::hypot(
+      camera.track_parallax(i, 2), camera.track_parallax(i, 3));
+    // `!(x >= t)` rather than `x < t`, so a NaN is refused rather than passed.
+    if (!std::isfinite(residual) || !(residual >= settings_.parallax_min_pixels)) {
+      continue;
+    }
+    const double range = std::hypot(
+      here_ground(i, 0) - lens.x(), here_ground(i, 1) - lens.y());
+    if (!(range > 0.1)) {
+      continue;
+    }
+    // The residual displacement this cell shows against what the plane
+    // predicted, resolved along the direction the vehicle went.
+    //
+    // A point at height z projects onto the plane at range R*h/(h-z), further
+    // out than it is, and over a hop d that projection runs on by d*z/(h-z).
+    // So the ratio is the slip *per metre travelled* -- not per metre of range,
+    // which is what the sparse path's `reach` is (it names the travel, and its
+    // gate is `obstacle_slip_baseline_m`, a distance driven).
+    const Eigen::Vector2d slip(
+      here_ground(i, 0) - there_ground(i, 0), here_ground(i, 1) - there_ground(i, 1));
+    const double ratio = settings_.parallax_sign * slip.dot(travel) /
+      (travelled * travelled);
+    if (!(ratio > 0.0)) {
+      continue;
+    }
+    const double z = height * ratio / (1.0 + ratio);
+    if (!std::isfinite(z) || z < settings_.obstacle_min_height_m || z > ceiling) {
+      continue;
+    }
+    body(static_cast<Eigen::Index>(kept.size()), 0) = here_ground(i, 0);
+    body(static_cast<Eigen::Index>(kept.size()), 1) = here_ground(i, 1);
+    body(static_cast<Eigen::Index>(kept.size()), 2) = 0.0;
+    heights.push_back(z);
+    kept.push_back(i);
+  }
+  if (kept.empty()) {
+    return;
+  }
+  const Points3 world = transform_points_to_world(
+    body.topRows(static_cast<Eigen::Index>(kept.size())), pose_);
+  for (size_t n = 0; n < kept.size(); ++n) {
+    const double z = heights[n];
+    const double share = (height - z) / height;
+    LabelledPoint point;
+    point.x = static_cast<float>(
+      origin.x() + share * (world(static_cast<Eigen::Index>(n), 0) - origin.x()));
+    point.y = static_cast<float>(
+      origin.y() + share * (world(static_cast<Eigen::Index>(n), 1) - origin.y()));
+    point.z = static_cast<float>(z);
+    point.label = kObstacleLabel;
+    point.origin_x = static_cast<float>(origin.x());
+    point.origin_y = static_cast<float>(origin.y());
+    update.points.push_back(point);
+    ++diagnostics_.parallax_points;
   }
 }
 

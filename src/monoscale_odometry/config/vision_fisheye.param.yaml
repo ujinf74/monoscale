@@ -131,8 +131,6 @@
     # Both cameras tick on the same 20 Hz schedule, an exact multiple of the
     # 0.01 s simulation step, so a pair is at worst one step apart.
     sync_tolerance_sec: 0.02
-    # Never publish guessed metric odometry when the calibration is invalid.
-    allow_fov_fallback: false
 
     # Fallback intrinsics, used only until the first CameraInfo arrives. CARLA
     # reports fx = width / (2 tan(fov/2)) = 200.45 for fov 134.669081 at 960
@@ -764,7 +762,6 @@
     # the same wall the magnitude gate hit.
     attitude_horizontal_tolerance: 0.60
     attitude_gravity_tolerance: 0.10
-    camera_workers: 1
     # How much the ground has to move before a solve is worth attempting.
     # Declared at 40.0 in odometry_node.py and absent from here until
     # 08-07, which meant the code default was running and nothing said so.
@@ -904,12 +901,6 @@
     max_yaw_per_frame_rad: 0.35
     twist_lowpass_tau: 0.12
 
-    # A 20 Hz frame pair at parking speed gives a baseline of a few centimetres.
-    # Below about a degree of parallax the triangulated depth is worth metres of
-    # error, which smeared obstacles across the map instead of placing them.
-    triangulation_reprojection_error_px: 2.5
-    triangulation_min_distance_m: 0.5
-    triangulation_max_distance_m: 30.0
     # The lowest plane the sweep may believe. 0.15 matched height_gate.py's
     # cut for the LiDAR reference, which is where it came from, but the two
     # answer different questions and the sweep does not need to agree.
@@ -941,10 +932,6 @@
     # Measured against the LiDAR reference grid: at 0.65 a single triangulation
     # is enough, which scored precision 0.28 and recall 0.30. Raise it towards
     # 0.85 to demand a second hit, which scored precision 0.62 and recall 0.10.
-    # How far the vehicle must travel before the current view is triangulated
-    # against the held keyframe. At 8 m range this buys about 2.5 degrees of
-    # parallax, where consecutive frames gave a tenth of that.
-    mapping_baseline_m: 0.35
 
     # The velocity filter predicts, and the accelerometer feeds it.
     #
