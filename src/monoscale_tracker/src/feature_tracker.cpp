@@ -51,6 +51,11 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
+#include <rclcpp/serialization.hpp>
+#include <rosbag2_cpp/reader.hpp>
+#include <rosbag2_cpp/writer.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
@@ -459,6 +464,9 @@ public:
       totals += " " + entry.first + "=" + std::to_string(entry.second);
     }
     RCLCPP_INFO(get_logger(), "published total:%s", totals.c_str());
+    RCLCPP_INFO(
+      get_logger(), "step sign: frames=%ld negative=%ld flips=%ld",
+      sign_frames_, sign_negative_, sign_flips_);
   }
 
   FeatureTracker()
@@ -541,7 +549,21 @@ public:
     // Let the step search cross zero. Off is what every recorded number came
     // from; see the note in `measure_step_photometric`.
     road_step_reverse_ = declare_parameter<bool>("road_step_reverse", false);
-    road_step_reverse_votes_ = declare_parameter<int>("road_step_reverse_votes", 3);
+    // Sample the warp inside the correlation instead of calling cv::remap, to
+    // get past its 1/32-pixel map quantisation. See the note in `road_scores`.
+    road_step_fused_ = declare_parameter<bool>("road_step_fused", false);
+    // The lattice the four-parameter fit warps on, when it should be finer than
+    // the search's. 0 keeps `road_step_stride`.
+    road_step_fit_stride_ = declare_parameter<int>("road_step_fit_stride", 0);
+    // Rebuild the fit's numeric Jacobian every this many iterations. 1 is every
+    // one, which is what every recorded number came from.
+    road_step_esm_rebuild_ = declare_parameter<int>("road_step_esm_rebuild", 1);
+    // How far the winning step has to clear a step of nothing before the frame
+    // is believed. Zero support is what the tracks that died contribute, so
+    // this is the margin between "the vehicle did not move" and "the corners
+    // stopped saying anything". 1.0 asks only to tie it.
+    step_observable_margin_ =
+      declare_parameter<double>("step_observable_margin", 1.0);
     parallax_grid_ = declare_parameter<int>("parallax_grid", 0);
     parallax_flow_scale_ = declare_parameter<double>("parallax_flow_scale", 0.5);
     min_distance_ = declare_parameter<double>("min_feature_distance_px", 8.0);
@@ -790,6 +812,8 @@ public:
       throw std::runtime_error("camera configuration mismatch");
     }
 
+    camera_names_ = cameras;
+    image_topics_ = topics;
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
       states_[name].target = max_features_;
@@ -797,6 +821,7 @@ public:
         models_[name] = load_ground_model(name);
         road_bands_[name] = load_road_band(name);
       }
+      publish_topic_[name] = "/vision/tracks/" + name;
       publishers_[name] = create_publisher<std_msgs::msg::Float64MultiArray>(
         "/vision/tracks/" + name, output_qos);
       // Each camera needs its own callback group. Subscriptions left in the
@@ -826,6 +851,7 @@ public:
       // the forward step.
       const auto imu_topic =
         declare_parameter<std::string>("imu_topic", "/sensing/imu/imu_data");
+      imu_topic_ = imu_topic;
       rclcpp::QoS imu_qos(rclcpp::KeepLast(400));
       imu_qos.best_effort();
       groups_.push_back(
@@ -842,9 +868,108 @@ public:
     }
   }
 
+  // The whole recording, in stamp order, through the same handlers the live
+  // node uses -- but called directly rather than delivered.
+  //
+  // Live, the frames arrive over the middleware: two camera callbacks in their
+  // own groups, an executor with four threads, and a queue that fills at
+  // whatever rate the player and the tracker happen to run. Which frame is
+  // processed when is then a property of that run, and the same recording
+  // extracted twice gives different tracks -- measured on str_1.5 at 1.70x
+  // between the best and worst of three repeats, which is larger than most of
+  // the differences anyone has tried to measure with it.
+  //
+  // Here there is no player, no middleware and no queue: the bag is read in
+  // order and each message is handed to its handler. The result is the same
+  // every time, and it is also much faster, because nothing waits for real
+  // time to pass.
+  int run_offline(const std::string & input, const std::string & output)
+  {
+    rosbag2_cpp::Reader reader;
+    reader.open(input);
+    rosbag2_cpp::Writer writer;
+    writer.open(output);
+    offline_ = &writer;
+
+    rclcpp::Serialization<sensor_msgs::msg::Image> image_codec;
+    rclcpp::Serialization<sensor_msgs::msg::Imu> imu_codec;
+    rclcpp::Serialization<sensor_msgs::msg::CameraInfo> info_codec;
+    rclcpp::Serialization<geometry_msgs::msg::PoseWithCovarianceStamped> pose_codec;
+
+    std::map<std::string, std::string> camera_of;
+    for (size_t i = 0; i < camera_names_.size() && i < image_topics_.size(); ++i) {
+      camera_of[image_topics_[i]] = camera_names_[i];
+    }
+    // A frame waits until the instrument has passed it.
+    //
+    // `yaw_at` interpolates between the samples either side of a stamp, so a
+    // frame handed over before the sample after it exists gets no heading and
+    // the turn is unknown for that hop. Live that never happens -- the queue is
+    // 400 deep and the tracker is always behind -- but reading the bag in order
+    // hands each frame over the moment it is met. Holding frames until an
+    // inertial sample past their stamp has been ingested reproduces the live
+    // ordering without depending on how fast anything runs.
+    std::vector<std::pair<std::string, sensor_msgs::msg::Image>> pending;
+    double instrument = 0.0;
+    long images = 0;
+    const auto drain = [&](bool flush) {
+        size_t kept = 0;
+        for (size_t i = 0; i < pending.size(); ++i) {
+          const double stamp = rclcpp::Time(pending[i].second.header.stamp).seconds();
+          if (flush || stamp < instrument) {
+            onImage(pending[i].first, pending[i].second);
+            ++images;
+          } else {
+            pending[kept++] = std::move(pending[i]);
+          }
+        }
+        pending.resize(kept);
+      };
+    while (reader.has_next()) {
+      const auto message = reader.read_next();
+      rclcpp::SerializedMessage serialized(*message->serialized_data);
+      const auto camera = camera_of.find(message->topic_name);
+      if (camera != camera_of.end()) {
+        sensor_msgs::msg::Image image;
+        image_codec.deserialize_message(&serialized, &image);
+        pending.emplace_back(camera->second, std::move(image));
+        continue;
+      }
+      if (message->topic_name == imu_topic_) {
+        sensor_msgs::msg::Imu imu;
+        imu_codec.deserialize_message(&serialized, &imu);
+        on_imu(imu);
+        instrument = rclcpp::Time(imu.header.stamp).seconds();
+        drain(false);
+        // Carried through so the output bag is what the estimator needs.
+        writer.write(imu, message->topic_name, rclcpp::Time(imu.header.stamp));
+        continue;
+      }
+      // Everything the estimator reads but the tracker does not: copied over
+      // unchanged so one bag is enough to score with.
+      if (message->topic_name.find("camera_info") != std::string::npos) {
+        sensor_msgs::msg::CameraInfo info;
+        info_codec.deserialize_message(&serialized, &info);
+        writer.write(info, message->topic_name, rclcpp::Time(info.header.stamp));
+        continue;
+      }
+      if (message->topic_name.find("ground_truth") != std::string::npos) {
+        geometry_msgs::msg::PoseWithCovarianceStamped pose;
+        pose_codec.deserialize_message(&serialized, &pose);
+        writer.write(pose, message->topic_name, rclcpp::Time(pose.header.stamp));
+        continue;
+      }
+    }
+    drain(true);
+    offline_ = nullptr;
+    RCLCPP_INFO(get_logger(), "offline: %ld images", images);
+    return 0;
+  }
+
 private:
   void onImage(const std::string & name, const sensor_msgs::msg::Image & message)
   {
+    out_stamp_ = rclcpp::Time(message.header.stamp);
     const auto entered = std::chrono::steady_clock::now();
     auto mark = entered;
     const auto lap = [&mark]() {
@@ -2049,10 +2174,11 @@ private:
   void build_warp_roi(
     const GroundModel & model, double step, double turn, int width, int height,
     const cv::Rect & roi, cv::Mat & map_x, cv::Mat & map_y,
-    double pitch = 0.0, double roll = 0.0) const
+    double pitch = 0.0, double roll = 0.0, int stride_override = 0) const
   {
     const cv::Matx33d inverse = model.homography(step, turn, pitch, roll).inv();
-    const int stride = std::max(road_step_stride_, 1);
+    const int stride = std::max(
+      stride_override > 0 ? stride_override : road_step_stride_, 1);
     const int cols = std::max(roi.width / stride, 2);
     const int rows = std::max(roi.height / stride, 2);
     cv::Mat sx(rows, cols, CV_32F);
@@ -2118,14 +2244,61 @@ private:
     double hop, double turn, const cv::Rect & roi, std::vector<double> & out,
     double * whole = nullptr) const
   {
+    // With `road_step_fused` the warp is not built at all: each pixel's source
+    // is computed where it is used. The lattice is what sets the precision --
+    // stride 8 to 1 moves the median hop error 0.278 mm to 0.174 and RPE5 0.240
+    // to 0.162, because the fisheye composed with the induced homography is not
+    // linear over eight pixels and `cv::resize` joins the lattice with straight
+    // lines. Stride 1 costs 9.7x, so it is not a setting; computing the exact
+    // source per pixel and summing it immediately is the same geometry without
+    // the lattice, the two resizes, the remap and the buffer they write.
+    const bool fused = road_step_fused_;
+    cv::Matx33d inverse;
     cv::Mat map_x;
     cv::Mat map_y;
-    build_warp_roi(model, hop, turn, previous.cols, previous.rows, roi, map_x, map_y);
+    if (fused) {
+      inverse = model.homography(hop, turn).inv();
+    } else {
+      build_warp_roi(model, hop, turn, previous.cols, previous.rows, roi, map_x, map_y);
+    }
     const int tiles = std::max(road_step_tiles_, 1);
     out.assign(static_cast<size_t>(tiles), -2.0);
     const cv::Mat target = current(roi);
+    // Sampling the warp here instead of calling `cv::remap`, which rounds the
+    // source position to 1/32 of a pixel (`INTER_TAB_SIZE` is 32 and the
+    // coefficient table is indexed by the rounded fraction, whatever type the
+    // map is).
+    //
+    // That quantisation is 0.125 mm where the band runs 4 mm to the pixel, and
+    // the median hop error is 0.28 mm, so it looked like the floor. It is not:
+    // removing it entirely moves the hop error from 0.278 mm to 0.279 and hop%
+    // from 0.311 to 0.312, and costs 8% of the frame. Measured on str_1.5
+    // through the deterministic offline path, so the two runs are comparable to
+    // the byte.
+    //
+    // Kept, default off, because it is the only way to ask that question again
+    // if the floor moves for another reason -- and because at a higher width
+    // the quantiser and the floor change places.
     cv::Mat warped;
-    cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    if (!fused) {
+      cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    }
+    const int source_cols = previous.cols;
+    const int source_rows = previous.rows;
+    const auto sample = [&](double x, double y) {
+        x = std::clamp(x, 0.0, static_cast<double>(source_cols - 1));
+        y = std::clamp(y, 0.0, static_cast<double>(source_rows - 1));
+        const int x0 = static_cast<int>(x);
+        const int y0 = static_cast<int>(y);
+        const int x1 = std::min(x0 + 1, source_cols - 1);
+        const int y1 = std::min(y0 + 1, source_rows - 1);
+        const double fx = x - x0;
+        const double fy = y - y0;
+        const uchar * r0 = previous.ptr<uchar>(y0);
+        const uchar * r1 = previous.ptr<uchar>(y1);
+        return (1.0 - fy) * ((1.0 - fx) * r0[x0] + fx * r0[x1]) +
+               fy * ((1.0 - fx) * r1[x0] + fx * r1[x1]);
+      };
     // One pass over the region, five sums per tile.
     //
     // This used to be a `matchTemplate` call for the region and one more per
@@ -2152,8 +2325,35 @@ private:
     }
     std::vector<int64_t> sa(tiles, 0), sb(tiles, 0);
     std::vector<int64_t> saa(tiles, 0), sbb(tiles, 0), sab(tiles, 0);
+    std::vector<double> fa(tiles, 0.0), fb(tiles, 0.0);
+    std::vector<double> faa(tiles, 0.0), fbb(tiles, 0.0), fab(tiles, 0.0);
     for (int y = 0; y < roi.height; ++y) {
       const uchar * a = target.ptr<uchar>(y);
+      if (fused) {
+        const double image_y = roi.y + y;
+        for (int i = 0; i < tiles; ++i) {
+          double la = 0.0, lb = 0.0, laa = 0.0, lbb = 0.0, lab = 0.0;
+          for (int x = edge[static_cast<size_t>(i)]; x < edge[static_cast<size_t>(i) + 1]; ++x) {
+            const cv::Vec3d bearing = inverse * model.bearing(
+              cv::Point2f(static_cast<float>(roi.x + x), static_cast<float>(image_y)),
+              source_cols, source_rows);
+            const cv::Point2f p = model.pixel(bearing, source_cols, source_rows);
+            const double va = a[x];
+            const double vb = sample(p.x, p.y);
+            la += va;
+            lb += vb;
+            laa += va * va;
+            lbb += vb * vb;
+            lab += va * vb;
+          }
+          fa[static_cast<size_t>(i)] += la;
+          fb[static_cast<size_t>(i)] += lb;
+          faa[static_cast<size_t>(i)] += laa;
+          fbb[static_cast<size_t>(i)] += lbb;
+          fab[static_cast<size_t>(i)] += lab;
+        }
+        continue;
+      }
       const uchar * b = warped.ptr<uchar>(y);
       for (int i = 0; i < tiles; ++i) {
         // Accumulated per row into locals first: the totals are int64 and the
@@ -2185,28 +2385,28 @@ private:
         continue;
       }
       const size_t t = static_cast<size_t>(i);
-      out[t] = zncc_from_sums(
-        static_cast<double>(width) * roi.height,
-        static_cast<double>(sa[t]), static_cast<double>(sb[t]),
-        static_cast<double>(saa[t]), static_cast<double>(sbb[t]),
-        static_cast<double>(sab[t]));
+      out[t] = fused
+        ? zncc_from_sums(
+          static_cast<double>(width) * roi.height, fa[t], fb[t], faa[t], fbb[t], fab[t])
+        : zncc_from_sums(
+          static_cast<double>(width) * roi.height,
+          static_cast<double>(sa[t]), static_cast<double>(sb[t]),
+          static_cast<double>(saa[t]), static_cast<double>(sbb[t]),
+          static_cast<double>(sab[t]));
     }
     if (whole != nullptr) {
       // Every column, including any the tile loop was too narrow to report.
-      int64_t ta = 0, tb = 0, taa = 0, tbb = 0, tab = 0;
+      double ta = 0.0, tb = 0.0, taa = 0.0, tbb = 0.0, tab = 0.0;
       for (int i = 0; i < tiles; ++i) {
         const size_t t = static_cast<size_t>(i);
-        ta += sa[t];
-        tb += sb[t];
-        taa += saa[t];
-        tbb += sbb[t];
-        tab += sab[t];
+        ta += fused ? fa[t] : static_cast<double>(sa[t]);
+        tb += fused ? fb[t] : static_cast<double>(sb[t]);
+        taa += fused ? faa[t] : static_cast<double>(saa[t]);
+        tbb += fused ? fbb[t] : static_cast<double>(sbb[t]);
+        tab += fused ? fab[t] : static_cast<double>(sab[t]);
       }
       *whole = zncc_from_sums(
-        static_cast<double>(roi.width) * roi.height,
-        static_cast<double>(ta), static_cast<double>(tb),
-        static_cast<double>(taa), static_cast<double>(tbb),
-        static_cast<double>(tab));
+        static_cast<double>(roi.width) * roi.height, ta, tb, taa, tbb, tab);
     }
   }
 
@@ -2415,11 +2615,18 @@ private:
     const GroundModel & model, const cv::Mat & previous, const cv::Rect & roi,
     const double * candidate, cv::Mat & out) const
   {
+    // The fit's own lattice. The search only has to find which candidate is
+    // nearest the peak, and a coarse warp does that; this is where the answer
+    // that leaves the node is actually formed, so it is where the lattice
+    // error lands. Measured over the whole tracker, stride 8 to 1 moves the
+    // median hop error 0.278 mm to 0.174 -- and fusing the search's warp alone,
+    // lattice and all removed, moved nothing, because the ESM overwrites the
+    // search's answer with its own.
     cv::Mat map_x;
     cv::Mat map_y;
     build_warp_roi(
       model, candidate[0], candidate[1], previous.cols, previous.rows, roi,
-      map_x, map_y, candidate[2], candidate[3]);
+      map_x, map_y, candidate[2], candidate[3], road_step_fit_stride_);
     cv::Mat warped;
     cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
     return normalise(warped, out);
@@ -2596,10 +2803,28 @@ private:
     const double seeded = cost;
     double lambda = 1e-3;
     int taken = 0;
+    cv::Mat column[4];
+    cv::Matx44d held_normal;
+    bool have_jacobian = false;
     for (int iteration = 0; iteration < 10; ++iteration) {
-      cv::Mat column[4];
+      // How often the Jacobian is rebuilt.
+      //
+      // It is numeric and central, so each freed parameter costs two warps and
+      // four of them cost eight -- against the one warp a trial step needs.
+      // That is the whole cost of this routine, and it is spent re-deriving
+      // something that barely moves: the fit travels at most 35% of the step
+      // and three hundredths of a radian, over which the derivative of the
+      // warp is nearly constant. Holding it is what inverse-compositional does
+      // structurally, without needing the analytic form.
+      //
+      // The warps themselves have to be exact -- see `road_patch` -- and an
+      // exact warp is expensive, so doing an eighth as many of them is where
+      // the precision becomes affordable.
+      const bool rebuild = !have_jacobian ||
+        road_step_esm_rebuild_ <= 1 ||
+        (iteration % road_step_esm_rebuild_) == 0;
       bool built = true;
-      for (int k = 0; k < freedom && built; ++k) {
+      for (int k = 0; k < freedom && built && rebuild; ++k) {
         double up[4] = {at[0], at[1], at[2], at[3]};
         double down[4] = {at[0], at[1], at[2], at[3]};
         up[k] += probe[k];
@@ -2613,6 +2838,12 @@ private:
         }
       }
       if (!built) {
+        break;
+      }
+      if (rebuild) {
+        have_jacobian = true;
+      }
+      if (!have_jacobian) {
         break;
       }
       cv::Matx44d normal = cv::Matx44d::zeros();
@@ -2962,6 +3193,30 @@ private:
         }
         return agree;
       };
+    // The same sweep, but every candidate has to clear a step of nothing before
+    // it may win, and the winner reports how much support it had.
+    //
+    // The floor is applied per candidate and not only to the winner. A step too
+    // small to move a corner past the agreement tolerance collects the same
+    // votes zero does -- the tracks that died -- and if only the winner is
+    // tested, a candidate a hair above zero passes on one extra vote and drags
+    // the average to a stop. Testing each one excludes zero and everything
+    // indistinguishable from it by the same rule, without needing to know how
+    // wide that neighbourhood is: the support count says.
+    const auto scan_counting =
+      [&](double low, double high, int samples, int floor, int & best_count) {
+        double best = low;
+        best_count = -1;
+        for (int i = 0; i < samples; ++i) {
+          const double s = low + (high - low) * i / std::max(samples - 1, 1);
+          const int c = support(s);
+          if (c > floor && c > best_count) {
+            best = s;
+            best_count = c;
+          }
+        }
+        return best;
+      };
     const auto scan = [&](double low, double high, int samples) {
         double best = low;
         int best_count = -1;
@@ -2975,30 +3230,74 @@ private:
         }
         return best;
       };
-    double found = 0.0;
-    if (!step_ready_) {
-      // Nothing held: the whole plausible range, once. Symmetric with
-      // `road_step_reverse`, because a drive can begin in reverse.
-      found = road_step_reverse_ ? scan(-0.60, 0.60, 121) : scan(-0.05, 0.60, 66);
-    } else {
-      // Around the last answer, with additive slack so it can grow out of a
-      // standing start -- a window that scales with what it holds never can.
-      //
-      // The slack is taken from the magnitude and the window is not clamped at
-      // zero. Clamping it there is what made reverse unreportable: this scan is
-      // seeded from its own average, so once the answer was positive it could
-      // never become negative again. What decides the sign here is the inlier
-      // count, which collapses when the homography pushes corners the wrong
-      // way -- a far better signal for direction than a photometric score,
-      // which is nearly the same for either sign near a stop.
-      const double slack = std::max(0.45 * std::abs(shared_step_), step_search_slack_);
-      const double low = road_step_reverse_
-        ? shared_step_ - slack : std::max(0.0, shared_step_ - slack);
-      found = scan(low, shared_step_ + slack, 49);
+    // Zero is not a candidate. It is the baseline.
+    //
+    // Every step search in this file used to keep zero out by putting it at the
+    // edge of the window -- `max(0.0, centre - slack)` -- which makes one window
+    // answer three different questions at once: which way, how far, and whether
+    // the answer means anything. They conflict. A window that excludes zero
+    // cannot see reverse; one that includes it lets zero win, because features
+    // that failed to track all agree on zero and the vote is bimodal. Clamping
+    // made reverse unreportable (the obstacle park read its reverse stretches at
+    // 0.265 of truth, ATE 2.37 m); unclamping it cost str_1.5 22%, which is the
+    // same bimodality returning.
+    //
+    // Asked separately the three do not conflict:
+    //
+    //   best_forward   the most support any positive step gets
+    //   best_reverse   the most support any negative step gets
+    //   zero_support   what a step of nothing gets -- the failed tracks
+    //
+    // The direction is whichever side has more support, decided on a count and
+    // not on a photometric score, because a wrong-signed homography puts every
+    // corner on the wrong side while the two warps look nearly alike near a
+    // stop. And when neither side clears `zero_support` by
+    // `step_observable_margin` the step is not observable this frame: the
+    // corners are agreeing that nothing moved because they stopped tracking,
+    // not because the vehicle stopped. Holding the last answer is then the
+    // honest output, and it is what the window's edge used to accomplish by
+    // accident.
+    const double slack = step_ready_
+      ? std::max(0.45 * std::abs(shared_step_), step_search_slack_)
+      : 0.60;
+    const double centre = step_ready_ ? std::abs(shared_step_) : 0.30;
+    const double reach_low = std::max(centre - slack, 0.0);
+    const double reach_high = centre + slack;
+    const int samples = step_ready_ ? 49 : 66;
+    const int zero_support = support(0.0);
+    const int floor = road_step_reverse_
+      ? static_cast<int>(std::lround(step_observable_margin_ * zero_support)) : -1;
+    int forward_count = -1;
+    int reverse_count = -1;
+    const double forward =
+      scan_counting(reach_low, reach_high, samples, floor, forward_count);
+    double reverse = 0.0;
+    if (road_step_reverse_) {
+      reverse = scan_counting(-reach_high, -reach_low, samples, floor, reverse_count);
     }
+    if (forward_count < 0 && reverse_count < 0) {
+      // Neither sign beat a step of nothing. The corners are agreeing that the
+      // picture did not move because they stopped tracking it, which is not the
+      // same as the vehicle standing still and must not be reported as one.
+      // The held answer stands.
+      return;
+    }
+    double found = reverse_count > forward_count ? reverse : forward;
     found = scan(found - 0.012, found + 0.012, 25);
     std::lock_guard<std::mutex> guard(step_lock_);
+    // How often the direction changes, and how much of the drive is spent going
+    // backwards. A drive that never reverses and reports either is misreading
+    // the sign, and the counts say how badly.
+    const double before = shared_step_;
+    const bool had = step_ready_;
     shared_step_ = step_ready_ ? shared_step_ + 0.5 * (found - shared_step_) : found;
+    if (had && (before < 0.0) != (shared_step_ < 0.0)) {
+      ++sign_flips_;
+    }
+    ++sign_frames_;
+    if (shared_step_ < 0.0) {
+      ++sign_negative_;
+    }
     step_ready_ = true;
   }
 
@@ -3265,7 +3564,14 @@ private:
       out.data.push_back(static_cast<double>(parallax.size() / 4));
       out.data.push_back(kParallaxMarker);
     }
-    publishers_[name]->publish(std::move(out));
+    if (offline_ != nullptr) {
+      // Straight into the bag, in the order the frames were processed. The
+      // publish path goes through the middleware, which is where the ordering
+      // this mode exists to remove would come back in.
+      offline_->write(out, publish_topic_[name], rclcpp::Time(out_stamp_));
+    } else {
+      publishers_[name]->publish(std::move(out));
+    }
     {
       // Counted at the writer itself, so the estimator's tally can be
       // compared against it without a third subscriber in the middle
@@ -3299,7 +3605,10 @@ private:
   double road_step_bracket_k_ = 0.0;
   int road_step_esm_dof_ = 4;
   bool road_step_reverse_ = false;
-  int road_step_reverse_votes_ = 3;
+  bool road_step_fused_ = false;
+  int road_step_fit_stride_ = 0;
+  int road_step_esm_rebuild_ = 1;
+  double step_observable_margin_ = 1.0;
   int parallax_grid_ = 0;
   double parallax_flow_scale_ = 0.5;
   mutable cv::Ptr<cv::DISOpticalFlow> parallax_flow_;
@@ -3334,6 +3643,9 @@ private:
   // The step the reference camera last measured, shared with the others. The
   // rig is rigid, so one number serves every camera on it.
   mutable std::mutex step_lock_;
+  long sign_flips_ = 0;
+  long sign_frames_ = 0;
+  long sign_negative_ = 0;
   double shared_step_ = 0.0;
   bool step_ready_ = false;
   // Heading from the instrument, so the turn in the homography is measured
@@ -3389,6 +3701,13 @@ private:
   std::map<std::string, long> published_;
   std::vector<rclcpp::CallbackGroup::SharedPtr> groups_;
   std::map<std::string, TrackState> states_;
+  // Set only in offline mode; see `run_offline`.
+  rosbag2_cpp::Writer * offline_ = nullptr;
+  std::vector<std::string> camera_names_;
+  std::vector<std::string> image_topics_;
+  std::string imu_topic_;
+  rclcpp::Time out_stamp_{0, 0, RCL_ROS_TIME};
+  std::map<std::string, std::string> publish_topic_;
   std::map<std::string, rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr>
   publishers_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subscriptions_;
@@ -3397,7 +3716,22 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
+  // `--offline <input-bag> <output-bag>` reads the recording directly instead
+  // of waiting for a player to deliver it. Same handlers, fixed order.
+  std::string offline_in;
+  std::string offline_out;
+  for (int i = 1; i + 2 < argc; ++i) {
+    if (std::string(argv[i]) == "--offline") {
+      offline_in = argv[i + 1];
+      offline_out = argv[i + 2];
+    }
+  }
   auto node = std::make_shared<FeatureTracker>();
+  if (!offline_in.empty()) {
+    const int code = node->run_offline(offline_in, offline_out);
+    rclcpp::shutdown();
+    return code;
+  }
   // Settable so the count can follow the number of cameras. Four measured
   // the same as two against a 60 Hz replay (front 26-39 Hz, rear 57-60 either
   // way), so the asymmetry between the two cameras is not thread starvation.
