@@ -116,6 +116,62 @@
     imu_translation_base_from_imu: [0.0, 0.0, 0.0]
     imu_angular_accel_tau_sec: 0.05
     use_imu_yaw: true
+    # The heading, from the gyro rather than from the orientation the IMU
+    # reports.
+    #
+    # That orientation is CARLA's truth on these bags -- 0.000000 deg RMS yaw
+    # against the ground truth pose -- so every number ever measured under it
+    # was conditional on a heading no real rig has. The gyro is a real reading:
+    # its z bias measures 0.0003 to 0.90 deg/s across the recordings, differing
+    # in value and sign per run, and integrating it alone costs ATE 0.0363 ->
+    # 4.9072 over eleven drives.
+    #
+    # What makes it usable is the ESM's turn as an observation of that heading.
+    # The anchor map cannot serve: it is built in the estimator's own frame, so
+    # a slow heading drift turns the map and the vehicle together and the
+    # alignment residual barely moves -- with it as the only observer the
+    # filter recovered 21% of the bias, with the ESM beside it, 89-115%.
+    #
+    # Eleven drives: ATE 0.3632, worst 0.6875, RPE 5/10/20/40 m of
+    # 3.124/1.000/0.780/0.682 %, hop% 0.18. That is ten times the truth-yaw
+    # configuration and it is what a self-contained heading costs here. The
+    # binding term is the ESM front camera's own accumulated yaw error, 0.29 to
+    # 2.52 deg a drive, which is not a constant and so cannot be calibrated
+    # out. Repeat spread over three recordings of one condition is 1.24x here
+    # against 2.02x under the truth heading.
+    #
+    # To go back to the instrument's orientation, BOTH of the first two lines
+    # have to move: `gyro_bias_sigma_rad_s` is what enables the heading filter
+    # at all, and enabling it under a heading that is already exact is all cost
+    # -- mean ATE 0.1703 -> 0.8056 when that was last measured.
+    imu_yaw_from_gyro: true
+    gyro_bias_sigma_rad_s: 0.005
+    # How fast the bias is allowed to move. Never swept until now, and the code
+    # default of 1e-5 costs 12% of worst-drive: 1e-6/1e-5/1e-4/3e-4/1e-3 give
+    # 0.3657/0.3656/0.3632/0.4297/0.6939. An interior optimum, so the bias in
+    # these recordings is not a constant.
+    gyro_bias_walk_sigma_rad_s: 0.0001
+    gyro_noise_sigma_rad_s: 0.001
+    # Front only. Over eleven drives the front camera's accumulated ESM yaw
+    # error stays inside 0.29-2.52 deg while the rear's reaches -36.78 on
+    # straight120_v3 and +35.58 on v4 -- one condition, two recordings,
+    # opposite sign. Averaging the two taught the filter the bias backwards on
+    # exactly those drives.
+    esm_yaw_camera: front
+    # Sigma is `esm_yaw_sigma_rad + esm_yaw_sigma_rate * |turn|`. The constant
+    # part is on a plateau -- 2e-6 and 2e-5 give 0.3632 and 0.3633 -- because
+    # sigma sets how fast a biased observation converges and not what it
+    # converges to. The rate part is the load-bearing one: the ESM's yaw error
+    # is a scale on the rotation, 0.93/1.66/1.97% of the angle turned on
+    # curve_s05/s10/s20, so at 1.0 the observation is trusted only while the
+    # vehicle is going straight, which is where the bias is observable anyway.
+    # It took curve_s20 from 2.5560 to 0.0791.
+    esm_yaw_sigma_rad: 0.000002
+    esm_yaw_sigma_rate: 1.0
+    # How much of the learned bias to take out of the gyro itself. Zero: the
+    # value is in the filter correcting the pose, not in correcting the source.
+    # 0.15 is a wash, 1.0 is +27%, and negative is worse still.
+    gyro_bias_apply: 0.0
     # 100 Hz IMU against the same simulation clock as the images.
     imu_max_age_sec: 0.02
 

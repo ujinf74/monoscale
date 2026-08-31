@@ -2845,17 +2845,19 @@ private:
     // not the gradient of the warped image, which is that same gradient already
     // multiplied by the warp's own spatial Jacobian. Taking the second is what
     // makes the columns disagree with the difference of two warps by 66 to 78%.
-    if (source_gradient_x_.empty() || source_gradient_key_ != previous.data) {
-      cv::Sobel(previous, source_gradient_x_, CV_32F, 1, 0, 3, 1.0 / 8.0);
-      cv::Sobel(previous, source_gradient_y_, CV_32F, 0, 1, 3, 1.0 / 8.0);
-      source_gradient_key_ = previous.data;
-    }
+    // Computed here rather than cached. It was cached, keyed on `previous.data`
+    // and held in one pair of buffers for the whole node -- which is two
+    // cameras sharing them, and an allocator free to hand the same address to a
+    // different frame. That is the same defect `road_cuda` was removed for, and
+    // it is not worth the two Sobels it saves against the warps this replaces.
+    cv::Mat source_x;
+    cv::Mat source_y;
+    cv::Sobel(previous, source_x, CV_32F, 1, 0, 3, 1.0 / 8.0);
+    cv::Sobel(previous, source_y, CV_32F, 0, 1, 3, 1.0 / 8.0);
     cv::Mat gx;
     cv::Mat gy;
-    cv::remap(
-      source_gradient_x_, gx, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-    cv::remap(
-      source_gradient_y_, gy, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    cv::remap(source_x, gx, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    cv::remap(source_y, gy, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
 
     cv::Scalar mean;
     cv::Scalar deviation;
@@ -3947,9 +3949,6 @@ private:
   int road_step_fit_stride_ = 0;
   int road_step_esm_rebuild_ = 1;
   bool road_step_esm_analytic_ = false;
-  mutable cv::Mat source_gradient_x_;
-  mutable cv::Mat source_gradient_y_;
-  mutable const void * source_gradient_key_ = nullptr;
   bool esm_compare_ = false;
   mutable double esm_compare_worst_[4] = {0.0, 0.0, 0.0, 0.0};
   mutable double esm_compare_sum_[4] = {0.0, 0.0, 0.0, 0.0};

@@ -84,6 +84,11 @@ Configuration declare_and_read(rclcpp::Node & node)
 
   topics.imu = declare_string("imu_topic", topics.imu);
   settings.use_imu_yaw = declare_bool("use_imu_yaw", true);
+  settings.imu_yaw_from_gyro = declare_bool("imu_yaw_from_gyro", false);
+  settings.esm_yaw_sigma_rad = declare_double("esm_yaw_sigma_rad", 0.0);
+  settings.esm_yaw_camera = declare_string("esm_yaw_camera", "");
+  settings.esm_yaw_sigma_rate = declare_double("esm_yaw_sigma_rate", 0.0);
+  settings.gyro_bias_apply = declare_double("gyro_bias_apply", 1.0);
   settings.vision_yaw = declare_bool("vision_yaw", false);
   settings.anchor_heading_gain = declare_double("anchor_heading_gain", 0.0);
   settings.vision_yaw_rigid = declare_bool("vision_yaw_rigid", true);

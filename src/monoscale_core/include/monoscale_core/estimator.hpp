@@ -88,6 +88,45 @@ struct EstimatorSettings
   int pair_queue_depth = 12;
 
   bool use_imu_yaw = true;
+  // Take the heading by integrating the gyro's z rate instead of reading the
+  // orientation the instrument reports. On these bags that orientation is
+  // CARLA's truth -- 0.000000 deg RMS -- so every number measured under it is
+  // conditional on a heading no real rig has. The gyro is a real reading: its
+  // z bias measures 0.0003 to 0.90 deg/s across the recordings, and it is a
+  // near-constant, which is the one kind of error the anchor map can observe.
+  // The initial heading still comes from the orientation, once, which is the
+  // stationary alignment any real system performs before it moves.
+  bool imu_yaw_from_gyro = false;
+  // What the ESM's turn is worth as an observation of the handed-in heading,
+  // in radians over one hop. 0 is off. Its per-hop scatter measures 0.0003 to
+  // 0.009 deg (5e-6 to 1.6e-4 rad), but its error is dominated by a scale term
+  // that grows with the turn -- 1 to 2 per cent of the angle travelled -- so
+  // the scatter is a floor for this number and not the number.
+  double esm_yaw_sigma_rad = 0.0;
+  // Which camera's ESM turn is allowed to be that observation. Empty is all of
+  // them, which is what the first version did and is wrong: over eleven drives
+  // the front camera's accumulated yaw error stays inside 0.29 to 2.52 deg
+  // while the rear's runs to -36.78 on straight120_v3 and +35.58 on v4 -- same
+  // condition, two recordings, opposite sign. Averaging a stable observer with
+  // an unstable one gives the filter a residual that changes sign between
+  // recordings, and it learned the bias backwards on exactly those drives.
+  std::string esm_yaw_camera;
+  // The part of that sigma that grows with the turn. The ESM's yaw error is not
+  // scatter: over three curve drives its accumulated error divided by the angle
+  // actually turned is 0.93, 1.66 and 1.97 per cent, so the error is a scale on
+  // the rotation and a constant sigma over-trusts it exactly where the vehicle
+  // is turning hardest. Sigma is `esm_yaw_sigma_rad + this * |turn|`, and this
+  // number is that measured fraction rather than a tuned one.
+  double esm_yaw_sigma_rate = 0.0;
+  // How much of the learned bias to actually take out of the gyro. 1 is the
+  // whole of it and is not obviously right: the observation that taught the
+  // filter is the ESM, which carries a bias of its own, so the estimate is
+  // contaminated and applying all of it transfers that bias into the heading.
+  // Shrinking towards the raw gyro trades the two. This cannot be expressed by
+  // the observation sigma -- sigma sets how fast and how noisily the filter
+  // converges, not what a biased observation converges to, which is why that
+  // axis runs to its low edge and stops mattering.
+  double gyro_bias_apply = 1.0;
   // Solve the hop's rotation from the ground points instead of reading it off
   // the instrument. The two-frame similarity fit already recovers it -- it is
   // thrown away because a heading has always been supplied. Without this the
@@ -958,6 +997,8 @@ struct Diagnostics
   // The one-sided part of vision's yaw residual, in radians per hop: how far
   // the reported heading is pulling the estimate away from the ground.
   double heading_drift = 0.0;
+  // How many times the heading filter was actually folded in.
+  int64_t heading_updates = 0;
   int64_t filter_dropped = 0;
   // What only the six degree of freedom filter has to report: how it thinks the
   // vehicle is leaning, how high it thinks it is, and how many of the
@@ -1158,6 +1199,12 @@ private:
   bool map_ready_ = false;
 
   std::deque<std::pair<double, double>> imu_yaw_samples_;
+  // The gyro's own integral of the heading, kept when `imu_yaw_from_gyro` is
+  // on. It carries the bias the heading filter has learned taken out, so the
+  // two halves close a loop: the anchor solve says how far the heading is out,
+  // `HeadingBiasFilter` turns that into a rate, and this subtracts it.
+  double gyro_yaw_ = 0.0;
+  std::optional<double> gyro_yaw_stamp_;
   struct AccelerationSample
   {
     double stamp;

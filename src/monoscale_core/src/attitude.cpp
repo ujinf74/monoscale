@@ -135,7 +135,7 @@ void HeadingBiasFilter::predict(double dt)
   if (!enabled_ || dt <= 0.0) {
     return;
   }
-  error_ += rate_ * dt;
+  error_ += (1.0 - corrected_) * rate_ * dt;
   Eigen::Matrix2d transition;
   transition << 1.0, dt, 0.0, 1.0;
   covariance_ = transition * covariance_ * transition.transpose();

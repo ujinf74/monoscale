@@ -480,6 +480,10 @@ Estimator::Estimator(const EstimatorSettings & settings)
     attitude_->set_slope_tau(settings.attitude_slope_tau_sec);
     attitude_->set_horizontal_tolerance(settings.attitude_horizontal_tolerance);
   }
+  // Only the gyro path corrects its own source; a quaternion heading is read
+  // as it comes and the filter's prediction is the whole of what it knows.
+  heading_.set_source_corrected(
+    settings.imu_yaw_from_gyro ? settings.gyro_bias_apply : 0.0);
   if (settings.fusion_model == FusionModel::Displacement) {
     PlanarDisplacementFilter::Settings filter;
     filter.acceleration_noise = settings.filter_acceleration_noise;
@@ -682,8 +686,40 @@ void Estimator::ingest_imu(const ImuSample & measured)
     1.0 - 2.0 * (q(1) * q(1) + q(2) * q(2)));
   if (!imu_yaw_datum_.has_value()) {
     imu_yaw_datum_ = yaw;
+    // The gyro's integral starts where the instrument says the vehicle is
+    // pointing, which is the one moment a real rig also reads an absolute
+    // heading. After this it never looks at the orientation again.
+    gyro_yaw_ = yaw;
   }
-  imu_yaw_samples_.emplace_back(sample.stamp, yaw);
+  double reported = yaw;
+  if (settings_.imu_yaw_from_gyro) {
+    if (gyro_yaw_stamp_.has_value()) {
+      const double step = sample.stamp - *gyro_yaw_stamp_;
+      // The same bound the attitude filter uses: a longer gap is a dropout,
+      // and integrating across one invents rotation that was never measured.
+      if (step > 0.0 && step <= 0.1) {
+        // The learned bias taken out at the source, which is where it belongs:
+        // the hop rotation handed to the ground solve is then right, not only
+        // the heading the pose accumulates. `set_source_corrected` below is
+        // what keeps this from being counted twice.
+        //
+        // Subtracting it was the obvious thing and it is a double count. The
+        // filter is an error state on the pose's heading: `predict` already
+        // adds `rate_ dt` as the drift it expects this source to have, and
+        // `update` injects the correction into `pose_.yaw`. Removing the bias
+        // here too makes the residual carry `-(b + r) dt` against a prediction
+        // of `r dt`, so the innovation vanishes at **r = -b/2** and the filter
+        // settles on half the bias. Measured at 47-58% recovery on every drive
+        // that has a bias, which is what pointed at it.
+        gyro_yaw_ = wrap_pi(
+          gyro_yaw_ +
+          (sample.angular_velocity.z() + settings_.gyro_bias_apply * heading_.rate()) * step);
+      }
+    }
+    gyro_yaw_stamp_ = sample.stamp;
+    reported = gyro_yaw_;
+  }
+  imu_yaw_samples_.emplace_back(sample.stamp, reported);
   while (imu_yaw_samples_.size() > 400) {
     imu_yaw_samples_.pop_front();
   }
@@ -1320,6 +1356,31 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     std::abs(camera.esm_yaw_since_solve) <= settings_.max_yaw_per_frame_rad)
   {
     yaw = camera.esm_yaw_since_solve;
+  }
+  // The ESM's turn as an *observation* of the heading that was handed in,
+  // rather than as a replacement for it.
+  //
+  // The gyro's error over a hop is its bias times the interval, and a bias is
+  // a constant the filter already carries as a state. What it lacked was
+  // anything that could see it: the anchor map is built in the estimator's own
+  // frame, so a slow heading drift turns the map and the vehicle together and
+  // the alignment residual barely moves. Measured on curve_s05, where the gyro
+  // bias is +0.903 deg/s: 261 updates recovered 21% of it. The ESM reads its
+  // rotation off the image and does not turn with that frame.
+  if (settings_.esm_yaw_sigma_rad > 0.0 && heading_.enabled() &&
+    (settings_.esm_yaw_camera.empty() ||
+    settings_.esm_yaw_camera == camera.settings.name) &&
+    yaw_delta.has_value() && camera.esm_valid &&
+    std::isfinite(camera.esm_yaw_since_solve) &&
+    std::abs(camera.esm_yaw_since_solve) <= settings_.max_yaw_per_frame_rad)
+  {
+    // Sign: `error_` is the correction the filter adds to the pose, so an
+    // instrument that over-reads the turn by b dt needs -b dt applied, and the
+    // ESM minus the instrument is that difference already.
+    heading_observations_.emplace_back(
+      wrap_pi(camera.esm_yaw_since_solve - *yaw_delta),
+      settings_.esm_yaw_sigma_rad +
+      settings_.esm_yaw_sigma_rate * std::abs(camera.esm_yaw_since_solve));
   }
   if (!yaw.has_value() && settings_.vision_yaw && solved.ground_valid.any()) {
     Eigen::Index usable_pairs = 0;
@@ -2688,6 +2749,12 @@ void Estimator::process_pair()
         const double offset =
           heading_.update(weighted / precision, std::sqrt(1.0 / precision));
         pose_.yaw = wrap_pi(pose_.yaw + offset);
+        // Reported so a run can be asked whether this loop ran at all. Both
+        // fields were declared and never assigned, so the diagnostic line they
+        // gate was unreachable and their absence proved nothing.
+        diagnostics_.gyro_bias = heading_.rate();
+        diagnostics_.heading_drift = offset;
+        ++diagnostics_.heading_updates;
       }
     }
     // The map's own reading of the heading, applied where there is no

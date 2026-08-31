@@ -139,6 +139,15 @@ public:
   // rate is what does the work.
   Eigen::Matrix2d & covariance() {return covariance_;}
 
+  // What fraction of `rate_` whoever supplies the heading already takes out at
+  // the source. The drift this filter should then expect over a step is the
+  // part that was left, `(1 - fraction) rate_ dt`; advancing by the whole of
+  // it counts the correction twice, and at fraction 1 that makes the residual
+  // carry -(b + r) dt against a prediction of r dt, so the innovation vanishes
+  // at r = -b/2. Measured before this existed: 47-58% recovery on every drive
+  // with a bias. The covariance grows the same either way.
+  void set_source_corrected(double fraction) {corrected_ = fraction;}
+
   void predict(double dt);
 
   // Fold in one ground solve's opinion and return the heading offset.
@@ -155,6 +164,7 @@ private:
   double walk_;
   double noise_;
   bool enabled_;
+  double corrected_ = 0.0;
 };
 
 }  // namespace monoscale
