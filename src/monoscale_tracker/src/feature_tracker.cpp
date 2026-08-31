@@ -260,6 +260,110 @@ struct GroundModel
     // pivots at the lens.
     return r_cb * tilt.t() * rotation_base_from_camera * out;
   }
+
+  // The four derivatives of that matrix, at the point it was built.
+  //
+  // The fit's Jacobian is otherwise made of warps: two per freed parameter per
+  // rebuild, and a warp at the lattice the precision needs is the most
+  // expensive thing this file does -- 55% of the fit's warps go into building
+  // the Jacobian rather than into descending. These are the same quantity
+  // written out, so the descent keeps only the warps it actually steps with.
+  //
+  // Order matches `solve_step_esm`: step, turn, pitch, roll.
+  void homography_jacobian(
+    double step, double turn, double pitch, double roll,
+    cv::Matx33d out[4]) const
+  {
+    const cv::Matx33d r_cb = rotation_base_from_camera.t();
+    const double c = std::cos(turn);
+    const double s = std::sin(turn);
+    const cv::Matx33d r_b(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0);
+    // d(r_b^T)/d(turn): r_b^T is the rotation by -turn, so its derivative is
+    // the rotation by -turn pre-multiplied by the generator about z, negated.
+    const cv::Matx33d d_rbt(-s, c, 0.0, -c, -s, 0.0, 0.0, 0.0, 0.0);
+    const cv::Vec3d hop(step, 0.0, 0.0);
+    const cv::Vec3d n = r_cb * cv::Vec3d(0.0, 0.0, 1.0);
+    const double height = translation_base_from_camera[2];
+    const double scale = std::abs(height) > 1e-6 ? 1.0 / height : 0.0;
+    const auto outer = [&](const cv::Vec3d & t) {
+        cv::Matx33d m = cv::Matx33d::zeros();
+        for (int i = 0; i < 3; ++i) {
+          for (int j = 0; j < 3; ++j) {
+            m(i, j) = t[i] * n[j] * scale;
+          }
+        }
+        return m;
+      };
+    // step enters only through the translation, and only as -e_x.
+    const cv::Vec3d dt_step = r_cb * (r_b.t() * cv::Vec3d(-1.0, 0.0, 0.0));
+    cv::Matx33d d_step = -outer(dt_step);
+    // turn enters the rotation and the translation together.
+    const cv::Matx33d d_rot_turn = r_cb * d_rbt * rotation_base_from_camera;
+    const cv::Vec3d dt_turn = r_cb * (d_rbt * (translation_base_from_camera - hop));
+    cv::Matx33d d_turn = d_rot_turn - outer(dt_turn);
+
+    const cv::Matx33d base = homography(step, turn);
+    const double cp = std::cos(pitch);
+    const double sp = std::sin(pitch);
+    const double cr = std::cos(roll);
+    const double sr = std::sin(roll);
+    const cv::Matx33d tilt(
+      cp, sp * sr, sp * cr,
+      0.0, cr, -sr,
+      -sp, cp * sr, cp * cr);
+    const cv::Matx33d d_tilt_pitch(
+      -sp, cp * sr, cp * cr,
+      0.0, 0.0, 0.0,
+      -cp, -sp * sr, -sp * cr);
+    const cv::Matx33d d_tilt_roll(
+      0.0, sp * cr, -sp * sr,
+      0.0, -sr, -cr,
+      0.0, cp * cr, -cp * sr);
+    // The tilt multiplies on the left of the untilted matrix, so the step and
+    // turn derivatives carry it and the tilt derivatives carry the base.
+    const cv::Matx33d left = r_cb * tilt.t() * rotation_base_from_camera;
+    out[0] = left * d_step;
+    out[1] = left * d_turn;
+    out[2] = r_cb * d_tilt_pitch.t() * rotation_base_from_camera * base;
+    out[3] = r_cb * d_tilt_roll.t() * rotation_base_from_camera * base;
+  }
+
+  // How a pixel moves when the bearing it came from moves. Rows are (x, y),
+  // columns the three components of the bearing.
+  void pixel_jacobian(
+    const cv::Vec3d & b, int width, int height, double out[2][3]) const
+  {
+    double sfx, sfy, scx, scy;
+    scaled(width, height, sfx, sfy, scx, scy);
+    const double r2 = b[0] * b[0] + b[1] * b[1];
+    const double r = std::sqrt(r2);
+    if (!equidistant) {
+      const double z = std::abs(b[2]) > 1e-12 ? b[2] : 1e-12;
+      const double iz = 1.0 / z;
+      out[0][0] = sfx * iz;  out[0][1] = 0.0;      out[0][2] = -sfx * b[0] * iz * iz;
+      out[1][0] = 0.0;       out[1][1] = sfy * iz; out[1][2] = -sfy * b[1] * iz * iz;
+      return;
+    }
+    // k = atan2(r, z) / r, and the pixel is (b.x, b.y) * k. Both the radial
+    // part of k and the direction change with the bearing.
+    const double n2 = r2 + b[2] * b[2];
+    const double theta = std::atan2(r, b[2]);
+    const double k = r > 1e-12 ? theta / r : 1.0;
+    // dtheta/db = ( z*bx, z*by, -r^2 ) / (r * n2)
+    const double dtheta_x = r > 1e-12 ? b[2] * b[0] / (r * n2) : 0.0;
+    const double dtheta_y = r > 1e-12 ? b[2] * b[1] / (r * n2) : 0.0;
+    const double dtheta_z = -r / n2;
+    // dk/db = (dtheta/db)/r - theta * (dr/db)/r^2, with dr/db = (bx, by, 0)/r
+    const double dk_x = r > 1e-12 ? dtheta_x / r - theta * b[0] / (r2 * r) : 0.0;
+    const double dk_y = r > 1e-12 ? dtheta_y / r - theta * b[1] / (r2 * r) : 0.0;
+    const double dk_z = r > 1e-12 ? dtheta_z / r : 0.0;
+    out[0][0] = sfx * (k + b[0] * dk_x);
+    out[0][1] = sfx * (b[0] * dk_y);
+    out[0][2] = sfx * (b[0] * dk_z);
+    out[1][0] = sfy * (b[1] * dk_x);
+    out[1][1] = sfy * (k + b[1] * dk_y);
+    out[1][2] = sfy * (b[1] * dk_z);
+  }
 };
 
 // What the split bands measure. Near against far is a pitch and left against
@@ -467,6 +571,21 @@ public:
     RCLCPP_INFO(
       get_logger(), "step sign: frames=%ld negative=%ld flips=%ld",
       sign_frames_, sign_negative_, sign_flips_);
+    if (esm_compare_count_[0] > 0) {
+      for (int k = 0; k < 4; ++k) {
+        if (esm_compare_count_[k] == 0) {
+          continue;
+        }
+        RCLCPP_INFO(
+          get_logger(), "jacobian column %d: mean %.4f worst %.4f over %ld",
+          k, esm_compare_sum_[k] / esm_compare_count_[k], esm_compare_worst_[k],
+          esm_compare_count_[k]);
+      }
+    }
+    RCLCPP_INFO(
+      get_logger(), "fit: solves=%ld warps=%ld jacobians=%ld warps/solve=%.1f",
+      fit_solves_, patch_warps_, fit_jacobians_,
+      fit_solves_ > 0 ? double(patch_warps_) / fit_solves_ : 0.0);
   }
 
   FeatureTracker()
@@ -558,6 +677,10 @@ public:
     // Rebuild the fit's numeric Jacobian every this many iterations. 1 is every
     // one, which is what every recorded number came from.
     road_step_esm_rebuild_ = declare_parameter<int>("road_step_esm_rebuild", 1);
+    // Build the fit's Jacobian from the model's derivatives instead of from
+    // warps. Off is what every recorded number came from.
+    road_step_esm_analytic_ = declare_parameter<bool>("road_step_esm_analytic", false);
+    esm_compare_ = declare_parameter<bool>("road_step_esm_compare", false);
     // How far the winning step has to clear a step of nothing before the frame
     // is believed. Zero support is what the tracks that died contribute, so
     // this is the margin between "the vehicle did not move" and "the corners
@@ -883,6 +1006,87 @@ public:
   // order and each message is handed to its handler. The result is the same
   // every time, and it is also much faster, because nothing waits for real
   // time to pass.
+  // Analytic against central difference, on the model the node was configured
+  // with. A derivation that is wrong in one term still descends, just to the
+  // wrong place, so it has to be checked against the thing it replaces before
+  // it is allowed to replace it.
+  int check_jacobian()
+  {
+    if (models_.empty()) {
+      RCLCPP_ERROR(get_logger(), "no ground model; needs road_from_step");
+      return 2;
+    }
+    const auto & model = models_.begin()->second;
+    const int w = 640;
+    const int h = 360;
+    double worst_h = 0.0;
+    double worst_p = 0.0;
+    unsigned seed = 12345;
+    const auto next = [&seed]() {
+        seed = seed * 1103515245u + 12345u;
+        return static_cast<double>((seed >> 16) & 0x7fff) / 32767.0;
+      };
+    for (int trial = 0; trial < 200; ++trial) {
+      const double p[4] = {
+        0.05 + 0.4 * next(), -0.05 + 0.1 * next(),
+        -0.03 + 0.06 * next(), -0.03 + 0.06 * next()};
+      cv::Matx33d analytic[4];
+      model.homography_jacobian(p[0], p[1], p[2], p[3], analytic);
+      for (int k = 0; k < 4; ++k) {
+        const double e = 1e-6;
+        double up[4] = {p[0], p[1], p[2], p[3]};
+        double down[4] = {p[0], p[1], p[2], p[3]};
+        up[k] += e;
+        down[k] -= e;
+        const cv::Matx33d numeric =
+          (model.homography(up[0], up[1], up[2], up[3]) -
+          model.homography(down[0], down[1], down[2], down[3])) * (1.0 / (2.0 * e));
+        for (int i = 0; i < 3; ++i) {
+          for (int j = 0; j < 3; ++j) {
+            const double scale = std::max(std::abs(numeric(i, j)), 1e-6);
+            worst_h = std::max(worst_h, std::abs(analytic[k](i, j) - numeric(i, j)) / scale);
+          }
+        }
+      }
+      // The projection, at a bearing that came from somewhere in the image.
+      const cv::Point2f q(
+        static_cast<float>(0.2 * w + 0.6 * w * next()),
+        static_cast<float>(0.5 * h + 0.5 * h * next()));
+      const cv::Vec3d b = model.bearing(q, w, h);
+      double jac[2][3];
+      model.pixel_jacobian(b, w, h, jac);
+      for (int c = 0; c < 3; ++c) {
+        // `pixel` returns a Point2f, so the step has to be large enough that
+        // the difference clears float32 resolution -- at pixel values in the
+        // hundreds that is about 3e-5, and 1e-7 gives nothing but rounding.
+        const double e = 1e-4;
+        cv::Vec3d up = b;
+        cv::Vec3d down = b;
+        up[c] += e;
+        down[c] -= e;
+        const cv::Point2f a = model.pixel(up, w, h);
+        const cv::Point2f d = model.pixel(down, w, h);
+        const double nx = (a.x - d.x) / (2.0 * e);
+        const double ny = (a.y - d.y) / (2.0 * e);
+        const double sx = std::max(std::abs(nx), std::abs(jac[0][c]));
+        const double sy = std::max(std::abs(ny), std::abs(jac[1][c]));
+        const double ex = sx > 1e-6 ? std::abs(jac[0][c] - nx) / sx : 0.0;
+        const double ey = sy > 1e-6 ? std::abs(jac[1][c] - ny) / sy : 0.0;
+        if (std::max(ex, ey) > worst_p) {
+          worst_p = std::max(ex, ey);
+          RCLCPP_INFO(
+            get_logger(),
+            "  worst so far c=%d  analytic (%.4f, %.4f)  numeric (%.4f, %.4f)  b=(%.4f,%.4f,%.4f)",
+            c, jac[0][c], jac[1][c], nx, ny, b[0], b[1], b[2]);
+        }
+      }
+    }
+    RCLCPP_INFO(
+      get_logger(), "jacobian check: homography %.2e  projection %.2e (relative)",
+      worst_h, worst_p);
+    return (worst_h < 1e-4 && worst_p < 1e-4) ? 0 : 1;
+  }
+
   int run_offline(const std::string & input, const std::string & output)
   {
     rosbag2_cpp::Reader reader;
@@ -2610,6 +2814,101 @@ private:
     return true;
   }
 
+  // The fit's Jacobian without warping for it.
+  //
+  // A column is d(patch)/d(parameter). The patch is the previous frame sampled
+  // at v(p) = pixel(H(p)^-1 bearing(u)), so the chain is the image gradient at
+  // v, times how v moves with the bearing, times how the bearing moves with the
+  // matrix. Two of those three the model can state exactly; the third is a
+  // Sobel over the region, taken once.
+  //
+  // Numerically this replaces two warps per freed parameter -- eight of the
+  // 14.5 warps a solve spends, and a warp at the lattice the precision needs is
+  // the expensive thing here.
+  //
+  // `normalise` divides the patch by its own norm, and that norm changes with
+  // the parameters too. The derivative of the normalised patch carries a second
+  // term for it, which is what keeps this equal to the difference of two
+  // normalised patches rather than to the difference of two raw ones.
+  bool analytic_columns(
+    const GroundModel & model, const cv::Mat & previous, const cv::Rect & roi,
+    const double * at, int freedom, cv::Mat * column) const
+  {
+    cv::Mat map_x;
+    cv::Mat map_y;
+    build_warp_roi(
+      model, at[0], at[1], previous.cols, previous.rows, roi, map_x, map_y,
+      at[2], at[3], road_step_fit_stride_);
+    cv::Mat warped;
+    cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    // The gradient wanted is the source image's, read where the warp lands --
+    // not the gradient of the warped image, which is that same gradient already
+    // multiplied by the warp's own spatial Jacobian. Taking the second is what
+    // makes the columns disagree with the difference of two warps by 66 to 78%.
+    if (source_gradient_x_.empty() || source_gradient_key_ != previous.data) {
+      cv::Sobel(previous, source_gradient_x_, CV_32F, 1, 0, 3, 1.0 / 8.0);
+      cv::Sobel(previous, source_gradient_y_, CV_32F, 0, 1, 3, 1.0 / 8.0);
+      source_gradient_key_ = previous.data;
+    }
+    cv::Mat gx;
+    cv::Mat gy;
+    cv::remap(
+      source_gradient_x_, gx, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    cv::remap(
+      source_gradient_y_, gy, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+
+    cv::Scalar mean;
+    cv::Scalar deviation;
+    cv::meanStdDev(warped, mean, deviation);
+    const double norm = deviation[0] * std::sqrt(static_cast<double>(warped.total()));
+    if (!(norm > 1e-9)) {
+      return false;
+    }
+    cv::Mat patch;
+    warped.convertTo(patch, CV_64F, 1.0 / norm, -mean[0] / norm);
+
+    const cv::Matx33d h = model.homography(at[0], at[1], at[2], at[3]);
+    const cv::Matx33d inverse = h.inv();
+    cv::Matx33d derivative[4];
+    model.homography_jacobian(at[0], at[1], at[2], at[3], derivative);
+
+    const int rows = roi.height;
+    const int cols = roi.width;
+    std::vector<cv::Mat> raw(static_cast<size_t>(freedom));
+    for (int k = 0; k < freedom; ++k) {
+      raw[static_cast<size_t>(k)] = cv::Mat::zeros(rows, cols, CV_64F);
+    }
+    for (int y = 0; y < rows; ++y) {
+      const float * rx = gx.ptr<float>(y);
+      const float * ry = gy.ptr<float>(y);
+      for (int x = 0; x < cols; ++x) {
+        const cv::Vec3d b = model.bearing(
+          cv::Point2f(static_cast<float>(roi.x + x), static_cast<float>(roi.y + y)),
+          previous.cols, previous.rows);
+        const cv::Vec3d w = inverse * b;
+        double pj[2][3];
+        model.pixel_jacobian(w, previous.cols, previous.rows, pj);
+        for (int k = 0; k < freedom; ++k) {
+          // d(H^-1)/dp = -H^-1 (dH/dp) H^-1, so d(w)/dp = -H^-1 (dH/dp) w.
+          const cv::Vec3d dw = -(inverse * (derivative[k] * w));
+          const double dx = pj[0][0] * dw[0] + pj[0][1] * dw[1] + pj[0][2] * dw[2];
+          const double dy = pj[1][0] * dw[0] + pj[1][1] * dw[1] + pj[1][2] * dw[2];
+          raw[static_cast<size_t>(k)].at<double>(y, x) = rx[x] * dx + ry[x] * dy;
+        }
+      }
+    }
+    // The normalisation's own derivative. With p = (I - mean)/norm, moving the
+    // patch by dI changes both, and dp = (dI - mean(dI))/norm - p * <p, dI>/norm.
+    for (int k = 0; k < freedom; ++k) {
+      cv::Mat & r = raw[static_cast<size_t>(k)];
+      const double average = cv::mean(r)[0];
+      const double along = patch.dot(r);
+      cv::Mat out = (r - average) / norm - patch * (along / norm);
+      out.convertTo(column[k], CV_32F);
+    }
+    return true;
+  }
+
   // The region warped by one candidate (step, yaw, pitch, roll), normalised.
   bool road_patch(
     const GroundModel & model, const cv::Mat & previous, const cv::Rect & roi,
@@ -2622,6 +2921,7 @@ private:
     // median hop error 0.278 mm to 0.174 -- and fusing the search's warp alone,
     // lattice and all removed, moved nothing, because the ESM overwrites the
     // search's answer with its own.
+    ++patch_warps_;
     cv::Mat map_x;
     cv::Mat map_y;
     build_warp_roi(
@@ -2734,6 +3034,7 @@ private:
     double turn, double seed_step, const std::array<double, 4> & band) const
   {
     RoadSolve out;
+    ++fit_solves_;
     const cv::Rect roi = cv::Rect(
       cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
       cv::Point(cvRound(band[2] * current.cols), cvRound(band[3] * current.rows))) &
@@ -2824,7 +3125,43 @@ private:
         road_step_esm_rebuild_ <= 1 ||
         (iteration % road_step_esm_rebuild_) == 0;
       bool built = true;
-      for (int k = 0; k < freedom && built && rebuild; ++k) {
+      if (rebuild && (road_step_esm_analytic_ || esm_compare_)) {
+        cv::Mat exact[4];
+        built = analytic_columns(model, previous, roi, at, freedom, exact);
+        if (built && esm_compare_) {
+          // Both, once, so the derivation is checked against the thing it
+          // replaces on the quantity that is actually used.
+          for (int k = 0; k < freedom; ++k) {
+            double up[4] = {at[0], at[1], at[2], at[3]};
+            double down[4] = {at[0], at[1], at[2], at[3]};
+            up[k] += probe[k];
+            down[k] -= probe[k];
+            cv::Mat ahead;
+            cv::Mat behind;
+            if (!road_patch(model, previous, roi, up, ahead) ||
+              !road_patch(model, previous, roi, down, behind))
+            {
+              continue;
+            }
+            const cv::Mat numeric = (ahead - behind) / (2.0 * probe[k]);
+            const double na = cv::norm(numeric);
+            const double diff = cv::norm(numeric, exact[k]);
+            if (na > 1e-12) {
+              esm_compare_worst_[k] = std::max(esm_compare_worst_[k], diff / na);
+              esm_compare_sum_[k] += diff / na;
+              ++esm_compare_count_[k];
+            }
+          }
+        }
+        if (built && road_step_esm_analytic_) {
+          for (int k = 0; k < freedom; ++k) {
+            column[k] = exact[k];
+          }
+        } else if (built) {
+          built = false;  // fall through to the numeric loop
+        }
+      }
+      for (int k = 0; k < freedom && built && rebuild && !road_step_esm_analytic_; ++k) {
         double up[4] = {at[0], at[1], at[2], at[3]};
         double down[4] = {at[0], at[1], at[2], at[3]};
         up[k] += probe[k];
@@ -2842,6 +3179,7 @@ private:
       }
       if (rebuild) {
         have_jacobian = true;
+        ++fit_jacobians_;
       }
       if (!have_jacobian) {
         break;
@@ -3608,6 +3946,14 @@ private:
   bool road_step_fused_ = false;
   int road_step_fit_stride_ = 0;
   int road_step_esm_rebuild_ = 1;
+  bool road_step_esm_analytic_ = false;
+  mutable cv::Mat source_gradient_x_;
+  mutable cv::Mat source_gradient_y_;
+  mutable const void * source_gradient_key_ = nullptr;
+  bool esm_compare_ = false;
+  mutable double esm_compare_worst_[4] = {0.0, 0.0, 0.0, 0.0};
+  mutable double esm_compare_sum_[4] = {0.0, 0.0, 0.0, 0.0};
+  mutable long esm_compare_count_[4] = {0, 0, 0, 0};
   double step_observable_margin_ = 1.0;
   int parallax_grid_ = 0;
   double parallax_flow_scale_ = 0.5;
@@ -3643,6 +3989,9 @@ private:
   // The step the reference camera last measured, shared with the others. The
   // rig is rigid, so one number serves every camera on it.
   mutable std::mutex step_lock_;
+  mutable long patch_warps_ = 0;
+  mutable long fit_solves_ = 0;
+  mutable long fit_jacobians_ = 0;
   long sign_flips_ = 0;
   long sign_frames_ = 0;
   long sign_negative_ = 0;
@@ -3726,7 +4075,18 @@ int main(int argc, char ** argv)
       offline_out = argv[i + 2];
     }
   }
+  bool check = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--check-jacobian") {
+      check = true;
+    }
+  }
   auto node = std::make_shared<FeatureTracker>();
+  if (check) {
+    const int code = node->check_jacobian();
+    rclcpp::shutdown();
+    return code;
+  }
   if (!offline_in.empty()) {
     const int code = node->run_offline(offline_in, offline_out);
     rclcpp::shutdown();
