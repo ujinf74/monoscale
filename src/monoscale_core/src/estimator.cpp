@@ -1387,8 +1387,25 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     // Sign: `error_` is the correction the filter adds to the pose, so an
     // instrument that over-reads the turn by b dt needs -b dt applied, and the
     // ESM minus the instrument is that difference already.
+    const double innovation = wrap_pi(camera.esm_yaw_since_solve - *yaw_delta);
+    // The sigma this observation deserves is the spread of this residual, which
+    // is the ESM's own error plus the instrument's over the same interval. It
+    // has to be measured rather than assumed, so it can be written out.
+    if (const char * path = std::getenv("MONOSCALE_HEADING_INNOVATION")) {
+      if (heading_innovation_file_ == nullptr) {
+        heading_innovation_file_ = std::fopen(path, "w");
+        if (heading_innovation_file_ != nullptr) {
+          std::fprintf(heading_innovation_file_, "stamp,innovation,esm_yaw,instrument\n");
+        }
+      }
+      if (heading_innovation_file_ != nullptr) {
+        std::fprintf(
+          heading_innovation_file_, "%.6f,%.9f,%.9f,%.9f\n", camera.band_stamp, innovation,
+          camera.esm_yaw_since_solve, *yaw_delta);
+      }
+    }
     heading_observations_.emplace_back(
-      wrap_pi(camera.esm_yaw_since_solve - *yaw_delta),
+      innovation,
       settings_.esm_yaw_sigma_rad +
       settings_.esm_yaw_sigma_rate * std::abs(camera.esm_yaw_since_solve));
   }

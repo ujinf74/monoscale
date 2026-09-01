@@ -14,6 +14,7 @@
 #ifndef MONOSCALE_CORE__ESTIMATOR_HPP_
 #define MONOSCALE_CORE__ESTIMATOR_HPP_
 
+#include <cstdio>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -1267,6 +1268,7 @@ private:
 
   std::vector<Update> pending_updates_;
   Diagnostics diagnostics_;
+  std::FILE * heading_innovation_file_ = nullptr;
 };
 
 }  // namespace monoscale

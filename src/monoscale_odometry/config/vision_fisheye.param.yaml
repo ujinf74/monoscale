@@ -34,6 +34,27 @@
     # its `/**:` wildcard. Without it the tracker publishes no photometric block
     # and the three settings under it have nothing to consume.
     road_from_step: true
+    # The four-parameter fit over the same region, which is what supplies
+    # `esm_valid` and with it the only heading observation that does not inherit
+    # the estimator's own frame. Absent from this file until 2026-09-02, so the
+    # heading block below was tuned in a configuration the deployment never ran:
+    # the anchor-map alignment was the sole heading source and it cannot see a
+    # gyro bias, because the map is built from the poses that carry it and turns
+    # with them. Over eleven drives that cost mean ATE 4.5975 against 0.4504
+    # here, worst 14.6381 against 1.2032, with str_v2 at yaw_rmse 17.88 deg and
+    # scale 0.999 -- the whole error was heading.
+    #
+    # `road_step_fit_stride` is 3 rather than 1 on cost alone. The fit at every
+    # frame is 75.29 ms per frame-pair against 17.17 without it, which is 2.3x
+    # over a 30 Hz budget; 1/2/3/5/8 give mean ATE 0.4254/0.4181/0.4504/0.4679/
+    # 0.4587 for 75.29/32.55/23.11/18.76/16.98 ms. The accuracy is flat across
+    # a 4.4x cost range because the quantity being observed is a constant per
+    # recording, so 3 is chosen for 10 ms of headroom while keeping four times
+    # the observation rate a walking bias would need.
+    road_step_esm: true
+    road_step_fit_stride: 3
+    road_step_esm_rebuild: 99
+    road_step_samples: 5
     # The step goes in as a prior and a gate on frames the map did not answer,
     # not as an overwrite. Overwriting the hop was measured and loses: the map's
     # hop is a pose *correction*, not a displacement, and rescaling it to a
@@ -158,15 +179,32 @@
     # opposite sign. Averaging the two taught the filter the bias backwards on
     # exactly those drives.
     esm_yaw_camera: front
-    # Sigma is `esm_yaw_sigma_rad + esm_yaw_sigma_rate * |turn|`. The constant
-    # part is on a plateau -- 2e-6 and 2e-5 give 0.3632 and 0.3633 -- because
-    # sigma sets how fast a biased observation converges and not what it
-    # converges to. The rate part is the load-bearing one: the ESM's yaw error
-    # is a scale on the rotation, 0.93/1.66/1.97% of the angle turned on
-    # curve_s05/s10/s20, so at 1.0 the observation is trusted only while the
-    # vehicle is going straight, which is where the bias is observable anyway.
-    # It took curve_s20 from 2.5560 to 0.0791.
-    esm_yaw_sigma_rad: 0.000002
+    # Sigma is `esm_yaw_sigma_rad + esm_yaw_sigma_rate * |turn|`. The rate part
+    # is the load-bearing one: the ESM's yaw error is a scale on the rotation,
+    # 0.93/1.66/1.97% of the angle turned on curve_s05/s10/s20, so at 1.0 the
+    # observation is trusted only while the vehicle is going straight, which is
+    # where the bias is observable anyway. It took curve_s20 from 2.5560 to
+    # 0.0791, and measuring the ESM's error against truth puts the coefficient
+    # at 0.836 -- inside the scatter of 1.0, so it stands.
+    #
+    # The constant part is measured rather than swept. `MONOSCALE_HEADING_
+    # INNOVATION` writes each observation out; the ESM's error against truth on
+    # the six straight drives has robust sd 1.2-4.1e-5, and its own lag-1
+    # autocorrelation is 0.15-0.61, which inflates the sigma the filter needs by
+    # sqrt((1+rho)/(1-rho)) = 1.16-2.03. That puts it at 1.7e-5 to 6.5e-5.
+    # Three earlier derivations measured the wrong quantity and all lost: the
+    # innovation's own scatter (2.94e-5, rate 0.0073 -- the per-drive median
+    # absorbs the turn-proportional systematic and curve_s20 went 0.35 -> 2.05),
+    # the full regression of ESM error on turn (3.17e-4, mean 0.8584), and the
+    # straight-only fit with no correlation term (1.8e-5, mean 0.5534).
+    #
+    # A sweep puts the optimum at 1e-4, 17% better on the mean than this. The
+    # measured value is deployed instead: the fifty-fold gap between 2e-6 and
+    # the instrument's real noise is the result, and the last factor of two is
+    # fitting the score. The plateau the old comment recorded -- 2e-6 and 2e-5
+    # both giving 0.3632 -- was measured before `road_step_esm` reached this
+    # file, so the observation it describes was never running in deployment.
+    esm_yaw_sigma_rad: 0.00005
     esm_yaw_sigma_rate: 1.0
     # How much of the learned bias to take out of the gyro itself. Zero: the
     # value is in the filter correcting the pose, not in correcting the source.
