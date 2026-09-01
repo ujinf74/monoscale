@@ -218,14 +218,43 @@ struct GroundModel
   // pivot leaves whatever translation the tilt really carries to be absorbed by
   // `step`, which is the honest place for something the image cannot separate.
   cv::Matx33d homography(
-    double step, double turn, double pitch = 0.0, double roll = 0.0) const
+    double step, double turn, double pitch = 0.0, double roll = 0.0,
+    bool arc_hop = false) const
   {
     const cv::Matx33d r_cb = rotation_base_from_camera.t();
     const double c = std::cos(turn);
     const double s = std::sin(turn);
     const cv::Matx33d r_b(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0);
     const cv::Matx33d rot = r_cb * r_b.t() * rotation_base_from_camera;
-    const cv::Vec3d hop(step, 0.0, 0.0);
+    // The hop, along the arc the body actually follows rather than along the
+    // chord.
+    //
+    // A vehicle turning by `turn` while advancing `step` does not translate
+    // straight ahead and then rotate: its displacement in the starting body
+    // frame is `(step/turn) (sin turn, 1 - cos turn)`, i.e. `step (1 - turn^2/6,
+    // turn/2)` to second order. The lateral half-step was missing, and this is
+    // the one geometry where that matters: the patch sits about four metres out
+    // where a yaw and a sideways slide look the same, so the omitted `step
+    // turn / 2` is read back as yaw. Predicted 0.0017 deg on curve_s20, where
+    // the measured per-hop yaw error is 0.00046 deg and **84% of its variance
+    // regresses on speed** rather than on the turn -- which is the signature of
+    // a term in `step * turn`, since the yaw rate there is nearly constant.
+    //
+    // At `turn` = 0 both factors reduce to (1, 0) exactly, so a straight hop is
+    // the hop this always used and `road_step_arc` off is bit for bit the old
+    // path.
+    double along = step;
+    double across = 0.0;
+    if (arc_hop && std::abs(turn) > 1e-9) {
+      // Haversine rather than `(1 - cos turn) / turn`: near zero that
+      // difference is two nearly equal doubles and loses about twelve digits,
+      // and this fit is measurably sensitive to perturbations at 1e-13.
+      // `2 sin^2(turn/2) / turn` is the same number with no cancellation.
+      const double half = std::sin(0.5 * turn);
+      along = step * s / turn;
+      across = step * 2.0 * half * half / turn;
+    }
+    const cv::Vec3d hop(along, across, 0.0);
     const cv::Vec3d t =
       r_cb * (r_b.t() * (translation_base_from_camera - hop) -
       translation_base_from_camera);
@@ -698,6 +727,8 @@ public:
     // Build the fit's Jacobian from the model's derivatives instead of from
     // warps. Off is what every recorded number came from.
     road_step_esm_analytic_ = declare_parameter<bool>("road_step_esm_analytic", false);
+    band_samples_ = declare_parameter<int>("road_step_band_samples", 9);
+    arc_hop_ = declare_parameter<bool>("road_step_arc", false);
     esm_compare_ = declare_parameter<bool>("road_step_esm_compare", false);
     // How far the winning step has to clear a step of nothing before the frame
     // is believed. Zero support is what the tracks that died contribute, so
@@ -1060,8 +1091,9 @@ public:
         up[k] += e;
         down[k] -= e;
         const cv::Matx33d numeric =
-          (model.homography(up[0], up[1], up[2], up[3]) -
-          model.homography(down[0], down[1], down[2], down[3])) * (1.0 / (2.0 * e));
+          (model.homography(up[0], up[1], up[2], up[3], arc_hop_) -
+          model.homography(down[0], down[1], down[2], down[3], arc_hop_)) *
+          (1.0 / (2.0 * e));
         for (int i = 0; i < 3; ++i) {
           for (int j = 0; j < 3; ++j) {
             const double scale = std::max(std::abs(numeric(i, j)), 1e-6);
@@ -1285,7 +1317,7 @@ private:
       const auto found = models_.find(name);
       if (turn_known && have_step && found != models_.end() && found->second.ready) {
         const double hop = step * reach;
-        const cv::Matx33d h = found->second.homography(hop, turn);
+        const cv::Matx33d h = found->second.homography(hop, turn, 0.0, 0.0, arc_hop_);
         state.predicted.resize(state.points.size());
         for (size_t i = 0; i < state.points.size(); ++i) {
           const cv::Vec3d b =
@@ -1396,6 +1428,18 @@ private:
             const double miss = std::abs(answer - state.road_bracket) / std::abs(answer);
             state.road_predict_error = state.road_predict_error >= 0.0
               ? state.road_predict_error + 0.3 * (miss - state.road_predict_error) : miss;
+          }
+          // Same three counts `measure_step` keeps, on the path that actually
+          // runs when the step comes from the road. One camera only, so the
+          // numbers mean the same thing in both places.
+          if (name == step_reference_ && std::isfinite(answer)) {
+            if (std::isfinite(state.road_step) && (state.road_step < 0.0) != (answer < 0.0)) {
+              ++sign_flips_;
+            }
+            ++sign_frames_;
+            if (answer < 0.0) {
+              ++sign_negative_;
+            }
           }
           state.road_step = answer;
           state.road_bracket = std::isfinite(state.road_bracket)
@@ -1533,7 +1577,7 @@ private:
         std::isfinite(state.road_step) && model != models_.end() && model->second.ready;
       if (physical) {
         const cv::Matx33d plane =
-          model->second.homography(state.road_step * reach, turn);
+          model->second.homography(state.road_step * reach, turn, 0.0, 0.0, arc_hop_);
         align_road(
           state, road_previous, gray, previous_points, current_points, identities,
           &model->second, &plane);
@@ -2414,7 +2458,7 @@ private:
     const cv::Rect & roi, cv::Mat & map_x, cv::Mat & map_y,
     double pitch = 0.0, double roll = 0.0, int stride_override = 0) const
   {
-    const cv::Matx33d inverse = model.homography(step, turn, pitch, roll).inv();
+    const cv::Matx33d inverse = model.homography(step, turn, pitch, roll, arc_hop_).inv();
     const int stride = std::max(
       stride_override > 0 ? stride_override : road_step_stride_, 1);
     const int cols = std::max(roi.width / stride, 2);
@@ -2495,7 +2539,7 @@ private:
     cv::Mat map_x;
     cv::Mat map_y;
     if (fused) {
-      inverse = model.homography(hop, turn).inv();
+      inverse = model.homography(hop, turn, 0.0, 0.0, arc_hop_).inv();
     } else {
       build_warp_roi(model, hop, turn, previous.cols, previous.rows, roi, map_x, map_y);
     }
@@ -2903,7 +2947,7 @@ private:
     cv::Mat patch;
     warped.convertTo(patch, CV_64F, 1.0 / norm, -mean[0] / norm);
 
-    const cv::Matx33d h = model.homography(at[0], at[1], at[2], at[3]);
+    const cv::Matx33d h = model.homography(at[0], at[1], at[2], at[3], arc_hop_);
     const cv::Matx33d inverse = h.inv();
     cv::Matx33d derivative[4];
     model.homography_jacobian(at[0], at[1], at[2], at[3], derivative);
@@ -3476,7 +3520,22 @@ private:
         // of the peak puts every sample on the apex: the fitted curvature fell
         // from -0.0066 to -0.0004 between those two speeds, and with it the
         // band comparison that the calibration rests on.
-        const int samples = 9;
+        // How many points across the peak before the parabola is fitted.
+        //
+        // Nine is what every recorded band number came from. It is not enough
+        // at low speed and the failure is a bias, not noise: at 1.8 m/s the six
+        // strips disagree by forty standard errors of their own medians while
+        // running *non-monotonically* in range, where at 7.5 m/s the same
+        // measurement is monotone at 19-50 sigma. A parabola through nine
+        // points inherits the peak's asymmetry, and the asymmetry follows each
+        // strip's texture.
+        //
+        // More points cannot fix the underlying ratio -- the quantity is 0.05
+        // to 0.16 per cent of the step, which is 0.13-0.4 mm at 7.5 m/s and
+        // 0.03-0.1 at 1.8, against a peak about 23 mm wide either way -- but it
+        // does reduce the interpolation's own bias, which is what the low-speed
+        // profile is made of.
+        const int samples = std::max(band_samples_, 3);
         const double rbar = band_range(model, use, current.cols, current.rows);
         const double lens = std::abs(model.translation_base_from_camera[2]);
         const double focal = model.fx * current.cols /
@@ -3535,6 +3594,47 @@ private:
     // geometry instead of in a special case.
     out.near_forward = band_offset(model, near_band, current.cols, current.rows, 0);
     out.far_forward = band_offset(model, far_band, current.cols, current.rows, 0);
+
+    // Diagnostic only, off unless the environment names a file. The two-band
+    // split gives one number per camera and cannot separate what that number is
+    // made of: a body pitch is common to both cameras and enters with the sign
+    // of the band's longitudinal offset, which is +0.39 m on the front and
+    // -0.55 on the rear -- so a pitch must show as *opposite* signs. Measured,
+    // both cameras read the far half long, so it is not a pitch, and one scale
+    // error does not fit either (the two cameras want 0.00051 and 0.00591).
+    // What is left is a function of the field angle, and two points per camera
+    // cannot draw a curve. This sweeps the region in strips so it can be drawn.
+    if (const char * path = std::getenv("MONOSCALE_BAND_PROFILE")) {
+      static std::FILE * dump = nullptr;
+      static bool opened = false;
+      static int frame = 0;
+      if (!opened) {
+        opened = true;
+        dump = std::fopen(path, "w");
+        if (dump != nullptr) {
+          std::fprintf(dump, "frame,strip,range,forward,step,whole\n");
+        }
+      }
+      if (dump != nullptr) {
+        ++frame;
+        const int strips = 6;
+        for (int i = 0; i < strips; ++i) {
+          const double y0 = band[1] + (band[3] - band[1]) * i / strips;
+          const double y1 = band[1] + (band[3] - band[1]) * (i + 1) / strips;
+          const std::array<double, 4> use{band[0], y0, band[2], y1};
+          const double value = refine(use);
+          if (!std::isfinite(value)) {
+            continue;
+          }
+          std::fprintf(
+            dump, "%d,%d,%.5f,%.5f,%.8f,%.8f\n", frame, i,
+            band_range(model, use, current.cols, current.rows),
+            band_offset(model, use, current.cols, current.rows, 0),
+            value, centre);
+        }
+        std::fflush(dump);
+      }
+    }
   }
 
   // One scalar, voted on by every correspondence this camera kept.
@@ -3552,7 +3652,8 @@ private:
     }
     const double tolerance = std::cos(step_tolerance_deg_ * M_PI / 180.0);
     const auto support = [&](double step) {
-        const cv::Matx33d h = model.homography(step * std::max(reach, 1e-3), turn);
+        const cv::Matx33d h =
+          model.homography(step * std::max(reach, 1e-3), turn, 0.0, 0.0, arc_hop_);
         int agree = 0;
         for (size_t i = 0; i < count; ++i) {
           cv::Vec3d p = h * from[i];
@@ -3685,7 +3786,7 @@ private:
     const GroundModel & model, double step, double turn, int width, int height,
     cv::Mat & map_x, cv::Mat & map_y) const
   {
-    const cv::Matx33d inverse = model.homography(step, turn).inv();
+    const cv::Matx33d inverse = model.homography(step, turn, 0.0, 0.0, arc_hop_).inv();
     const int stride = 8;
     const int cols = std::max(width / stride, 2);
     const int rows = std::max(height / stride, 2);
@@ -3984,6 +4085,9 @@ private:
   int road_step_fit_stride_ = 0;
   int road_step_esm_rebuild_ = 1;
   bool road_step_esm_analytic_ = false;
+  int band_samples_ = 9;
+  // See `GroundModel::homography`: follow the arc rather than the chord.
+  bool arc_hop_ = false;
   bool esm_compare_ = false;
   mutable double esm_compare_worst_[4] = {0.0, 0.0, 0.0, 0.0};
   mutable double esm_compare_sum_[4] = {0.0, 0.0, 0.0, 0.0};
