@@ -844,7 +844,31 @@ std::optional<AnchorAlignment> align_to_anchors(
   const Weights & residual_scale = Weights(),
   // Solve the bearing residuals for a rotation about base_link with no sideways
   // slide. See AnchorSettings::bearing_nonholonomic for why.
-  bool bearing_nonholonomic = false);
+  bool bearing_nonholonomic = false,
+  // Width, in radians of bearing, of the cell inside which two anchors are the
+  // same measurement. 0 is off.
+  //
+  // Anchors that fall closer together than the instrument resolves are not
+  // independent: they enter the weighted mean N times and outvote a genuinely
+  // separate direction. Measured on the fast straight, 4000 anchors occupy 119
+  // pixel-wide bearing cells with 525 in the busiest, and half of them sit in
+  // five cells -- so the map is, in bearing, five to thirteen measurements
+  // wearing four thousand's worth of weight.
+  //
+  // That they are redundant rather than merely close was measured before this
+  // was built: 68-81% of the alignment residual's variance is between cells,
+  // the frame-wide mean residual is 17% of its RMS (so not common mode), and a
+  // rigid translation-plus-rotation in bearing explains only 3-4% of it, with
+  // the within-cell correlation surviving its removal. So the cells carry
+  // independent information and the anchors inside one do not.
+  //
+  // Set it to the bearing noise, not to a tuned number: sigma_b is half a pixel
+  // at the processing width, 1.9e-3 rad here.
+  double bearing_cell_rad = 0.0,
+  // How correlated two anchors in one cell actually are. 1 treats them as one
+  // measurement; 0 disables the correction. Measured within-cell correlation is
+  // 0.807 / 0.738 / 0.680 on straight_s8 / straight120_v2 / curve_s05.
+  double bearing_cell_rho = 1.0);
 
 struct CameraTranslation
 {

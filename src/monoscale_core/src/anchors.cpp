@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
+#include <unordered_map>
 
 namespace monoscale
 {
@@ -652,21 +655,36 @@ void GroundAnchorMap::update(
   if (live_ >= settings_.max_anchors) {
     saturated_ = true;
   }
-  // Clearest first, if asked and if the tracker gave us the means.
-  if (settings_.admit_by_clarity && clarity.size() == count && fresh.size() > 1) {
+  // Which of the queued candidates get the few free slots.
+  //
+  // These were two consecutive `stable_sort`s, which cannot combine: the second
+  // reorders the whole vector, so with both switches on the first only ever
+  // broke ties that continuous values never produce. Clarity was unreachable
+  // whenever information was asked for.
+  //
+  // A candidate's worth is the information it will contribute, and that is a
+  // product, not a precedence: `longitudinal_information_at` is the geometry's
+  // share and the corner response is the inverse of the position variance the
+  // sighting itself carries, since the structure tensor's smallest eigenvalue
+  // is what an LK match's scatter goes as. Multiplying them ranks by the
+  // product; asking for one alone still ranks by that one.
+  const bool by_clarity = settings_.admit_by_clarity && clarity.size() == count;
+  const bool by_information = settings_.admit_by_information;
+  if ((by_clarity || by_information) && fresh.size() > 1) {
+    const auto score = [&](Eigen::Index i) {
+        double value = 1.0;
+        if (by_information) {
+          value *= std::max(
+            longitudinal_information_at(world_points(i, 0), world_points(i, 1)), 1e-18);
+        }
+        if (by_clarity) {
+          value *= std::max(clarity(i), 0.0);
+        }
+        return value;
+      };
     std::stable_sort(
       fresh.begin(), fresh.end(),
-      [&](Eigen::Index a, Eigen::Index b) {return clarity(a) > clarity(b);});
-  }
-  // Best first, if asked. Sorting before the identity partition so that the
-  // partition still wins where both are on.
-  if (settings_.admit_by_information && fresh.size() > 1) {
-    std::stable_sort(
-      fresh.begin(), fresh.end(),
-      [&](Eigen::Index a, Eigen::Index b) {
-        return longitudinal_information_at(world_points(a, 0), world_points(a, 1)) >
-        longitudinal_information_at(world_points(b, 0), world_points(b, 1));
-      });
+      [&](Eigen::Index a, Eigen::Index b) {return score(a) > score(b);});
   }
   // Priority candidates first, stably, so the rest keep the order the frame
   // gave them. See `priority_identity_floor`.
@@ -940,14 +958,79 @@ std::optional<AnchorAlignment> align_to_anchors(
   double softness,
   const Eigen::Vector2d * translation_prior, int restarts, double ambiguity,
   const Eigen::Vector2d * inertial_hop, double inertial_gate,
-  const Weights & residual_scale, bool bearing_nonholonomic)
+  const Weights & residual_scale, bool bearing_nonholonomic, double bearing_cell_rad,
+  double bearing_cell_rho)
 {
   const Eigen::Index count = body_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || world_points.rows() != count) {
     return std::nullopt;
   }
   const bool weighted = weights_in.size() == count;
-  const auto weight_of = [&](Eigen::Index i) {return weighted ? weights_in(i) : 1.0;};
+  // How many candidates share each bearing cell, so a cell contributes once
+  // rather than once per anchor. Built here because it is a property of this
+  // frame's candidate set, not of the map.
+  std::vector<double> share;
+  if (bearing_cell_rad > 0.0 && body_points.rows() > 0) {
+    // The cell is two-dimensional, and the second dimension is what makes it
+    // right at every range. A bearing error of sigma_b spreads a ground point
+    // by sigma_b * R across the line of sight and by sigma_b * (R^2+h^2)/h
+    // along it, so two anchors are the same measurement only when they share
+    // both. At 148 m the radial cell is 47 m, so bearing alone decides; at 24 m
+    // it is 1.2 m, and anchors further apart than that are genuinely distinct
+    // even when they line up. Collapsing them by bearing alone throws away real
+    // information -- measured, bearing-only takes the fast straight -15.8% and
+    // the slow drives +4 to +36%.
+    std::unordered_map<int64_t, int> occupancy;
+    std::vector<int64_t> cell(static_cast<size_t>(body_points.rows()));
+    const double h = std::max(lens_height, 1e-6);
+    for (Eigen::Index i = 0; i < body_points.rows(); ++i) {
+      const double bx = body_points(i, 0) - origin.x();
+      const double by = body_points(i, 1) - origin.y();
+      const double range = std::hypot(bx, by);
+      const double radial_cell =
+        std::max((range * range + h * h) / h * bearing_cell_rad, 1e-6);
+      const int64_t angular =
+        static_cast<int64_t>(std::floor(std::atan2(by, bx) / bearing_cell_rad));
+      const int64_t radial = static_cast<int64_t>(std::floor(range / radial_cell));
+      cell[static_cast<size_t>(i)] = angular * 1000003LL + radial;
+      ++occupancy[cell[static_cast<size_t>(i)]];
+    }
+    // The design effect, not 1/N.
+    //
+    // 1/N assumes the anchors in a cell are the *same* measurement, i.e. that
+    // their residuals correlate perfectly. Measured, the within-cell
+    // correlation is 0.807 on the fast straight, 0.738 and 0.680 on a slower
+    // straight and a curve -- and the ordering is the geometry: a yaw rate
+    // sweeps anchors across bearings, so what piles into one cell on a straight
+    // is spread and separately observed on a curve, and the anchors there carry
+    // their own histories rather than one shared sighting. So the correction
+    // has to carry the correlation, and the standard form for correlated
+    // observations is `1 + rho (N - 1)`: rho = 1 recovers 1/N, rho = 0 leaves
+    // the weight alone.
+    share.resize(static_cast<size_t>(body_points.rows()));
+    for (Eigen::Index i = 0; i < body_points.rows(); ++i) {
+      const double n = std::max(occupancy[cell[static_cast<size_t>(i)]], 1);
+      share[static_cast<size_t>(i)] = 1.0 / (1.0 + bearing_cell_rho * (n - 1.0));
+    }
+  }
+  // The map's own weight, uncorrected.
+  const auto raw_weight_of = [&](Eigen::Index i) {return weighted ? weights_in(i) : 1.0;};
+  // The same, with anchors that share a resolution cell counted once between
+  // them. Used for the translation and withheld from the bearing fit below.
+  //
+  // The two fits fail differently. The translation is a weighted mean, so N
+  // copies of one measurement outvote a separate direction and the correction
+  // is simply right. The bearing fit separates pitch and roll from translation
+  // on bases the geometry makes 98-99% collinear, and what limits it is that
+  // conditioning rather than its sample count -- the astern population is the
+  // spread that holds the angles apart ([[anchors-are-attitude]] measures the
+  // attitude role at 2.4x against the position role's 9%). Applying the
+  // correction to both took the fast straight -10.7% and the two curves +26%,
+  // which is that basis being thinned.
+  const auto weight_of = [&](Eigen::Index i) {
+      const double base = raw_weight_of(i);
+      return share.empty() ? base : base * share[static_cast<size_t>(i)];
+    };
   // How wide this point's residual is allowed to be, relative to the rest.
   //
   // The gate and the Gaussian below are in metres and the measurement is an
@@ -1158,6 +1241,42 @@ std::optional<AnchorAlignment> align_to_anchors(
       }
     }
 
+    // Diagnostic only, and off unless the environment names a file: one row per
+    // inlier anchor with its bearing, its range and how far its own vote sits
+    // from the weighted answer. The question it exists to settle is whether the
+    // alignment's residual is shared across the whole frame -- in which case no
+    // reweighting of anchors can touch it -- or varies between bearings, in
+    // which case anchors that share a resolution cell are one measurement
+    // counted many times. Costs nothing when unset.
+    if (const char * path = std::getenv("MONOSCALE_ALIGN_RESIDUALS")) {
+      static std::FILE * dump = nullptr;
+      static bool opened = false;
+      if (!opened) {
+        opened = true;
+        dump = std::fopen(path, "w");
+        if (dump != nullptr) {
+          std::fprintf(dump, "solve,bearing,range,rx,ry,weight\n");
+        }
+      }
+      if (dump != nullptr) {
+        static int solve = 0;
+        ++solve;
+        for (Eigen::Index i = 0; i < count; ++i) {
+          const double r = robust[static_cast<size_t>(i)];
+          if (r <= 0.0) {
+            continue;
+          }
+          const double bx = body_points(i, 0) - origin.x();
+          const double by = body_points(i, 1) - origin.y();
+          std::fprintf(
+            dump, "%d,%.6f,%.4f,%.6f,%.6f,%.6g\n", solve,
+            std::atan2(by, bx), std::hypot(bx, by),
+            votes(i, 0) - centre.x(), votes(i, 1) - centre.y(), weight_of(i) * r);
+        }
+        std::fflush(dump);
+      }
+    }
+
     if (!refine_yaw || iteration == 3) {
       break;
     }
@@ -1272,7 +1391,7 @@ std::optional<AnchorAlignment> align_to_anchors(
     }
     const double body_rx = c * rx + s * ry;
     const double body_ry = -s * rx + c * ry;
-    const double w = weight_of(i);
+    const double w = raw_weight_of(i);
     ranges.push_back(range);
     radial.push_back((bx * body_rx + by * body_ry) / range);
     radial_weight.push_back(w);

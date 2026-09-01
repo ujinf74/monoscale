@@ -615,6 +615,9 @@ struct EstimatorSettings
   double anchor_link_radius_m = 0.0;
   bool anchor_link_cross_source_only = false;
   bool anchor_bearing_nonholonomic = false;
+  // See `align_to_anchors`. 0 is off; the physical value is the bearing noise.
+  double anchor_bearing_cell_rad = 0.0;
+  double anchor_bearing_cell_rho = 1.0;
   double anchor_density_replace_margin = 0.0;
   bool anchor_link_adopter_writes = false;
   int anchor_link_rebind_grace = 1;

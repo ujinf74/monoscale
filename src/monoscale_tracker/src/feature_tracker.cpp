@@ -491,6 +491,24 @@ struct TrackState
   // How many features this camera is currently trying to hold. Owned by the
   // one thread that runs this camera's callback, so it needs no guard.
   int target = 0;
+  // The fraction of the frame, measured from the bottom edge, where this
+  // camera must not detect.
+  //
+  // Ground approaches a forward camera and recedes from a rearward one, so one
+  // edge of the image is where new ground enters and the other is where it
+  // leaves. A feature born at the leaving edge has no future: measured on
+  // straight_s8 at 7.5 m/s, of the 65,044 front-camera features born in the
+  // bottom fifth, **97.9% die after exactly one frame** and 0.1% reach five,
+  // against 30.2% and 49.0% for the top fifth. The detector spreads births
+  // evenly over the image and cannot see the difference, so a fifth of every
+  // frame's 532 new identities are minted onto ground that is about to leave --
+  // and `found_after_observations` promotes each of them to an anchor.
+  //
+  // Per camera because the leaving edge is not the same edge for both, and
+  // `detection_skip_top_fraction` is the other half of the same instrument.
+  // The rear camera does not need it: its births already sit at its entering
+  // edge and its lifetime is flat across the frame.
+  double skip_bottom = 0.0;
 
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
   // The same two things the CPU path keeps, on the device. The pyramid is held
@@ -851,6 +869,7 @@ public:
     // With both cameras tracking, the two cost the same. 0 keeps the whole
     // image, which is what has been measured for accuracy.
     skip_top_ = declare_parameter<double>("detection_skip_top_fraction", 0.0);
+    skip_bottom_ = declare_parameter<double>("detection_skip_bottom_fraction", 0.0);
     dump_dir_ = declare_parameter<std::string>("debug_dump_directory", "");
     // Best effort with a shallow queue is right against a live camera, where
     // a late frame is worth less than the one behind it. It is wrong when the
@@ -940,6 +959,8 @@ public:
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
       states_[name].target = max_features_;
+      states_[name].skip_bottom = declare_parameter<double>(
+        name + ".detection_skip_bottom_fraction", skip_bottom_);
       if (predict_from_motion_ || road_from_step_) {
         models_[name] = load_ground_model(name);
         road_bands_[name] = load_road_band(name);
@@ -2267,6 +2288,19 @@ private:
         static_cast<int>(skip_top_ * gray.rows), gray.rows - 1);
       if (cut > 0) {
         const cv::Rect band(0, 0, gray.cols, cut);
+        for (const auto & cell : refill) {
+          const cv::Rect hidden = cell & band;
+          if (hidden.area() > 0) {
+            mask(hidden).setTo(0);
+          }
+        }
+      }
+    }
+    if (state.skip_bottom > 0.0) {
+      const int cut = std::min(
+        static_cast<int>(state.skip_bottom * gray.rows), gray.rows - 1);
+      if (cut > 0) {
+        const cv::Rect band(0, gray.rows - cut, gray.cols, cut);
         for (const auto & cell : refill) {
           const cv::Rect hidden = cell & band;
           if (hidden.area() > 0) {
@@ -3941,6 +3975,7 @@ private:
   int max_features_;
   double quality_level_ = 0.01;
   bool publish_clarity_ = false;
+  double skip_bottom_ = 0.0;
   int road_step_coarse_divisor_ = 1;
   double road_step_bracket_k_ = 0.0;
   int road_step_esm_dof_ = 4;

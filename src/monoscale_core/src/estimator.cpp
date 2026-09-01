@@ -241,6 +241,15 @@ struct Estimator::Solved
   Mask ground_valid;
   Mask motion_inliers;
   Identities track_ids;
+  // Which entry of the *current frame's* arrays each pair came from.
+  //
+  // `track_ids` names the feature; this names where it sits in
+  // `camera.track_pixels` / `track_clarity`, which are indexed by the frame and
+  // not by the pair. Without it anything the tracker publishes per feature can
+  // only be read by re-matching identities -- and `admit_by_clarity` was
+  // indexing `track_clarity` with a pair index, guarded by a size comparison
+  // against a different population, so it silently never ran.
+  std::vector<Eigen::Index> track_slot;
   std::optional<PlanarMotion> motion;
   bool anchored_from_map = false;
   // The banded, paired ground points this camera contributed, in base_link at
@@ -1287,6 +1296,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
 
   Solved solved;
   solved.track_ids = track_ids;
+  solved.track_slot = matched_now;
   solved.current_pixels = current_pixels;
 
   const auto tilt = camera_tilt(camera);
@@ -1776,7 +1786,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         settings_.align_restarts, settings_.align_ambiguity_ratio,
         gate_centre.has_value() ? &*gate_centre : nullptr,
         settings_.inertial_gate_m, scale,
-        settings_.anchor_bearing_nonholonomic);
+        settings_.anchor_bearing_nonholonomic,
+        settings_.anchor_bearing_cell_rad, settings_.anchor_bearing_cell_rho);
     }
     if (aligned.has_value()) {
       camera.last_translation = aligned->translation;
@@ -3227,10 +3238,14 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
     // The same candidates' clarity, in the same order, so the map can spend its
     // free slots on landmarks rather than on whichever the frame listed first.
     Weights clarity;
-    if (camera.track_clarity.size() == entry.ground_valid.size()) {
+    if (camera.track_clarity.size() == camera.track_ids.size() &&
+      entry.track_slot.size() == static_cast<size_t>(entry.ground_valid.size()))
+    {
       clarity.resize(count);
       for (Eigen::Index n = 0; n < count; ++n) {
-        clarity(n) = camera.track_clarity(usable[static_cast<size_t>(n)]);
+        clarity(n) =
+          camera.track_clarity(entry.track_slot[static_cast<size_t>(usable[
+            static_cast<size_t>(n)])]);
       }
     }
     const Points3 world = transform_points_to_world(body, pose_);
