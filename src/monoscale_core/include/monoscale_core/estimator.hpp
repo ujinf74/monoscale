@@ -985,6 +985,7 @@ struct Diagnostics
   // What the road's length did to the fused hop, 1 for nothing.
   double photometric_ratio = 1.0;
   int64_t photometric_uses = 0;
+  int64_t photometric_rejected = 0;
   int64_t photometric_chances = 0;
   int64_t photometric_mapless = 0;
   std::vector<double> pair_radial;

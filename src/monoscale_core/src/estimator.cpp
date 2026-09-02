@@ -2402,13 +2402,32 @@ void Estimator::process_pair()
     const double measured = road_distance / road_cameras;
     const double length = std::hypot(motion->x, motion->y);
     if (length > 1e-6 && std::isfinite(measured)) {
-      const double blended = length +
-        settings_.photometric_step_gain * (measured - length);
-      const double ratio = blended / length;
-      motion->x *= ratio;
-      motion->y *= ratio;
-      diagnostics_.photometric_ratio = ratio;
-      ++diagnostics_.photometric_uses;
+      // These are two independent measurements of the same displacement, and
+      // the photometric one is the more precise: its error against truth is
+      // 0.08% of the hop, against 0.3-1.2% for the pair solve. So a
+      // disagreement of several per cent is not the pair solve being wrong --
+      // it is the photometric search having failed to find its peak, and the
+      // scale it then reports is unbounded. Measured over ten drives the
+      // disagreement is 0.32% at the median and 1.9% at worst on a drive where
+      // nothing goes wrong, while the failures reach **3.8x and 32x**; two
+      // consecutive frames of the latter took str_4.0 from 0.079 to 1.347.
+      //
+      // `max_scale_error` is already the stack's bound on exactly this
+      // quantity -- how far a scale may be off before it stops being a
+      // measurement -- so it gates here too rather than introducing a second
+      // number to tune.
+      const double disagreement = std::abs(measured / length - 1.0);
+      if (settings_.max_scale_error > 0.0 && disagreement > settings_.max_scale_error) {
+        ++diagnostics_.photometric_rejected;
+      } else {
+        const double blended = length +
+          settings_.photometric_step_gain * (measured - length);
+        const double ratio = blended / length;
+        motion->x *= ratio;
+        motion->y *= ratio;
+        diagnostics_.photometric_ratio = ratio;
+        ++diagnostics_.photometric_uses;
+      }
     }
   }
   // Integrate the photometric tilt increments, and leak them back toward

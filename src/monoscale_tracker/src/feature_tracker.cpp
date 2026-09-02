@@ -796,6 +796,7 @@ public:
     // photometric cost, instead of searching the step alone. Off leaves the
     // one-dimensional bracket in sole charge and emits no angles at all.
     road_step_esm_ = declare_parameter<bool>("road_step_esm", false);
+    esm_step_ = declare_parameter<bool>("road_step_esm_step", true);
     // Half-width of the band sweep, in pixels of image motion.
     road_step_band_window_px_ =
       declare_parameter<double>("road_step_band_window_px", 3.0);
@@ -1396,7 +1397,14 @@ private:
           state.road_esm = solve_step_esm(
             model->second, state.previous_gray, gray, turn, found * span,
             band_for(name));
-          if (state.road_esm.ok) {
+          // The fit's rotation and its step are published separately, so
+          // taking one does not oblige taking the other. Default true: the
+          // reference extraction runs the fit whole and the benchmark's 0.0256
+          // is measured with the step in. The switch exists because the two
+          // were once entangled in a judgement -- and that judgement was made
+          // on recordings carrying the PhysX substep artefact, so it does not
+          // stand; see the note on `max_scale_error` in `estimator.cpp`.
+          if (state.road_esm.ok && esm_step_) {
             answer = state.road_esm.step / span;
           }
         }
@@ -4114,6 +4122,7 @@ private:
   bool road_from_step_ = false;
   bool road_step_calibrate_ = false;
   bool road_step_esm_ = false;
+  bool esm_step_ = true;
   double road_step_band_window_px_ = 3.0;
   std::array<double, 4> road_step_roi_{0.25, 0.60, 0.75, 1.00};
   std::map<std::string, std::array<double, 4>> road_bands_;
