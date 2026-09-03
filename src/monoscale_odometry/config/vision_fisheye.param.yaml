@@ -49,7 +49,7 @@
     # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
     # sharing forced on): true -> false. It also breaks the bearing tilt
     # independently of `ground_min_inliers`, which cost a session to separate
-    photometric_align_prior: false
+    photometric_align_prior: true
     # An even spread of anchor bearings, admitted rather than evicted. The map's
     # longitudinal information is not where its anchors are: measured 08-28,
     # 92.1% of them sit within fifteen degrees of straight astern holding 9.7%
@@ -572,7 +572,7 @@
     # sharing forced on): 60 -> 45, jointly with the block at the end
     # of this file. The 60-vs-30 reading above still holds at that operating
     # point; it moved once the anchor policy under it changed
-    ground_min_inliers: 45
+    ground_min_inliers: 36
     # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
     # sharing forced on): 0.08 -> 0.04
     max_scale_error: 0.04
@@ -985,7 +985,7 @@
     # metrics come out bit-identical, because the map path takes every frame
     # this would have served. Left as it is rather than removed, so that the
     # next person to reach for it reads this instead of measuring it again.
-    fuse_camera_points: true
+    fuse_camera_points: false
     # 1.0 was set against 20 Hz frames, where it caps the vehicle at 20 m/s.
     # The solve is triggered by accumulated parallax rather than by frame, so
     # at 60 Hz one solve closes several frames and the interval it covers is
@@ -1164,10 +1164,35 @@
     # policy that fills it.
     max_ground_anchors: 2000
     anchor_max_observations: 10
-    anchor_trial_observations: 8
+    anchor_trial_observations: 4
     anchor_density_replace_margin: 1.0
-    anchor_drift_variance_per_m: 0.05
+    anchor_drift_variance_per_m: 0.10
 
+    # The joint re-tune of 2026-09-04, run on the re-recorded bench set -- the
+    # first recordings whose physics substep is fine enough for the reported
+    # angular velocity to integrate to the actual rotation. 111 axes swept in
+    # three stages (per-axis, factorial over the strongest twelve, random
+    # around the best), then the edges pushed out and the interiors halved.
+    # Nine-drive headline 0.0371 -> 0.0250 with the trio counted once; with the
+    # gyro heading in place of truth it reads 0.0254, a 2% difference, so the
+    # self-contained deployment keeps the score. Repeat spread 1.02, walk 1.15.
+    #
+    # `anchor_weight_by_variance` is the one qualitatively new element: it was
+    # written in 1c3f002 and had never been in any sweep's axis list, and it
+    # appears in every one of the top ten combinations.
+    align_ambiguity_ratio: 1.2
+    anchor_information_power: 1.0
+    anchor_initial_variance: 0.09
+    anchor_link_rebind_grace: 60
+    anchor_weight_by_variance: true
+    camera_split_lever: 1.0
+    fusion_gain_mode: 1
+    ground_common_scale: 1.00066
+    ground_height_from_tilt: false
+    map_correction_gain: 0.75
+    map_solve_weight: 0.5
+    pair_scale_gain: 1.8
+    remember_sighting_poses: true
     # Anchor sharing between the two cameras. The rear drives over ground the
     # front laid anchors on, so the link is one-directional in practice and
     # cross-source only is what the founder-based rule reduces to. 0.02 m is a
@@ -1193,8 +1218,7 @@
     # camera's angle against the road. That is exactly why it is safe to write
     # the measured value now: turning the vertical on later with this still at
     # zero would wake the lever up 1.9 m wrong.
-    pitch_centre_x_m: 1.8992
-
+    pitch_centre_x_m: 1.4
     # Solve on every sixteenth pair. Tracking runs on every frame regardless,
     # so this sets how far apart the two views a solve compares are, not how
     # much of the camera is thrown away. At 2 m/s and 60 Hz that is 53 cm.
