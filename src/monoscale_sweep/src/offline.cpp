@@ -523,7 +523,12 @@ int main(int argc, char ** argv)
       ? truth_poses(cache.load("truth"))
       : tum_poses(pose_source);
 
-    const monoscale_sweep::SweepSettings settings;  // defaults ARE the operating point
+    monoscale_sweep::SweepSettings settings;  // defaults ARE the operating point
+    // One knob reachable from the environment, so a parity hunt does not need
+    // a rebuild per value. Nothing reads it in the node.
+    if (const char * v = std::getenv("SWEEP_MIN_BLOB")) {
+      settings.min_blob = std::atoi(v);
+    }
 
     const double front_width =
       front_grays.shape[0] ? static_cast<double>(front_grays.shape[2]) : 1280.0;

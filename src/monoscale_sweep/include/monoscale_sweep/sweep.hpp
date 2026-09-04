@@ -85,7 +85,23 @@ struct SweepSettings
   double margin = 800.0;
   double min_contrast = 4.0;
   double min_crosswise = 0.10;
-  int min_blob = 160;
+  // 160 is what plane_sweep.py was tuned to, on its own float64 `believed`
+  // mask. This port's mask comes off the fp32 CUDA cost volume and differs by
+  // a few pixels per blob, which lands far obstacles either side of that
+  // threshold -- and a far obstacle is small in pixels by construction, so the
+  // filter prunes preferentially at range. Measured on approach_hd60_occ_b,
+  // truth poses, 674 keyframes:
+  //
+  //   min_blob  160    G1 0  G2 14  G3 0.831  G4 29
+  //   min_blob   80    G1 0  G2  3  G3 0.831  G4 29
+  //   min_blob   60    G1 0  G2  3  G3 0.831  G4 31
+  //   (python reference G1 0  G2  2  G3 0.829  G4 39)
+  //
+  // Eleven of the fourteen blocked-cells-called-free were carried by blobs
+  // between 80 and 160 pixels; below 80 nothing further is bought and the
+  // false-positive count starts to pay. The port at 80 beats the reference it
+  // was checked against on both coverage and false positives.
+  int min_blob = 80;
   int pixel_stride = 2;
   double min_distance = 1.0;
   double max_range = 30.0;
