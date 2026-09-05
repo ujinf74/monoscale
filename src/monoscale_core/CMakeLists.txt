@@ -23,7 +23,6 @@ add_library(monoscale_core SHARED
   src/inertial.cpp
   src/attitude.cpp
   src/estimator.cpp
-  src/occupancy.cpp
 )
 target_include_directories(monoscale_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -55,8 +54,6 @@ if(BUILD_TESTING)
   target_link_libraries(test_inertial monoscale_core)
   ament_add_gtest(test_estimator test/test_estimator.cpp)
   target_link_libraries(test_estimator monoscale_core)
-  ament_add_gtest(test_occupancy test/test_occupancy.cpp)
-  target_link_libraries(test_occupancy monoscale_core)
   ament_add_gtest(test_attitude test/test_attitude.cpp)
   target_link_libraries(test_attitude monoscale_core)
 endif()

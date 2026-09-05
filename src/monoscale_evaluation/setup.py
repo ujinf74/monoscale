@@ -28,6 +28,7 @@ setup(
             'odometry_evaluator = monoscale_evaluation.odometry_evaluator:main',
             'grid_evaluator = monoscale_evaluation.grid_evaluator:main',
             'benchmark = monoscale_evaluation.benchmark:main',
+            'bag_gate = monoscale_evaluation.bag_gate:main',
         ],
     },
 )

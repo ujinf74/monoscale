@@ -54,16 +54,24 @@ def generate_launch_description():
             },
         ],
     )
+    # The grid comes off a plane sweep of the raw fisheye images now, not off
+    # the estimator's labelled points. The old path built it from whatever the
+    # tracker's corners happened to triangulate, so an obstacle that gave up no
+    # corners did not exist; and its depth chain carried five faults the audit
+    # of 2026-09-02 measured, of which the largest -- a warp holding pitch and
+    # roll at zero -- accounted for 94% of the frame-common error. The sweep
+    # decides height per pixel by photoconsistency instead, and takes roll and
+    # pitch from the odometry it integrates against.
     occupancy = Node(
-        package='monoscale_occupancy_grid_map',
-        executable='monoscale_occupancy_grid_map',
-        name='monoscale_occupancy_grid_map',
+        package='monoscale_sweep',
+        executable='sweep_node',
+        name='monoscale_sweep',
         output='screen',
         condition=IfCondition(LaunchConfiguration('launch_occupancy')),
         parameters=[
             PathJoinSubstitution(
-                [FindPackageShare('monoscale_occupancy_grid_map'), 'config',
-                 'occupancy.param.yaml']
+                [FindPackageShare('monoscale_sweep'), 'config',
+                 'sweep.param.yaml']
             ),
             {'use_sim_time': use_sim_time},
         ],

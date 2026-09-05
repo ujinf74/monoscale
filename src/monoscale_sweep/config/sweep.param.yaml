@@ -1,0 +1,33 @@
+# The plane-sweep occupancy mapper, deployed.
+#
+# Every operating-point number lives in SweepSettings' defaults, measured on
+# approach_hd60_occ_b and scored against truth; this file carries only what the
+# node cannot know -- which topics to read, and where the cameras are. The lens
+# entries are the same ones vision_fisheye.param.yaml gives the estimator.
+/monoscale_sweep:
+  ros__parameters:
+    cameras: ['front', 'rear']
+    image_topics:
+      - '/sensing/camera/front/fisheye/image_raw'
+      - '/sensing/camera/rear/fisheye/image_raw'
+    info_topics:
+      - '/sensing/camera/front/fisheye/camera_info'
+      - '/sensing/camera/rear/fisheye/camera_info'
+    # The estimator's output, not the truth: this is the deployed chain.
+    odometry_topic: '/localization/odometry'
+    occupancy_topic: '/perception/occupancy_grid_map'
+    map_frame: 'map'
+    # The width the sweep works at. 1280 is what the operating point was
+    # measured at and what the frame caches hold.
+    processing_width: 1280
+    publish_rate_hz: 5.0
+    front:
+      k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
+      calibration_width: 2560.0
+      rotation_base_from_camera: [0.0, -0.5, 0.8660254, -1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      translation_base_from_camera: [3.694, 0.0, 0.89]
+    rear:
+      k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
+      calibration_width: 2560.0
+      rotation_base_from_camera: [0.0, 0.5, -0.8660254, 1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      translation_base_from_camera: [-0.82, 0.0, 1.26]

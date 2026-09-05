@@ -72,5 +72,6 @@ install(TARGETS monoscale_sweep_core sweep_offline sweep_node
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()
