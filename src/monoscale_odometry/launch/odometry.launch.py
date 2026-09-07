@@ -25,10 +25,19 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     shared = FindPackageShare('monoscale_odometry')
+    # One file for both nodes. `vision_fisheye.param.yaml` is keyed `/**:`, so
+    # its section reaches the tracker as well as the estimator, and it is the
+    # file every measurement in the benchmark was made under.
+    #
+    # The tracker used to be launched from `odometry_candidate.param.yaml`
+    # instead, which is a different stack: 1600 features against 2000, an LK
+    # window of 15 against 21, and -- decisively -- no `road_from_step`, which
+    # is what switches the photometric road step on at all. The deployment was
+    # not running what the benchmark scored.
     base = PathJoinSubstitution([shared, 'config', 'vision_fisheye.param.yaml'])
-    candidate = PathJoinSubstitution(
-        [shared, 'config', 'odometry_candidate.param.yaml']
-    )
+    # Loaded after the base file, and carrying only what differs between the
+    # two nodes: QoS, queue depths, the tracks prefix. No algorithm values.
+    deployment = PathJoinSubstitution([shared, 'config', 'deployment.param.yaml'])
     use_sim_time = LaunchConfiguration('use_sim_time')
     mapping_period = LaunchConfiguration('mapping_min_period_sec')
 
@@ -37,7 +46,7 @@ def generate_launch_description():
         executable='feature_tracker',
         name='feature_tracker',
         output='screen',
-        parameters=[candidate, {'use_sim_time': use_sim_time}],
+        parameters=[base, deployment, {'use_sim_time': use_sim_time}],
     )
     odometry = Node(
         package='monoscale_odometry',
@@ -46,7 +55,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             base,
-            candidate,
+            deployment,
             {
                 'use_sim_time': use_sim_time,
                 'mapping_min_period_sec': mapping_period,

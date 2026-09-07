@@ -1,0 +1,37 @@
+# What `vision_fisheye.param.yaml` cannot say, because it is keyed `/**:` and
+# these differ between the two nodes.
+#
+# Nothing here is an algorithm value. Everything the benchmark measured lives
+# in the base file, and this one is loaded after it, so a tuning number written
+# here would silently overrule a measured one. That is what this file used to
+# do: as `odometry_candidate.param.yaml` it also carried 1600 features, an LK
+# window of 15 and four pyramid levels, against the base file's 2000 / 21 / 5 --
+# so the launched tracker was not the tracker the benchmark scored. It was
+# renamed with its contents so that anything still pointing at the old name
+# fails loudly rather than quietly running a different stack.
+feature_tracker:
+  ros__parameters:
+    # The tracker's own default is the `vio` pair, which this rig does not
+    # publish -- a node left on it subscribes to nothing and says so only in
+    # its frame counter. The base file does not name them because it is shared
+    # with the offline tools, which pass topics on the command line.
+    cameras: ['front', 'rear']
+    image_topics:
+      - /sensing/camera/front/fisheye/image_raw
+      - /sensing/camera/rear/fisheye/image_raw
+    # Images arrive from the bridge as best_effort. Demanding reliable here is
+    # the failure `작업_규율` records as "발행: front 0 장 (버림 0)": a
+    # subscription that never matches, and a node that looks alive.
+    input_reliability: best_effort
+    input_queue_depth: 30
+    # Tracks go out reliable -- the estimator cannot re-request a dropped one.
+    output_reliability: reliable
+    output_queue_depth: 200
+
+monoscale_odometry:
+  ros__parameters:
+    # The base file leaves this empty, which is right for the replay tool (it
+    # is given the prefix on the command line) and wrong for the live graph.
+    track_topic_prefix: /vision/tracks
+    input_reliability: reliable
+    input_queue_depth: 200

@@ -33,6 +33,10 @@
     # `road_from_step` is read by the tracker, which this file reaches through
     # its `/**:` wildcard. Without it the tracker publishes no photometric block
     # and the three settings under it have nothing to consume.
+    front_image_topic: /sensing/camera/front/fisheye/image_raw
+    rear_image_topic: /sensing/camera/rear/fisheye/image_raw
+    front_camera_info_topic: /sensing/camera/front/fisheye/camera_info
+    rear_camera_info_topic: /sensing/camera/rear/fisheye/camera_info
     road_from_step: true
     # The step goes in as a prior and a gate on frames the map did not answer,
     # not as an overwrite. Overwriting the hop was measured and loses: the map's
@@ -61,13 +65,17 @@
     anchor_polar_quota: 400
     use_sim_time: true
 
-    # The low resolution tap from sensor_mapping_vio.yaml. The 1920x1080 pair
-    # on /sensing/camera/{front,rear}/image_raw is the same lens at the same
-    # pose, but rclpy cannot ingest two 8.3 MB frames per cycle.
-    front_image_topic: /sensing/camera/front/fisheye/image_raw
-    rear_image_topic: /sensing/camera/rear/fisheye/image_raw
-    front_camera_info_topic: /sensing/camera/front/fisheye/camera_info
-    rear_camera_info_topic: /sensing/camera/rear/fisheye/camera_info
+    # `<camera>_image_topic` and `<camera>_camera_info_topic`, composed per
+    # camera in parameters.cpp rather than written out, which is why a search
+    # for either name finds nothing and they look dead. They are not: the
+    # camera_info pair is what lets the estimator take its intrinsics from the
+    # recording instead of from `k` below, and removing it moves the nine-drive
+    # headline 0.0254 -> 0.0453.
+    #
+    # The estimator reads these; the tracker does not -- it takes an
+    # `image_topics` array instead, which the live graph supplies from
+    # `deployment.param.yaml`. Two spellings of one idea, and the reason the
+    # deployed tracker spent a while subscribed to topics nobody publishes.
     # CARLA derives a valid pinhole CameraInfo from the blueprint FOV, unlike
     # the Isaac cameras whose CameraInfo was all zeros.
     use_camera_info: true
@@ -396,7 +404,6 @@
     # 0.996 with the band fixed. The original bags are the reference the
     # recorded figures were taken on, so the fixed band stands until the
     # adaptive one is shown to beat it on those.
-    min_ground_flow_px: 0.0
     # The plane fit's inlier gate, and the width of the Gaussian that now
     # weights points inside it instead of counting them all alike.
     #
