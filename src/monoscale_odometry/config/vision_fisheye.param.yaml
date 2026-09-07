@@ -579,7 +579,7 @@
     # sharing forced on): 60 -> 45, jointly with the block at the end
     # of this file. The 60-vs-30 reading above still holds at that operating
     # point; it moved once the anchor policy under it changed
-    ground_min_inliers: 36
+    ground_min_inliers: 30
     # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
     # sharing forced on): 0.08 -> 0.04
     max_scale_error: 0.04
@@ -1004,8 +1004,7 @@
     # tune; 2.0 leaves margin without inventing one.
     max_translation_per_frame_m: 1.0
     max_yaw_per_frame_rad: 0.35
-    twist_lowpass_tau: 0.12
-
+    twist_lowpass_tau: 0.06
     # The lowest plane the sweep may believe. 0.15 matched height_gate.py's
     # cut for the LiDAR reference, which is where it came from, but the two
     # answer different questions and the sweep does not need to agree.
@@ -1071,7 +1070,26 @@
     # noise the acceleration is refused upstream and the two are a wash, so
     # this default costs nothing there.
 
-    use_inertial_prediction: true
+    # False. The filter replaced the cameras' hop with its own output, and its
+    # own output is worse: measured per hop, the cameras' fused answer scatters
+    # 0.21% while what the filter substituted scatters 5.76% -- 27x -- and the
+    # substitution is wholesale, `motion->x = fused.x()`.
+    #
+    # Turning it off under parameters tuned with it on loses (0.0236% ->
+    # 0.0253%), which is why it survived three earlier sweeps. Given the axes
+    # back -- `map_correction_gain` and `ground_min_inliers` in particular, and
+    # `range_scale_gain` switched on -- it wins on everything the benchmark
+    # reports:
+    #
+    #     filter on   ate% 0.0236  worst 0.0420  walk 1.17
+    #     filter off  ate% 0.0222  worst 0.0338  walk 0.92
+    #
+    # walk below 1.0 is the part that matters. It says the trajectory
+    # accumulates less than independent hops predict, where the filter had it
+    # at 1.17 -- the filter was manufacturing the correlation it was there to
+    # suppress. Two sweeps, 9,900 combinations, 150 of them clearing the
+    # acceptance rule: this is a region, not a point.
+    use_inertial_prediction: false
     inertial_max_acceleration_mps2: 12.0
     inertial_acceleration_median_window: 1
     inertial_integration_method: rk4
@@ -1193,10 +1211,20 @@
     anchor_link_rebind_grace: 60
     anchor_weight_by_variance: true
     camera_split_lever: 1.0
-    fusion_gain_mode: 1
+    fusion_gain_mode: 0
     ground_common_scale: 1.00066
     ground_height_from_tilt: false
-    map_correction_gain: 0.75
+    map_correction_gain: 1.0
+
+    # Learn a range-dependent correction to the ground solve's scale.
+    #
+    # Off until now, and it is what the inertial filter was standing in for.
+    # The along-track bias is not constant: it reads -0.061% of the hop at
+    # 1.4 m/s and -0.307% at 7.5 m/s, always short, on every drive. A single
+    # scale cannot answer that -- the sweep leaves `vision_scale` and
+    # `photometric_scale` exactly where they were across 10,000 combinations --
+    # and the filter was papering over it at the cost of correlating the hops.
+    range_scale_gain: 0.10
     map_solve_weight: 0.5
     pair_scale_gain: 1.8
     remember_sighting_poses: true
