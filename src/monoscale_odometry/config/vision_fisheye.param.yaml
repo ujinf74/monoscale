@@ -69,6 +69,22 @@
     # esm-only extraction scores 0.0229% / 0.0389%, matching the set that
     # carries both.
     road_step_esm: true
+    # Coarse candidates, and the same count again over one coarse spacing.
+    #
+    # 13 was chosen when the search's answer was the answer. It is not any
+    # more: the fit above overwrites it, so the search only has to put the seed
+    # inside the fit's basin. Measured 2026-09-08 on the nine re-recorded
+    # drives, ATE/거리 mean/worst: 13 gives 0.0229%/0.0389%, 9 gives
+    # 0.0231%/0.0383%, 7 gives 0.0233%/0.0380%. The mean moves inside the
+    # harness's own +-2% repeat noise and the worst improves, while `road`
+    # falls 9.01 ms a frame to 7.20.
+    #
+    # 7 rather than lower because the fit's own warp count says where the seed
+    # stops being good enough: it sits at the 13-sample level through 7 on both
+    # a straight and a curve (27.1 and 30.5), and rises at 6 on the curve
+    # (31.1) and at 5 on the straight (38.2) as the fit starts working to make
+    # up the difference. Below that the search saves warps the fit spends back.
+    road_step_samples: 7
     # The step goes in as a prior and a gate on frames the map did not answer,
     # not as an overwrite. Overwriting the hop was measured and loses: the map's
     # hop is a pose *correction*, not a displacement, and rescaling it to a
