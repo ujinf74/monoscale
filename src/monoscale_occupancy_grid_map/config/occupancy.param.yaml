@@ -4,7 +4,7 @@
 # approach_hd60_occ_b and scored against truth; this file carries only what the
 # node cannot know -- which topics to read, and where the cameras are. The lens
 # entries are the same ones vision_fisheye.param.yaml gives the estimator.
-/monoscale_sweep:
+/monoscale_occupancy_grid_map:
   ros__parameters:
     cameras: ['front', 'rear']
     image_topics:

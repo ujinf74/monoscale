@@ -7,7 +7,7 @@
 // without CUDA gets a stub that reports unavailable, and the Sweep falls back
 // to the CPU path in sweep.cpp.
 
-#include "monoscale_sweep/sweep.hpp"
+#include "monoscale_occupancy_grid_map/sweep.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,8 +18,8 @@
 #include <Eigen/Dense>
 
 // Provided by monoscale_fast (src/sweep_kernels.cu) in the GLOBAL namespace,
-// with C++ linkage. Declaring these inside namespace monoscale_sweep made the
-// compiler reference monoscale_sweep::plane_sweep_cuda_* instead, which have no
+// with C++ linkage. Declaring these inside namespace monoscale_occupancy made the
+// compiler reference monoscale_occupancy::plane_sweep_cuda_* instead, which have no
 // definition -- the weak symbol stayed null and the backend silently fell back
 // to CPU. They must be declared at global scope to bind the real kernel.
 bool plane_sweep_cuda_available();
@@ -32,7 +32,7 @@ void plane_sweep_cuda_impl(
   float * volume_out,
   const float * geometry, const float * offsets);
 
-namespace monoscale_sweep
+namespace monoscale_occupancy
 {
 
 bool cuda_available()
@@ -81,7 +81,7 @@ bool cuda_match(
 {
   static bool announced = false;
   if (!announced) {
-    std::fprintf(stderr, "[monoscale_sweep] cuda backend: available=%d\n",
+    std::fprintf(stderr, "[occupancy] cuda backend: available=%d\n",
       plane_sweep_cuda_available() ? 1 : 0);
     announced = true;
   }
@@ -150,4 +150,4 @@ bool cuda_match(
   return true;
 }
 
-}  // namespace monoscale_sweep
+}  // namespace monoscale_occupancy

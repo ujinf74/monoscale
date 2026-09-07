@@ -24,7 +24,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
-#include "monoscale_sweep/sweep.hpp"
+#include "monoscale_occupancy_grid_map/sweep.hpp"
 
 namespace
 {
@@ -42,7 +42,7 @@ struct Frame
 {
   double stamp = 0.0;
   cv::Mat gray;      // CV_32F at processing width
-  monoscale_sweep::Pose5 pose;
+  monoscale_occupancy::Pose5 pose;
   double travelled = 0.0;
 };
 
@@ -50,11 +50,11 @@ struct Frame
 
 class SweepNode : public rclcpp::Node
 {
-  using Lens = monoscale_sweep::Lens;
+  using Lens = monoscale_occupancy::Lens;
 
 public:
   SweepNode()
-  : rclcpp::Node("monoscale_sweep")
+  : rclcpp::Node("monoscale_occupancy_grid_map")
   {
     cameras_ = declare_parameter<std::vector<std::string>>(
       "cameras", std::vector<std::string>{"front", "rear"});
@@ -105,7 +105,7 @@ public:
       base_lens_[name] = lens;
     }
 
-    monoscale_sweep::SweepSettings settings;  // operating-point defaults
+    monoscale_occupancy::SweepSettings settings;  // operating-point defaults
     settings_ = settings;
     for (const auto & name : cameras_) {
       grids_[name].reset(settings_);
@@ -168,7 +168,7 @@ private:
     const double s0 = std::sin(-origin_yaw_);
     const double dx = raw_x - origin_x_;
     const double dy = raw_y - origin_y_;
-    monoscale_sweep::Pose5 pose;
+    monoscale_occupancy::Pose5 pose;
     pose.x = c0 * dx - s0 * dy;
     pose.y = s0 * dx + c0 * dy;
     pose.yaw = raw_yaw - origin_yaw_;
@@ -186,7 +186,7 @@ private:
 
   // The pose at an image stamp, interpolated from the odometry ring. Nullopt
   // until odometry brackets the stamp -- a frame with no pose is not keyframed.
-  std::optional<monoscale_sweep::Pose5> pose_at(double stamp) const
+  std::optional<monoscale_occupancy::Pose5> pose_at(double stamp) const
   {
     if (odometry_.size() < 2) {return std::nullopt;}
     if (stamp < odometry_.front().first || stamp > odometry_.back().first) {
@@ -198,7 +198,7 @@ private:
     const auto & b = odometry_[hi];
     const double span = b.first - a.first;
     const double w = span > 1e-9 ? (stamp - a.first) / span : 0.0;
-    monoscale_sweep::Pose5 pose;
+    monoscale_occupancy::Pose5 pose;
     pose.x = a.second.x + (b.second.x - a.second.x) * w;
     pose.y = a.second.y + (b.second.y - a.second.y) * w;
     const double dyaw = std::atan2(std::sin(b.second.yaw - a.second.yaw),
@@ -262,7 +262,7 @@ private:
     lens.focal *= ratio;
     lens.cx *= ratio;
     lens.cy *= ratio;
-    sweeps_.emplace(name, std::make_unique<monoscale_sweep::Sweep>(settings_, lens));
+    sweeps_.emplace(name, std::make_unique<monoscale_occupancy::Sweep>(settings_, lens));
   }
 
   void maybe_keyframe(const std::string & name)
@@ -276,7 +276,7 @@ private:
     // ring is short), matching the offline --source-offsets without
     // --baseline-select.
     std::vector<cv::Mat> source_grays;
-    std::vector<monoscale_sweep::Pose5> source_poses;
+    std::vector<monoscale_occupancy::Pose5> source_poses;
     for (double offset : settings_.source_offsets) {
       const double want = reference.travelled + offset;
       const Frame * best = nullptr;
@@ -303,9 +303,9 @@ private:
   {
     std::lock_guard<std::mutex> guard(mutex_);
     if (!have_stamp_) {return;}
-    std::vector<monoscale_sweep::CameraGrid *> grids;
+    std::vector<monoscale_occupancy::CameraGrid *> grids;
     for (const auto & name : cameras_) {grids.push_back(&grids_[name]);}
-    const cv::Mat values = monoscale_sweep::publish(settings_, grids);
+    const cv::Mat values = monoscale_occupancy::publish(settings_, grids);
 
     nav_msgs::msg::OccupancyGrid message;
     message.header.stamp = rclcpp::Time(static_cast<int64_t>(last_stamp_ * 1e9));
@@ -337,14 +337,14 @@ private:
   std::string map_frame_;
   int processing_width_ = 1280;
 
-  monoscale_sweep::SweepSettings settings_;
+  monoscale_occupancy::SweepSettings settings_;
   std::map<std::string, Lens> base_lens_;
   std::map<std::string, double> calibration_width_;
-  std::map<std::string, std::unique_ptr<monoscale_sweep::Sweep>> sweeps_;
-  std::map<std::string, monoscale_sweep::CameraGrid> grids_;
+  std::map<std::string, std::unique_ptr<monoscale_occupancy::Sweep>> sweeps_;
+  std::map<std::string, monoscale_occupancy::CameraGrid> grids_;
   std::map<std::string, std::deque<Frame>> rings_;
   std::map<std::string, double> next_at_;
-  std::deque<std::pair<double, monoscale_sweep::Pose5>> odometry_;
+  std::deque<std::pair<double, monoscale_occupancy::Pose5>> odometry_;
 
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> image_subs_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr> info_subs_;

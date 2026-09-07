@@ -22,7 +22,7 @@
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
 
-namespace monoscale_sweep
+namespace monoscale_occupancy
 {
 
 // Equidistant fisheye with a fixed mount. The same three pieces the python
@@ -237,6 +237,6 @@ private:
 cv::Mat publish(
   const SweepSettings & settings, std::vector<CameraGrid *> grids);
 
-}  // namespace monoscale_sweep
+}  // namespace monoscale_occupancy
 
 #endif  // MONOSCALE_SWEEP__SWEEP_HPP_

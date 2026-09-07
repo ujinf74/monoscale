@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>monoscale_sweep</name>
+  <name>monoscale_occupancy_grid_map</name>
   <version>0.0.1</version>
   <description>Plane-sweep occupancy mapping, ported from tools/plane_sweep.py.</description>
   <maintainer email="ujin@tukorea.ac.kr">ujin</maintainer>

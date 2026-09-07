@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(monoscale_sweep)
+project(monoscale_occupancy_grid_map)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -36,20 +36,20 @@ set(MONOSCALE_FAST_SRC
   CACHE FILEPATH "monoscale_fast sweep_kernels.cu for the CUDA backend")
 if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_FAST_SRC})
   list(APPEND SWEEP_SOURCES src/cuda_backend.cpp ${MONOSCALE_FAST_SRC})
-  add_compile_definitions(MONOSCALE_SWEEP_HAS_CUDA)
+  add_compile_definitions(MONOSCALE_OCCUPANCY_HAS_CUDA)
 endif()
 
-add_library(monoscale_sweep_core ${SWEEP_SOURCES})
-target_include_directories(monoscale_sweep_core PUBLIC
+add_library(monoscale_occupancy_core ${SWEEP_SOURCES})
+target_include_directories(monoscale_occupancy_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(monoscale_sweep_core ${OpenCV_LIBS}
+target_link_libraries(monoscale_occupancy_core ${OpenCV_LIBS}
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>)
 if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_FAST_SRC})
-  set_target_properties(monoscale_sweep_core PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+  set_target_properties(monoscale_occupancy_core PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
   find_package(CUDAToolkit REQUIRED)
-  target_link_libraries(monoscale_sweep_core CUDA::cudart)
+  target_link_libraries(monoscale_occupancy_core CUDA::cudart)
 endif()
 
 # Static core: the CUDA runtime it pulls in must reach the executable too.
@@ -59,15 +59,15 @@ endif()
 
 # Offline runner: cache -> grid -> npy, for parity against plane_sweep.py.
 add_executable(sweep_offline src/offline.cpp)
-target_link_libraries(sweep_offline monoscale_sweep_core ${OpenCV_LIBS} ${SWEEP_CUDART})
+target_link_libraries(sweep_offline monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART})
 
 # The online node.
 add_executable(sweep_node src/sweep_node.cpp)
-target_link_libraries(sweep_node monoscale_sweep_core ${OpenCV_LIBS} ${SWEEP_CUDART})
+target_link_libraries(sweep_node monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART})
 ament_target_dependencies(sweep_node
   rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge)
 
-install(TARGETS monoscale_sweep_core sweep_offline sweep_node
+install(TARGETS monoscale_occupancy_core sweep_offline sweep_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})

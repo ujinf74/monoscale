@@ -4,7 +4,7 @@
 // operating point (subplane off for placement, no ray-votes, no vertical
 // family, no shadow projection -- all measured to lose).
 
-#include "monoscale_sweep/sweep.hpp"
+#include "monoscale_occupancy_grid_map/sweep.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -13,7 +13,7 @@
 
 #include <opencv2/imgproc.hpp>
 
-namespace monoscale_sweep
+namespace monoscale_occupancy
 {
 
 namespace
@@ -404,4 +404,4 @@ cv::Mat publish(const SweepSettings & s, std::vector<CameraGrid *> grids)
   return values;
 }
 
-}  // namespace monoscale_sweep
+}  // namespace monoscale_occupancy

@@ -1,4 +1,4 @@
-#include "monoscale_sweep/sweep.hpp"
+#include "monoscale_occupancy_grid_map/sweep.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +6,7 @@
 
 #include <opencv2/imgproc.hpp>
 
-namespace monoscale_sweep
+namespace monoscale_occupancy
 {
 
 // The CUDA backend, in cuda_backend.cpp. Fills best/costs (and the volume when
@@ -576,4 +576,4 @@ void Sweep::build_verdict(
   }
 }
 
-}  // namespace monoscale_sweep
+}  // namespace monoscale_occupancy

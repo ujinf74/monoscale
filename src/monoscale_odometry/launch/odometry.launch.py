@@ -72,15 +72,15 @@ def generate_launch_description():
     # decides height per pixel by photoconsistency instead, and takes roll and
     # pitch from the odometry it integrates against.
     occupancy = Node(
-        package='monoscale_sweep',
+        package='monoscale_occupancy_grid_map',
         executable='sweep_node',
-        name='monoscale_sweep',
+        name='monoscale_occupancy_grid_map',
         output='screen',
         condition=IfCondition(LaunchConfiguration('launch_occupancy')),
         parameters=[
             PathJoinSubstitution(
-                [FindPackageShare('monoscale_sweep'), 'config',
-                 'sweep.param.yaml']
+                [FindPackageShare('monoscale_occupancy_grid_map'), 'config',
+                 'occupancy.param.yaml']
             ),
             {'use_sim_time': use_sim_time},
         ],

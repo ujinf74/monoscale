@@ -1,4 +1,4 @@
-// Offline parity runner for monoscale_sweep: drives the plane-sweep occupancy
+// Offline parity runner for the occupancy grid map: drives the plane-sweep occupancy
 // mapper over a cached frames .npz (written by ps_points.py load_frames) and
 // writes the final ternary grid as a .npy, for byte-level comparison against
 // the python reference. No ROS, no rosbag, no numpy C library.
@@ -30,7 +30,7 @@
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
 
-#include "monoscale_sweep/sweep.hpp"
+#include "monoscale_occupancy_grid_map/sweep.hpp"
 
 namespace
 {
@@ -59,11 +59,11 @@ constexpr double kRearRotation[9] = {
   0.0, -0.8660254, -0.5};
 constexpr double kRearTranslation[3] = {-0.82, 0.0, 1.26};
 
-monoscale_sweep::Lens make_lens(
+monoscale_occupancy::Lens make_lens(
   const double rotation[9], const double translation[3], double width_px)
 {
   const double ratio = width_px / kCalibrationWidth;
-  monoscale_sweep::Lens lens;
+  monoscale_occupancy::Lens lens;
   lens.focal = kIntrinsics[0] * ratio;
   lens.cx = kIntrinsics[2] * ratio;
   lens.cy = kIntrinsics[5] * ratio;
@@ -352,7 +352,7 @@ void write_npy_int8(const std::string & path, const cv::Mat & grid)
 struct PoseTable
 {
   std::vector<double> stamps;
-  std::vector<monoscale_sweep::Pose5> poses;
+  std::vector<monoscale_occupancy::Pose5> poses;
 };
 
 // Truth rows are (stamp, x, y, yaw, roll, pitch); re-anchor to the first
@@ -401,7 +401,7 @@ PoseTable tum_poses(const std::string & path)
     std::istringstream row(line);
     double stamp, x, y, z, qx, qy, qz, qw;
     if (!(row >> stamp >> x >> y >> z >> qx >> qy >> qz >> qw)) {continue;}
-    monoscale_sweep::Pose5 pose;
+    monoscale_occupancy::Pose5 pose;
     pose.x = x;
     pose.y = y;
     pose.yaw = 2.0 * std::atan2(qz, qw);
@@ -418,9 +418,9 @@ PoseTable tum_poses(const std::string & path)
 // travel-offset source selection (--baseline-select off), keyframe cadence.
 // ---------------------------------------------------------------------------
 std::size_t run_camera(
-  const monoscale_sweep::Sweep & sweep, const NpyArray & grays,
+  const monoscale_occupancy::Sweep & sweep, const NpyArray & grays,
   const NpyArray & stamps, const PoseTable & table,
-  monoscale_sweep::CameraGrid & grid)
+  monoscale_occupancy::CameraGrid & grid)
 {
   const std::size_t frames = stamps.count();
   if (grays.shape.size() != 3 || grays.shape[0] != frames) {
@@ -433,7 +433,7 @@ std::size_t run_camera(
   const double * times = stamps.f64();
 
   // frame_poses = local[searchsorted(stamps, times).clip(0, len - 1)]
-  std::vector<monoscale_sweep::Pose5> frame_poses(frames);
+  std::vector<monoscale_occupancy::Pose5> frame_poses(frames);
   for (std::size_t frame = 0; frame < frames; ++frame) {
     std::size_t at = std::lower_bound(
       table.stamps.begin(), table.stamps.end(), times[frame]) - table.stamps.begin();
@@ -448,7 +448,7 @@ std::size_t run_camera(
       frame_poses[frame].y - frame_poses[frame - 1].y);
   }
 
-  const monoscale_sweep::SweepSettings & settings = sweep.settings();
+  const monoscale_occupancy::SweepSettings & settings = sweep.settings();
   const std::uint8_t * stack = grays.u8();
   auto slice = [&](std::size_t frame) {
     return cv::Mat(
@@ -479,7 +479,7 @@ std::size_t run_camera(
     ++keyframes;
 
     std::vector<cv::Mat> source_grays;
-    std::vector<monoscale_sweep::Pose5> source_poses;
+    std::vector<monoscale_occupancy::Pose5> source_poses;
     for (std::size_t other : chosen) {
       source_grays.push_back(slice(other));
       source_poses.push_back(frame_poses[other]);
@@ -523,7 +523,7 @@ int main(int argc, char ** argv)
       ? truth_poses(cache.load("truth"))
       : tum_poses(pose_source);
 
-    monoscale_sweep::SweepSettings settings;  // defaults ARE the operating point
+    monoscale_occupancy::SweepSettings settings;  // defaults ARE the operating point
     // One knob reachable from the environment, so a parity hunt does not need
     // a rebuild per value. Nothing reads it in the node.
     if (const char * v = std::getenv("SWEEP_MIN_BLOB")) {
@@ -534,13 +534,13 @@ int main(int argc, char ** argv)
       front_grays.shape[0] ? static_cast<double>(front_grays.shape[2]) : 1280.0;
     const double rear_width =
       rear_grays.shape[0] ? static_cast<double>(rear_grays.shape[2]) : 1280.0;
-    const monoscale_sweep::Sweep front_sweep(
+    const monoscale_occupancy::Sweep front_sweep(
       settings, make_lens(kFrontRotation, kFrontTranslation, front_width));
-    const monoscale_sweep::Sweep rear_sweep(
+    const monoscale_occupancy::Sweep rear_sweep(
       settings, make_lens(kRearRotation, kRearTranslation, rear_width));
 
-    monoscale_sweep::CameraGrid front_grid;
-    monoscale_sweep::CameraGrid rear_grid;
+    monoscale_occupancy::CameraGrid front_grid;
+    monoscale_occupancy::CameraGrid rear_grid;
     front_grid.reset(settings);
     rear_grid.reset(settings);
 
@@ -548,7 +548,7 @@ int main(int argc, char ** argv)
     keyframes += run_camera(front_sweep, front_grays, front_stamps, table, front_grid);
     keyframes += run_camera(rear_sweep, rear_grays, rear_stamps, table, rear_grid);
 
-    cv::Mat map = monoscale_sweep::publish(settings, {&front_grid, &rear_grid});
+    cv::Mat map = monoscale_occupancy::publish(settings, {&front_grid, &rear_grid});
     if (map.type() != CV_8S) {
       cv::Mat converted;
       map.convertTo(converted, CV_8S);
