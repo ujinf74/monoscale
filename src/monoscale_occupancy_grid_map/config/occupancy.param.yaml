@@ -13,8 +13,13 @@
     info_topics:
       - '/sensing/camera/front/fisheye/camera_info'
       - '/sensing/camera/rear/fisheye/camera_info'
-    # The estimator's output, not the truth: this is the deployed chain.
-    odometry_topic: '/localization/odometry'
+    # The estimator's output, not the truth: this is the deployed chain. The
+    # name has to match what monoscale_odometry publishes -- its default is
+    # `/localization/kinematic_state`, Autoware's name for the same thing, and
+    # the port session's default of `/localization/odometry` came from the
+    # bench harness. They do not connect, and nothing says so: the node starts,
+    # subscribes, and publishes an empty grid forever.
+    odometry_topic: '/localization/kinematic_state'
     occupancy_topic: '/perception/occupancy_grid_map'
     map_frame: 'map'
     # The width the sweep works at. 1280 is what the operating point was
