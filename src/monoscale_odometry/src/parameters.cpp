@@ -134,8 +134,28 @@ Configuration declare_and_read(rclcpp::Node & node)
   // `single_camera_variance` where two would have carried their disagreement --
   // and there is no upper bound: the solve already fuses a list, and the frames
   // are aligned by their stamps rather than by being a pair.
-  const auto names = node.declare_parameter<std::vector<std::string>>(
+  // `cameras` is the spelling the tracker and the occupancy node use, so one
+  // key in a `/**:` file now reaches all three. `camera_names` is the older
+  // name and still works; it is read only when `cameras` was left alone, and
+  // it says so when it is used, because two spellings of one list is how a
+  // graph ends up half-configured without anything reporting it.
+  auto names = node.declare_parameter<std::vector<std::string>>(
+    "cameras", std::vector<std::string>{});
+  const auto legacy = node.declare_parameter<std::vector<std::string>>(
     "camera_names", {"front", "rear"});
+  if (names.empty()) {
+    names = legacy;
+    if (legacy != std::vector<std::string>{"front", "rear"}) {
+      RCLCPP_WARN(
+        node.get_logger(),
+        "`camera_names` is the old name for `cameras`; both are read, prefer `cameras`");
+    }
+  }
+
+  const auto array_images = node.declare_parameter<std::vector<std::string>>(
+    "image_topics", std::vector<std::string>{});
+  const auto array_infos = node.declare_parameter<std::vector<std::string>>(
+    "info_topics", std::vector<std::string>{});
 
   for (const auto & name : names) {
     monoscale::CameraSettings camera;
@@ -164,11 +184,24 @@ Configuration declare_and_read(rclcpp::Node & node)
       name + ".rotation_base_from_camera", default_rotation);
     const auto translation = node.declare_parameter<std::vector<double>>(
       name + ".translation_base_from_camera", default_translation);
+    // Two spellings again, and this pair is worse than the camera list was:
+    // the per-camera names are composed here rather than written, so grepping
+    // for `front_image_topic` finds nothing and they read as dead keys. They
+    // are not -- the camera_info pair is what lets the estimator take its
+    // intrinsics from the recording instead of from `k` above, and dropping it
+    // moved the nine-drive headline 0.0254 to 0.0453.
+    //
+    // `image_topics` / `info_topics`, the arrays the tracker and the occupancy
+    // node read, win when they are given, so one spelling can serve the graph.
+    const auto composed_image = node.declare_parameter<std::string>(
+      name + "_image_topic", "/sensing/camera/" + name + "/image_raw");
+    const auto composed_info =
+      node.declare_parameter<std::string>(name + "_camera_info_topic", "/camera_info");
+    const std::size_t at = topics.image_topics.size();
     topics.image_topics.push_back(
-      node.declare_parameter<std::string>(
-        name + "_image_topic", "/sensing/camera/" + name + "/image_raw"));
+      at < array_images.size() ? array_images[at] : composed_image);
     topics.camera_info_topics.push_back(
-      node.declare_parameter<std::string>(name + "_camera_info_topic", "/camera_info"));
+      at < array_infos.size() ? array_infos[at] : composed_info);
     // How much further than the truth this camera measures the ground to have
     // moved, as a factor to divide out. Not an extrinsic: the camera is where
     // the kit says it is, and this is measured downstream of that.

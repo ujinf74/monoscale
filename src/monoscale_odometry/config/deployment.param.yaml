@@ -11,14 +11,12 @@
 # fails loudly rather than quietly running a different stack.
 feature_tracker:
   ros__parameters:
-    # The tracker's own default is the `vio` pair, which this rig does not
-    # publish -- a node left on it subscribes to nothing and says so only in
-    # its frame counter. The base file does not name them because it is shared
-    # with the offline tools, which pass topics on the command line.
-    cameras: ['front', 'rear']
-    image_topics:
-      - /sensing/camera/front/fisheye/image_raw
-      - /sensing/camera/rear/fisheye/image_raw
+    # `cameras`, `image_topics` and `info_topics` now live in the base file and
+    # are read by all three nodes from there. They used to be here because the
+    # estimator read `camera_names` and per-camera `<name>_image_topic` while
+    # the tracker read `cameras` and `image_topics`, so the same list had to be
+    # written twice in two spellings. The estimator takes both now; the arrays
+    # win where they are given.
     # Images arrive from the bridge as best_effort. Demanding reliable here is
     # the failure `작업_규율` records as "발행: front 0 장 (버림 0)": a
     # subscription that never matches, and a node that looks alive.

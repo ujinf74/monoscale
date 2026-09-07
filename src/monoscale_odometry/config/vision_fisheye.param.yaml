@@ -33,10 +33,18 @@
     # `road_from_step` is read by the tracker, which this file reaches through
     # its `/**:` wildcard. Without it the tracker publishes no photometric block
     # and the three settings under it have nothing to consume.
-    front_image_topic: /sensing/camera/front/fisheye/image_raw
-    rear_image_topic: /sensing/camera/rear/fisheye/image_raw
-    front_camera_info_topic: /sensing/camera/front/fisheye/camera_info
-    rear_camera_info_topic: /sensing/camera/rear/fisheye/camera_info
+    # Which cameras the graph fuses, read by all three nodes. One is enough --
+    # the filter then carries `single_camera_variance` where two would carry
+    # their disagreement -- and there is no upper bound: frames are aligned by
+    # stamp, not by being a pair. The estimator also answers to the older name
+    # `camera_names`, and warns when it is the one that supplied the list.
+    cameras: ['front', 'rear']
+    image_topics:
+      - /sensing/camera/front/fisheye/image_raw
+      - /sensing/camera/rear/fisheye/image_raw
+    info_topics:
+      - /sensing/camera/front/fisheye/camera_info
+      - /sensing/camera/rear/fisheye/camera_info
     road_from_step: true
     # The step goes in as a prior and a gate on frames the map did not answer,
     # not as an overwrite. Overwriting the hop was measured and loses: the map's
