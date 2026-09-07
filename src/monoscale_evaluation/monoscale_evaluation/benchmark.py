@@ -25,12 +25,41 @@ Two diagnostics sit beside it and are the reason this file exists:
          hop errors are correlated, and no amount of per-hop accuracy will fix
          that -- it is a different defect and it needs a different search.
 
+  ate%   ATE over the distance driven. Absolute ATE cannot be averaged across
+         drives of different lengths -- a metre on a 12.8 m park manoeuvre is
+         not a metre on a 150 m straight -- and reading it that way hid the
+         fact that the park drives are seven times worse per metre than the
+         straights while looking comparable in metres. This is the headline.
+
 The three recordings of the 2 m/s straight are three recordings of ONE
-condition. They enter the headline once, as their median, and separately as the
-repeat spread, rather than weighting that condition three elevenths of the
-score. The spread is its own signal: across this stack's history, moving a
-parameter swings the mean and inflates the spread, while fixing a defect leaves
-the mean alone and brings the spread down.
+condition. They enter the headline once, and separately as the repeat spread,
+rather than weighting that condition three elevenths of the score.
+
+They enter at their **worst**, not their median. The median lets a search
+sacrifice one recording of the condition for free: the 2026-09-04 joint re-tune
+did exactly that, taking str_v4 from 0.0210 to 0.0349 -- 66% worse -- while the
+headline improved, because the median never saw it. The worst is what the
+condition is actually worth.
+
+The spread is its own signal: across this stack's history, moving a parameter
+swings the mean and inflates the spread, while fixing a defect leaves the mean
+alone and brings the spread down.
+
+Acceptance
+----------
+A candidate is accepted when, against the incumbent on the same tracks:
+
+    ate%  mean   improves by more than 2%   (the replay noise floor)
+    ate%  worst  does not rise by more than 3%
+    walk  mean   does not rise by more than 10%
+
+and when it holds on drives the search did not see. That last clause is not
+decoration. The 2026-09-04 re-tune improves the training set by 29% on this
+metric and the held-out park drives by 53%, and still loses 12% of the mean on
+a different generation of recordings of the same nine conditions -- while
+winning 19% of the worst. A search over 111 axes will find the corner of the
+data it was given; the only way to know which part of the gain is real is to
+score it somewhere else.
 """
 
 import argparse
@@ -117,13 +146,18 @@ def score(drives: Sequence[Tuple[str, str]]) -> Dict[str, Dict]:
 
 
 def _headline(scored: Dict[str, Dict], pick) -> Optional[Tuple[float, float]]:
-    """One entry per condition, the repeats contributing their median."""
+    """One entry per condition; the repeats contribute their worst, not median.
+
+    A median over three recordings of one condition is a licence to break one
+    of them: two good runs carry the entry and the third is invisible. See the
+    module docstring for the re-tune that did it.
+    """
     values = [pick(v) for k, v in scored.items() if k not in REPEATS]
     values = [v for v in values if v is not None]
     repeated = [pick(scored[k]) for k in REPEATS if k in scored]
     repeated = [v for v in repeated if v is not None]
     if repeated:
-        values.append(statistics.median(repeated))
+        values.append(max(repeated))
     if not values:
         return None
     return float(np.mean(values)), max(values)
@@ -152,6 +186,12 @@ def report(scored: Dict[str, Dict]) -> None:
     for key, label, width in (('hop', 'hop%', 2), ('walk', 'walk', 2), ('ate', 'ATE', 4)):
         mean, worst = _headline(scored, lambda e, k=key: e[k])
         print(f'  {label:8} 평균 {mean:6.{width}f}   최악 {worst:6.{width}f}')
+    found = _headline(
+        scored,
+        lambda e: e['ate'] / e['distance'] if e['distance'] > 0 else None)
+    if found is not None:
+        mean, worst = found
+        print(f'  ATE/거리  평균 {mean * 100:6.4f}%   최악 {worst * 100:6.4f}%')
     spread = [
         scored[k]['segments'][SEGMENT_LENGTHS[0]] for k in REPEATS
         if k in scored and scored[k]['segments'][SEGMENT_LENGTHS[0]] is not None
