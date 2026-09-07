@@ -633,6 +633,26 @@ public:
       get_logger(), "fit: solves=%ld warps=%ld jacobians=%ld warps/solve=%.1f",
       fit_solves_, patch_warps_, fit_jacobians_,
       fit_solves_ > 0 ? double(patch_warps_) / fit_solves_ : 0.0);
+    // The stage split, at teardown as well as periodically. The periodic line
+    // is driven by a wall-clock timer that the offline path never spins, so
+    // the one run where the timing is deterministic and comparable to the byte
+    // was the one that reported none of it.
+    for (const auto & entry : received_) {
+      if (entry.second <= 0) {
+        continue;
+      }
+      const auto ms = [&](const std::map<std::string, double> & bucket) {
+        const auto found = bucket.find(entry.first);
+        return found == bucket.end() ? 0.0 : 1000.0 * found->second / entry.second;
+      };
+      RCLCPP_INFO(
+        get_logger(),
+        "stages %s (%d frames): prep=%.2f follow=%.2f (scale=%.2f pyr=%.2f "
+        "flow=%.2f road=%.2f step=%.2f) trim=%.2f detect=%.2f pub=%.2f ms",
+        entry.first.c_str(), entry.second, ms(prep_), ms(follow_), ms(scale_),
+        ms(pyramid_), ms(flow_), ms(road_), ms(step_), ms(trim_), ms(detect_),
+        ms(pub_));
+    }
   }
 
   FeatureTracker()
@@ -813,6 +833,18 @@ public:
     // same strip at 1.6 m/s measures -0.7%. Masking the fabricated border does
     // not rescue it (it reads -63%); the band has to be left out. Hence
     // `rear.road_step_roi_y1` at 0.92 while the front keeps 1.00.
+    //
+    // That prescription is wrong, and nothing ever set it. Measured 2026-09-08
+    // on the nine re-recorded drives, `rear.road_step_roi_y1:=0.92` against the
+    // same configuration at 1.00: ATE over distance 0.0229% -> 0.1055% mean and
+    // 0.0391% -> 0.1604% worst, a factor of 4.6. The -35% above came from
+    // `measure_step_bands`, which measures its own strips below 2 m/s and needs
+    // 21 samples where it takes 9 -- every per-camera figure that instrument has
+    // reported is untrustworthy, and this is one of them. The geometry says what
+    // the far band already taught below: a step moves a ground point's bearing
+    // by h/(R^2+h^2), so the nearest rows are where the step is most visible. On
+    // the rear mount those are the bottom rows, and cutting them takes away the
+    // best-measuring part of the region.
     //
     // The far band was tried first, on the reasoning that it is where the
     // corner path has nothing. It loses by two orders of magnitude, and the
@@ -4195,6 +4227,14 @@ private:
   bool counting_ = false;
   std::mutex count_mutex_;
   std::map<std::string, long> published_;
+  // Unprojected rays for the road region, one per pixel.
+  //
+  // `road_scores` is called about 64 times a frame per camera -- 13 coarse
+  // candidates, 13 fine, two parabola probes, and the band sweep -- and every
+  // one of them unprojected every pixel of the region again. The unprojection
+  // is a hypot, a sin and a cos per pixel and it depends on the pixel and the
+  // lens, not on the candidate being scored, so it is the same answer 64 times.
+
   std::vector<rclcpp::CallbackGroup::SharedPtr> groups_;
   std::map<std::string, TrackState> states_;
   // Set only in offline mode; see `run_offline`.

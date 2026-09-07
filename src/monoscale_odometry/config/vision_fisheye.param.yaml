@@ -46,6 +46,29 @@
       - /sensing/camera/front/fisheye/camera_info
       - /sensing/camera/rear/fisheye/camera_info
     road_from_step: true
+    # The four-parameter fit that frees step, turn, pitch and roll over the
+    # hop. Its code default is false, so every launch that reached deployment
+    # ran without it -- while the benchmark's own track sets have always been
+    # extracted with `road_step_esm:=true`. The two were therefore never the
+    # same configuration, and the number this repository has been quoting was
+    # not the number the launch produced.
+    #
+    # Measured 2026-09-08 on the nine re-recorded drives, same params, only
+    # this key moved:  ATE/거리 0.0445% -> 0.0229% mean, 0.0682% -> 0.0389%
+    # worst, walk 1.59 -> 0.94. The shape says where it lands: hop% is
+    # unchanged (0.14 vs 0.16) and RPE 5m barely moves (0.170 -> 0.158), while
+    # RPE 40m nearly halves (0.103 -> 0.058). One hop was already right; what
+    # was missing was heading. With the fit off the tracker does not append the
+    # three angles at all (`if (road_step_esm_)`), so `camera.esm_valid` never
+    # becomes true and the ESM yaw observation at `estimator.cpp:1380` -- armed
+    # here by `esm_yaw_sigma_rad` -- could never fire.
+    #
+    # `road_step_calibrate` is deliberately *not* set alongside it. It feeds
+    # only `camera.band_pitch`/`band_roll`, which `band_attitude` gates and
+    # that defaults false, so it buys nothing and costs frame time: an
+    # esm-only extraction scores 0.0229% / 0.0389%, matching the set that
+    # carries both.
+    road_step_esm: true
     # The step goes in as a prior and a gate on frames the map did not answer,
     # not as an overwrite. Overwriting the hop was measured and loses: the map's
     # hop is a pose *correction*, not a displacement, and rescaling it to a
