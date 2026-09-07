@@ -2489,6 +2489,50 @@ private:
   }
 
 
+  // The lattice unprojection does not depend on the candidate. `model.bearing`
+  // is a function of the pixel and the frame alone; only `inverse` changes from
+  // one warp to the next, and `build_warp_roi` runs about 27 times per solve
+  // per camera -- eight of them for a single Jacobian -- rebuilding this same
+  // lattice each time.
+  //
+  // Held per thread rather than in a member: each camera owns its callback
+  // group and the executor is multi-threaded, so the two run this at once on
+  // different models. Keyed by everything the values depend on, so a change of
+  // region, frame size, stride or lens rebuilds instead of reading a stale one.
+  const cv::Mat & warp_lattice(
+    const GroundModel & model, const cv::Rect & roi, int width, int height,
+    int cols, int rows) const
+  {
+    thread_local cv::Mat lattice;
+    thread_local cv::Rect cached_roi;
+    thread_local cv::Size cached_frame;
+    thread_local cv::Size cached_grid;
+    thread_local const GroundModel * cached_model = nullptr;
+    if (!lattice.empty() && cached_roi == roi &&
+      cached_frame == cv::Size(width, height) &&
+      cached_grid == cv::Size(cols, rows) && cached_model == &model)
+    {
+      return lattice;
+    }
+    lattice.create(rows, cols, CV_64FC3);
+    const double sx_step = static_cast<double>(roi.width) / cols;
+    const double sy_step = static_cast<double>(roi.height) / rows;
+    for (int r = 0; r < rows; ++r) {
+      auto * row = lattice.ptr<cv::Vec3d>(r);
+      const double y = roi.y + (r + 0.5) * sy_step - 0.5;
+      for (int c = 0; c < cols; ++c) {
+        const double x = roi.x + (c + 0.5) * sx_step - 0.5;
+        row[c] = model.bearing(
+          cv::Point2f(static_cast<float>(x), static_cast<float>(y)), width, height);
+      }
+    }
+    cached_roi = roi;
+    cached_frame = cv::Size(width, height);
+    cached_grid = cv::Size(cols, rows);
+    cached_model = &model;
+    return lattice;
+  }
+
   // Where each pixel of one region of the predicted frame came from, rather
   // than of the whole frame. Same coarse lattice as `build_warp`; the point is
   // that a candidate step costs one small region instead of 3.7 megapixels,
@@ -2509,17 +2553,15 @@ private:
     // it, not on a linspace across the region. Getting this wrong shifts the
     // whole map by half a lattice cell, which reads as several per cent of
     // step -- measured at +3.9% against +0.33% before the sampling was fixed.
-    const double sx_step = static_cast<double>(roi.width) / cols;
-    const double sy_step = static_cast<double>(roi.height) / rows;
+    const cv::Mat & lattice = warp_lattice(model, roi, width, height, cols, rows);
     for (int r = 0; r < rows; ++r) {
-      const double y = roi.y + (r + 0.5) * sy_step - 0.5;
+      const cv::Vec3d * ray = lattice.ptr<cv::Vec3d>(r);
+      float * dx = sx.ptr<float>(r);
+      float * dy = sy.ptr<float>(r);
       for (int c = 0; c < cols; ++c) {
-        const double x = roi.x + (c + 0.5) * sx_step - 0.5;
-        const cv::Vec3d b = inverse *
-          model.bearing(cv::Point2f(static_cast<float>(x), static_cast<float>(y)), width, height);
-        const cv::Point2f p = model.pixel(b, width, height);
-        sx.at<float>(r, c) = p.x;
-        sy.at<float>(r, c) = p.y;
+        const cv::Point2f p = model.pixel(inverse * ray[c], width, height);
+        dx[c] = p.x;
+        dy[c] = p.y;
       }
     }
     cv::resize(sx, map_x, roi.size(), 0, 0, cv::INTER_LINEAR);
@@ -3042,12 +3084,17 @@ private:
     // lattice and all removed, moved nothing, because the ESM overwrites the
     // search's answer with its own.
     ++patch_warps_;
-    cv::Mat map_x;
-    cv::Mat map_y;
+    // Reused across warps. `cv::resize` and `cv::remap` both call `create`,
+    // which is a no-op when the size and type already match, so the region's
+    // three buffers are allocated once a thread instead of once a warp -- and
+    // this runs about 27 times a solve. Thread-local for the same reason the
+    // lattice is: the two cameras are here at once.
+    thread_local cv::Mat map_x;
+    thread_local cv::Mat map_y;
     build_warp_roi(
       model, candidate[0], candidate[1], previous.cols, previous.rows, roi,
       map_x, map_y, candidate[2], candidate[3], road_step_fit_stride_);
-    cv::Mat warped;
+    thread_local cv::Mat warped;
     cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
     return normalise(warped, out);
   }
