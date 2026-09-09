@@ -899,6 +899,9 @@ public:
     // Coarse candidates, then the same count again over one coarse spacing.
     road_step_samples_ = declare_parameter<int>("road_step_samples", 13);
     road_step_stride_ = declare_parameter<int>("road_step_stride", 8);
+    road_step_cubic_map_ = declare_parameter<bool>("road_step_cubic_map", false);
+    road_step_visible_only_ =
+      declare_parameter<bool>("road_step_visible_only", false);
     // Across-track tiles, each answering on its own; the median is taken. 1
     // keeps the single-region search.
     road_step_tiles_ = declare_parameter<int>("road_step_tiles", 1);
@@ -1437,6 +1440,44 @@ private:
     // failed to track all agree on zero, so the vote is bimodal, and a window
     // around the last answer keeps the zero out of reach.
     stage.flow = lap();
+    // A synthetic pair, for asking whether the fit itself is biased.
+    //
+    // The previous frame is replaced by the current one warped backwards
+    // through the very homography the fit searches over, so the true motion is
+    // exactly `MONOSCALE_SYNTHETIC_STEP` metres of forward step with no turn
+    // and no tilt -- by construction inside the four-parameter family. A
+    // perfect aligner returns that number. Whatever it returns instead is the
+    // aligner's own bias, with the scene, the geometry and the calibration all
+    // held out.
+    //
+    // Built with `homography(s)` and not its inverse: `road_patch` maps a
+    // current pixel to its source in the previous frame with H^-1, so the
+    // frame that makes that exact is the current one sampled through H.
+    if (const char * synthetic = std::getenv("MONOSCALE_SYNTHETIC_STEP")) {
+      const auto found = models_.find(name);
+      if (found != models_.end() && found->second.ready && !gray.empty()) {
+        const double truth = std::atof(synthetic);
+        const cv::Matx33d forward =
+          found->second.homography(truth, 0.0, 0.0, 0.0, arc_hop_);
+        cv::Mat mx(gray.rows, gray.cols, CV_32F);
+        cv::Mat my(gray.rows, gray.cols, CV_32F);
+        for (int y = 0; y < gray.rows; ++y) {
+          float * px = mx.ptr<float>(y);
+          float * py = my.ptr<float>(y);
+          for (int x = 0; x < gray.cols; ++x) {
+            const cv::Vec3d b = forward * found->second.bearing(
+              cv::Point2f(static_cast<float>(x), static_cast<float>(y)),
+              gray.cols, gray.rows);
+            const cv::Point2f q = found->second.pixel(b, gray.cols, gray.rows);
+            px[x] = q.x;
+            py[x] = q.y;
+          }
+        }
+        cv::remap(gray, state.previous_gray, mx, my, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+        turn = 0.0;
+        turn_known = true;
+      }
+    }
     if (road_from_step_ && turn_known && !state.previous_gray.empty() &&
       state.previous_gray.size() == gray.size())
     {
@@ -1490,7 +1531,7 @@ private:
                 std::fprintf(
                   esm_sigma_file_,
                   "stamp,camera,step,search,sigma_step,sigma_yaw,sigma_pitch,"
-                  "sigma_roll,corr_step_pitch,score,reach,tilt_leak\n");
+                  "sigma_roll,corr_step_pitch,score,reach,tilt_leak,esm_yaw,turn_in\n");
               }
             }
             if (esm_sigma_file_ != nullptr && state.road_esm.covariance_ok) {
@@ -1501,13 +1542,15 @@ private:
               const double sp = root(c[0]) * root(c[7]);
               std::fprintf(
                 esm_sigma_file_,
-                "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.5f,%.4f,%.6f\n",
+                "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.5f,%.4f,%.6f,"
+                "%.9f,%.9f\n",
                 stamp, name.c_str(), state.road_esm.step, found * span, root(c[0]),
                 root(c[4]), root(c[7]), root(c[9]),
                 sp > 0.0 ? c[2] / sp : std::numeric_limits<double>::quiet_NaN(),
                 state.road_esm.score, reach,
                 state.road_esm.tilt_leak_ok ? state.road_esm.tilt_leak
-                : std::numeric_limits<double>::quiet_NaN());
+                : std::numeric_limits<double>::quiet_NaN(),
+                state.road_esm.yaw, turn);
               std::fflush(esm_sigma_file_);
             }
           }
@@ -2636,8 +2679,15 @@ private:
         dy[c] = p.y;
       }
     }
-    cv::resize(sx, map_x, roi.size(), 0, 0, cv::INTER_LINEAR);
-    cv::resize(sy, map_y, roi.size(), 0, 0, cv::INTER_LINEAR);
+    // Cubic, not linear. What is being interpolated here is not an image, it
+    // is the warp -- a smooth composition of the fisheye and the homography --
+    // and the lattice samples it exactly. Joining those samples with straight
+    // lines leaves the second-order term, which over eight pixels is a
+    // systematic sub-pixel offset with a fixed sign inside each cell, and that
+    // is a *bias*, not noise. Cubic leaves the fourth-order term instead.
+    const int kernel = road_step_cubic_map_ ? cv::INTER_CUBIC : cv::INTER_LINEAR;
+    cv::resize(sx, map_x, roi.size(), 0, 0, kernel);
+    cv::resize(sy, map_y, roi.size(), 0, 0, kernel);
   }
 
   // How well the road lands on itself if the vehicle stepped this far, once per
@@ -2877,6 +2927,47 @@ private:
   // and why that camera uses a third of the band it is given. A photometric
   // score needs no corner. It asks whether the whole region lands on itself,
   // which is the one question thousands of ambiguous pixels can answer together.
+  // Trim the region to the rows whose source is still inside the frame.
+  //
+  // The warp asks where each current pixel was in the previous frame. On a
+  // mount whose ground recedes -- the rear one, going forwards -- the bottom
+  // rows were *below* the frame a hop ago, and `BORDER_REPLICATE` invents them
+  // by smearing the last row. Invented pixels do not move with the step, so
+  // they pull the fit toward zero and they do it with a fixed sign: measured
+  // on straight120_v2 the last 3% of the rear's rows take its bias from
+  // -0.023% to -0.200%.
+  //
+  // Cut where the geometry says to cut, not at a number. The source row is
+  // computed for the seeded step, so the trim follows the speed by itself and
+  // costs no parameter. Taken once per frame from the seed rather than per
+  // candidate, because the region has to be the same for every candidate or
+  // their costs are not comparable.
+  cv::Rect trim_to_visible(
+    const GroundModel & model, const cv::Rect & roi, double step, double turn,
+    int width, int height) const
+  {
+    if (roi.height < 8) {
+      return roi;
+    }
+    const cv::Matx33d inverse = model.homography(step, turn, 0.0, 0.0, arc_hop_).inv();
+    const double centre_x = roi.x + 0.5 * roi.width;
+    int keep = roi.height;
+    for (int y = roi.height - 1; y >= 0; --y) {
+      const cv::Vec3d b = inverse * model.bearing(
+        cv::Point2f(static_cast<float>(centre_x), static_cast<float>(roi.y + y)),
+        width, height);
+      const cv::Point2f p = model.pixel(b, width, height);
+      if (p.y <= height - 1.0 && p.y >= 0.0 && p.x >= 0.0 && p.x <= width - 1.0) {
+        break;
+      }
+      keep = y;
+    }
+    if (keep < 32 || keep == roi.height) {
+      return cv::Rect(roi.x, roi.y, roi.width, std::max(keep, 32));
+    }
+    return cv::Rect(roi.x, roi.y, roi.width, keep);
+  }
+
   double measure_step_photometric(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double reach, double centre, bool have_centre,
@@ -2884,12 +2975,17 @@ private:
     int * votes = nullptr, double * peak_score = nullptr,
     double * spread = nullptr) const
   {
-    const cv::Rect roi = cv::Rect(
+    cv::Rect roi = cv::Rect(
       cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
       cv::Point(cvRound(band[2] * current.cols), cvRound(band[3] * current.rows))) &
       cv::Rect(0, 0, current.cols, current.rows);
     if (roi.width < 32 || roi.height < 32) {
       return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (road_step_visible_only_) {
+      roi = trim_to_visible(
+        model, roi, (have_centre ? centre : 0.0) * std::max(reach, 1e-3), turn,
+        current.cols, current.rows);
     }
     const double span = std::max(reach, 1e-3);
     // Each candidate is warped once; the whole-region score and the per-tile
@@ -3285,10 +3381,13 @@ private:
   {
     RoadSolve out;
     ++fit_solves_;
-    const cv::Rect roi = cv::Rect(
+    cv::Rect roi = cv::Rect(
       cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
       cv::Point(cvRound(band[2] * current.cols), cvRound(band[3] * current.rows))) &
       cv::Rect(0, 0, current.cols, current.rows);
+    if (road_step_visible_only_) {
+      roi = trim_to_visible(model, roi, seed_step, turn, current.cols, current.rows);
+    }
     if (roi.width < 32 || roi.height < 32) {
       return out;
     }
@@ -4389,6 +4488,8 @@ private:
   std::map<std::string, std::array<double, 4>> road_bands_;
   int road_step_samples_ = 13;
   int road_step_stride_ = 8;
+  bool road_step_cubic_map_ = false;
+  bool road_step_visible_only_ = false;
   int road_step_tiles_ = 1;
   std::string road_step_dump_;
   std::mutex road_step_lock_;
