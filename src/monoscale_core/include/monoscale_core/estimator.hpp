@@ -196,7 +196,6 @@ struct EstimatorSettings
   // Seed the anchor alignment with the previous hop instead of the median vote.
   bool align_seed_from_last_hop = false;
   int align_restarts = 1;
-  double align_ambiguity_ratio = 0.0;
   int ground_min_inliers = 24;
   double max_scale_error = 0.08;
   double max_translation_per_frame_m = 1.0;
@@ -355,7 +354,6 @@ struct EstimatorSettings
   // Everything in it is observable: eps_i is how far camera i's hop reads
   // against the fused one, x_i is the mount, and the weights are the fusion's
   // own. 1.0 subtracts the whole prediction.
-  double camera_split_lever = 0.0;
   // Restrict the solve to a rectangle of the frame, in fractions of width and
   // height. Diagnostic: if the projection from pixels to metres were exact,
   // every region of the image would produce the same hop. Where they differ,
@@ -380,11 +378,9 @@ struct EstimatorSettings
   // ten times higher. That ratio is the weight; the number of points is only
   // what it takes to define the warp. Replicating a grid to buy weight instead
   // would be forging it.
-  double road_point_weight = 1.0;
   // Restore the old inverse-square weighting of anchor sightings, as a power
   // on range. 0 uses the geometry instead, which is the default and the
   // correct model -- see `update_anchors`.
-  double anchor_information_power = 0.0;
   // Weigh anchors in the registration by information rather than sightings.
   bool anchor_weight_by_information = false;
   double anchor_lookahead_m = 0.0;
@@ -622,7 +618,6 @@ struct EstimatorSettings
   bool anchor_link_measure_only = false;
   double ground_plane_offset_m = 0.0;
   // A common ratio applied to every camera's range after the plane offset.
-  double ground_common_scale = 1.0;
   double pair_scale_gain = 0.0;
   double pitch_centre_x_m = 0.0;
   // Let the body tilt move the camera's height over the road. True is what the
@@ -718,7 +713,6 @@ struct EstimatorSettings
 
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.
-  double camera_disagreement_weight = 1.0;
   double single_camera_variance = 0.5;
   bool fuse_cameras_by_spread = false;
 };

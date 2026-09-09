@@ -246,7 +246,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.range_scale_gain = declare_double("range_scale_gain", 0.0);
   settings.align_seed_from_last_hop = declare_bool("align_seed_from_last_hop", false);
   settings.align_restarts = declare_int("align_restarts", 1);
-  settings.align_ambiguity_ratio = declare_double("align_ambiguity_ratio", 0.0);
   settings.ground_min_inliers = declare_int("ground_min_inliers", 24);
   settings.max_scale_error = declare_double("max_scale_error", 0.08);
   settings.max_translation_per_frame_m = declare_double("max_translation_per_frame_m", 1.0);
@@ -342,9 +341,6 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_int("anchor_polar_rings", 4);
   settings.anchor_polar_quota =
     declare_int("anchor_polar_quota", 0);
-  settings.camera_split_lever = declare_double("camera_split_lever", 0.0);
-  settings.road_point_weight = declare_double("road_point_weight", 1.0);
-  settings.anchor_information_power = declare_double("anchor_information_power", 0.0);
   settings.anchor_weight_by_information = declare_bool("anchor_weight_by_information", false);
   settings.anchor_lookahead_m = declare_double("anchor_lookahead_m", 0.0);
   settings.anchor_lookahead_sec = declare_double("anchor_lookahead_sec", 0.0);
@@ -423,8 +419,6 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_bool("anchor_link_measure_only", false);
   settings.ground_plane_offset_m =
     declare_double("ground_plane_offset_m", 0.0);
-  settings.ground_common_scale =
-    declare_double("ground_common_scale", 1.0);
   settings.pair_scale_gain = declare_double("pair_scale_gain", 0.0);
   settings.pitch_centre_x_m = declare_double("pitch_centre_x_m", 0.0);
   settings.ground_height_from_tilt =
@@ -541,7 +535,6 @@ Configuration declare_and_read(rclcpp::Node & node)
 
   // How hard front/rear disagreement counts against a solve, and the penalty
   // when only one camera produced an answer at all.
-  settings.camera_disagreement_weight = declare_double("camera_disagreement_weight", 1.0);
   settings.single_camera_variance = declare_double("single_camera_variance", 0.5);
   settings.fuse_cameras_by_spread = declare_bool("fuse_cameras_by_spread", false);
 

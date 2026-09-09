@@ -69,6 +69,22 @@
     # esm-only extraction scores 0.0229% / 0.0389%, matching the set that
     # carries both.
     road_step_esm: true
+    # Interpolate the warp map cubically, on a stride-4 lattice.
+    #
+    # The map is the fisheye composed with the homography and it is curved over
+    # a lattice cell, so joining exact samples with straight lines leaves the
+    # second-order term with a fixed sign inside every cell -- a bias of about a
+    # tenth of a pixel, reading opposite ways on the two mounts because their
+    # ground flows opposite ways. Synthetic pair, front camera, 61.5 mm of step:
+    # the aligner's own bias is -0.501% at stride 8 linear and +0.018% here.
+    #
+    # Cubic leaves O(h^4) where linear leaves O(h^2), so halving the stride from
+    # 8 to 4 buys sixteenfold and the pair together is better than no lattice at
+    # all (stride 1 reads -0.026 mm against +0.0095 mm here) at half the cost.
+    # `road` goes 6.5 ms a camera to 8.1.
+    road_step_cubic_map: true
+    road_step_fit_stride: 4
+    road_step_stride: 4
     # Coarse candidates, and the same count again over one coarse spacing.
     #
     # 13 was chosen when the search's answer was the answer. It is not any
@@ -1200,9 +1216,24 @@
     # with this block   0.0256  (worst 0.1034)
     # ------------------------------------------------------------------
 
-    # The scale the photometric step is accumulated at. 1.00133 is dominated on
-    # every metric; the pair either side of unity is where the sweep sits.
-    photometric_scale: 0.99867
+    # The scale the photometric step is accumulated at, and the one fitted
+    # multiplier left in this file.
+    #
+    # It is kept because removing it costs, not because it is understood: 1.0
+    # takes ATE/거리 from 0.0254% to 0.0547% and the final error from 0.0290%
+    # to 0.0971%, so it is correcting something real that has not been named.
+    # Every other free multiplier here was measured against unity and either
+    # made no difference or lost -- `road_point_weight`, `align_ambiguity_ratio`,
+    # `camera_disagreement_weight` were identical to four figures,
+    # `ground_common_scale` was a net loss, and `anchor_information_power`
+    # replaced a derived law with a fitted exponent. They are gone.
+    #
+    # Re-tuned for the corrected warp. 0.99867 was chosen by a 13k sweep against
+    # a front/rear bias of -0.379%/+0.250% that the cubic map interpolation
+    # removed; the bias is now +0.147%/-0.200% and the optimum moved with it, to
+    # 0.9988. That the optimum moved when the measurement's bias moved is the
+    # direct evidence that this constant was covering the warp.
+    photometric_scale: 0.9988
     photometric_min_score: 0.0
 
     # Attitude from the anchors' displacement on the projection surface rather
@@ -1214,12 +1245,10 @@
     # count. The counts are 645-920 either way and say almost nothing about
     # which answer is better; the spread does.
     fuse_cameras_by_spread: true
-    camera_disagreement_weight: 2.0
     single_camera_variance: 0.5
 
     # A road-warp point is placed by a fit over a whole region, a corner by one
     # patch of flow. Two to one is the sweep's reading of that difference.
-    road_point_weight: 2.0
 
     ground_pair_passes: 2
     fusion_model: velocity
@@ -1246,14 +1275,10 @@
     # `anchor_weight_by_variance` is the one qualitatively new element: it was
     # written in 1c3f002 and had never been in any sweep's axis list, and it
     # appears in every one of the top ten combinations.
-    align_ambiguity_ratio: 1.2
-    anchor_information_power: 1.0
     anchor_initial_variance: 0.09
     anchor_link_rebind_grace: 60
     anchor_weight_by_variance: true
-    camera_split_lever: 1.0
     fusion_gain_mode: 0
-    ground_common_scale: 1.00066
     ground_height_from_tilt: false
     map_correction_gain: 1.0
 

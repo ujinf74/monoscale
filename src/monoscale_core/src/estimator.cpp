@@ -530,26 +530,8 @@ Estimator::Estimator(const EstimatorSettings & settings)
         camera->settings.range_scale = height / left;
       }
     }
-  }  if (settings.ground_common_scale != 1.0) {
-    // A ratio, not a length. The plane offset above is a common *distance* --
-    // the road sits that far above the datum the mounts are measured from --
-    // and it divides by the height, so it gives the two cameras a bias in the
-    // ratio 1/0.89 to 1/1.26, which is 1.42. What is actually left over is in
-    // the ratio 1.10, measured on three straights: 0.262/0.237, 0.271/0.255,
-    // 0.325/0.289. That is a common *fraction*, which no offset can express and
-    // which the same three candidates separate cleanly -- a common length
-    // predicts 1.42, a body pitch predicts -1.00, and a fraction predicts 1.00.
-    //
-    // Its likely name is the lens: the rotation channel, which does not depend
-    // on depth and so cannot confuse a focal length with a plane, measures the
-    // model's focal length 0.42% large. Applied here rather than to `k` because
-    // the tracks are already extracted against the recorded camera_info, and
-    // because a scale is what the projection wants -- the bearing correction
-    // would have to be re-run through the tracker.
-    for (auto & camera : cameras_) {
-      camera->settings.range_scale *= settings.ground_common_scale;
-    }
   }
+
 
   map_ready_ = !settings.require_map_before_translating;
 }
@@ -1465,9 +1447,12 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   const double lens_height = camera.model.translation_base_from_camera.z();
   // A road-warp point is worth more than a corner because it is placed by a
   // fit over the whole region rather than by one patch of flow.
-  const auto identity_weight = [&](Eigen::Index i) {
-      return track_ids(i) >= kRoadIdentity ? settings_.road_point_weight : 1.0;
-    };
+  // Every point weighs the same. A road-warp point comes from a fit over a
+  // whole region and a corner from one patch of flow, which is a real
+  // difference -- but the 2:1 that stood here was the sweep's reading of it,
+  // and 2.0 against 1.0 is identical on every metric to four figures. It was
+  // an axis that measured nothing.
+  const auto identity_weight = [](Eigen::Index) {return 1.0;};
   const auto range_weight = [&](double x, double y) {
       if (settings_.range_weight_power <= 0.0) {
         return 1.0;
@@ -1709,7 +1694,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         road_centre.has_value() ? &*road_centre
         : (settings_.align_seed_from_last_hop && camera.last_translation.has_value()
         ? &*camera.last_translation : nullptr),
-        settings_.align_restarts, settings_.align_ambiguity_ratio,
+        settings_.align_restarts, 1.0,
         gate_centre.has_value() ? &*gate_centre : nullptr,
         settings_.inertial_gate_m, scale,
         settings_.anchor_bearing_nonholonomic,
@@ -1848,7 +1833,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     current_ground(i, 1) = solved.current_ground(pairs[static_cast<size_t>(i)], 1);
   }
   Weights pair_weights;
-  if (settings_.range_weight_power > 0.0 || settings_.road_point_weight != 1.0) {
+  if (settings_.range_weight_power > 0.0) {
     pair_weights.resize(paired);
     for (Eigen::Index i = 0; i < paired; ++i) {
       pair_weights(i) = range_weight(current_ground(i, 0), current_ground(i, 1)) *
@@ -2624,7 +2609,11 @@ void Estimator::process_pair()
   // summed with the weights the fusion used. Taken off before anything else
   // touches the hop, because it is an error in the measurement rather than in
   // what the measurement is compared against.
-  if (settings_.camera_split_lever != 0.0 && motion.has_value() && motions.size() >= 2) {
+  // Applied as derived, with no coefficient in front of it. `camera_split_lever`
+  // stood here at 1.0, which is the derivation itself; the number existed only
+  // so a sweep could move it, and a sweep that moves a derived term is fitting
+  // the derivation away.
+  if (motion.has_value() && motions.size() >= 2) {
     const double reach = std::hypot(motion->x, motion->y);
     double total = 0.0;
     double lever = 0.0;
@@ -2645,7 +2634,7 @@ void Estimator::process_pair()
       total += weight;
     }
     if (total > 0.0) {
-      motion->y -= settings_.camera_split_lever * motion->yaw * lever / total;
+      motion->y -= motion->yaw * lever / total;
     }
   }
 
@@ -2754,7 +2743,10 @@ void Estimator::process_pair()
     // The disagreement between the two cameras is already a distance, so here
     // it needs no division to become a variance.
     double extra = motions.size() >= 2
-      ? std::pow(settings_.camera_disagreement_weight * disagreement, 2)
+      // The disagreement itself, with no multiplier. 2.0 stood here and is
+      // identical to 1.0 on every metric to four figures -- the axis measured
+      // nothing, and what it was multiplying is already a variance.
+      ? disagreement * disagreement
       : settings_.single_camera_variance * dt * dt;
     // Inlier-weighted spread across whichever cameras reported one.
     double spread = 0.0;
@@ -2817,7 +2809,7 @@ void Estimator::process_pair()
       // Disagreement is a translation over dt, so as a velocity variance it is
       // (d/dt)^2.
       const double extra = motions.size() >= 2
-        ? std::pow(settings_.camera_disagreement_weight * disagreement / dt, 2)
+        ? std::pow(disagreement / dt, 2)
         : settings_.single_camera_variance;
       if (!velocity_filter_.update(*measured, motion->inliers, extra)) {
         ++diagnostics_.filter_rejections;
@@ -3540,10 +3532,14 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
       // The offset is the camera, not the vehicle: range is measured from the
       // lens that saw the point.
       const double range = std::hypot(body(n, 0) - mount.x(), body(n, 1) - mount.y());
-      if (settings_.anchor_information_power > 0.0) {
-        information(n) =
-          1.0 / std::pow(std::max(range, 0.1), settings_.anchor_information_power);
-      } else {
+      // The derived sensitivity, not a fitted power of the range.
+      //
+      // A step moves a ground point's bearing by h/(R^2 + h^2) -- the same
+      // expression the projection Jacobian gives -- so that is what a point at
+      // range R is worth. `anchor_information_power` selected a free exponent
+      // on 1/R instead, and the deployed 1.0 chose it. A sweep that fits an
+      // exponent where a derivation exists is fitting the derivation away.
+      {
         const double reach = std::max(range, 0.1);
         const double scale = height / (reach * reach + height * height);
         information(n) = scale * scale;

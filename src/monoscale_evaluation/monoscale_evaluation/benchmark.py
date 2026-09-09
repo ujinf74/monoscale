@@ -125,11 +125,21 @@ def hop_summary(estimate: np.ndarray, truth: np.ndarray) -> Dict[str, float]:
     hops = len(along)
     expected = math.hypot(float(along.std()), float(across.std())) * math.sqrt(hops / 2.0)
     absolute = float(np.sqrt(np.mean(np.sum((estimate - truth) ** 2, axis=1))))
+    # Where the estimate ends up, against where the vehicle ended up. ATE is an
+    # RMS over the whole path, so a run that wanders out and back scores the
+    # same as one that leaves and stays; this says which. It is also the number
+    # a drift correction is supposed to move, and the one RPE cannot see -- RPE
+    # is windowed and by construction blind to anything that accumulates past
+    # its longest window.
+    final = float(np.linalg.norm(estimate[-1] - truth[-1]))
+    travelled = float(distance.sum())
     return {
         'hop': 100.0 * float(np.median(np.abs(along) / distance)),
         'walk': absolute / max(expected, 1e-9),
         'ate': absolute,
-        'distance': float(distance.sum()),
+        'final': final,
+        'finalpct': 100.0 * final / max(travelled, 1e-9),
+        'distance': travelled,
     }
 
 
@@ -165,7 +175,7 @@ def _headline(scored: Dict[str, Dict], pick) -> Optional[Tuple[float, float]]:
 
 def report(scored: Dict[str, Dict]) -> None:
     header = ''.join(f'{"RPE" + str(int(n)):>8}' for n in SEGMENT_LENGTHS)
-    print(f'{"drive":11}{"거리":>7}{header}{"hop%":>8}{"walk":>7}{"ATE":>9}')
+    print(f'{"drive":11}{"거리":>7}{header}{"hop%":>8}{"walk":>7}{"ATE":>9}{"끝오차":>9}')
     for name, entry in scored.items():
         cells = ''.join(
             f'{entry["segments"][n]:8.3f}' if entry['segments'][n] is not None
@@ -175,6 +185,7 @@ def report(scored: Dict[str, Dict]) -> None:
         print(
             f'{name:11}{entry["distance"]:7.0f}{cells}'
             f'{entry["hop"]:8.2f}{entry["walk"]:7.2f}{entry["ate"]:9.4f}'
+            f'{entry["final"]:9.4f}'
         )
     print()
     for length in SEGMENT_LENGTHS:
@@ -183,7 +194,8 @@ def report(scored: Dict[str, Dict]) -> None:
             continue
         mean, worst = found
         print(f'  RPE {int(length):2d}m   평균 {mean:6.3f}%   최악 {worst:6.3f}%')
-    for key, label, width in (('hop', 'hop%', 2), ('walk', 'walk', 2), ('ate', 'ATE', 4)):
+    for key, label, width in (
+        ('hop', 'hop%', 2), ('walk', 'walk', 2), ('ate', 'ATE', 4), ('final', '끝오차', 4)):
         mean, worst = _headline(scored, lambda e, k=key: e[k])
         print(f'  {label:8} 평균 {mean:6.{width}f}   최악 {worst:6.{width}f}')
     found = _headline(
@@ -192,6 +204,10 @@ def report(scored: Dict[str, Dict]) -> None:
     if found is not None:
         mean, worst = found
         print(f'  ATE/거리  평균 {mean * 100:6.4f}%   최악 {worst * 100:6.4f}%')
+    found = _headline(scored, lambda e: e['finalpct'] / 100.0)
+    if found is not None:
+        mean, worst = found
+        print(f'  끝오차/거리 평균 {mean * 100:6.4f}%   최악 {worst * 100:6.4f}%')
     spread = [
         scored[k]['segments'][SEGMENT_LENGTHS[0]] for k in REPEATS
         if k in scored and scored[k]['segments'][SEGMENT_LENGTHS[0]] is not None
