@@ -2264,8 +2264,34 @@ void Estimator::process_pair()
       ++road_cameras;
     }
   }
-  // Evenly, and that is not a default -- it is the only weighting available,
-  // and it is spent on the one direction it can cancel.
+  // Evenly. What that is worth, and what it is not, measured against truth
+  // rather than through ATE -- each camera's photometric step over the truth
+  // displacement of the same hop:
+  //
+  //   drive   front     rear     even    zeroing w   corr(err_f, err_r)
+  //   str_v2  -0.379%  +0.250%  -0.061%    0.398          +0.16
+  //   str_1.5 -0.450%  +0.709%  +0.138%    0.611          +0.16
+  //   str_8.0 -0.030%  +0.433%  +0.210%    0.935          +0.07
+  //   curve05 -0.425%  +0.787%  +0.189%    0.649          +0.97
+  //   curve20 -0.969%  +0.384%  -0.298%    0.284          +0.97
+  //
+  // The front reads short and the rear long on every drive, and averaging
+  // takes 0.4-1.0% down to 0.06-0.30%. That is what the even weight buys.
+  //
+  // It is not `w'g = 0` against a nuisance the two share. If a common `dc`
+  // entered with opposite `g`, the two errors would be *anti*correlated; they
+  // are positively correlated on every drive, +0.97 on the slaloms. So the
+  // structure is two things at once: opposite static offsets, which averaging
+  // reduces, and a same-sign common fluctuation -- the signature of a pure
+  // scale error, height or focal -- which no weighting can touch. On the
+  // straights the two cameras are nearly independent (+0.07 to +0.16) and the
+  // average is doing what an average of two noisy measurements does.
+  //
+  // The weight that would zero the bias is 0.28 to 0.94 and different on every
+  // drive, so there is no single weight that removes it. `photometric_scale`
+  // is the constant that was fitted to what is left: -0.133% against a
+  // per-drive spread of 0.5 percentage points, four times the correction. It
+  // is right on the set and wrong on each drive in it.
   //
   // Two cameras give `w` two degrees of freedom. `w'1 = 1` spends one. The
   // second is spent by `w'g = 0`, where `g` is the direction a nuisance common
