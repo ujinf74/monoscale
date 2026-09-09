@@ -134,6 +134,12 @@ void fill_covariance(nav_msgs::msg::Odometry & odometry, const monoscale::Update
 
 }  // namespace
 
+// Closes the four-parameter road fit's sub-block. Defined in
+// `feature_tracker.cpp` as `kEsmMarker`; duplicated here rather than shared,
+// because the tracker does not depend on monoscale_core -- the same way the
+// parallax marker below is duplicated. Keep the two in step.
+constexpr double kEsmMarker = -8.126e7;
+
 class OdometryNode : public rclcpp::Node
 {
 public:
@@ -329,10 +335,17 @@ private:
         frame.band_near_forward = data[after + 13];
         frame.band_far_forward = data[after + 14];
       }
-      if (data.size() > after + 17) {
+      // The fit's sub-block is closed by a marker. Without it a length test
+      // cannot tell three body angles from the first three values of whatever
+      // block follows -- see the note where this is written.
+      if (data.size() > after + 28 && data[after + 28] == kEsmMarker) {
         frame.esm_yaw = data[after + 15];
         frame.esm_pitch = data[after + 16];
         frame.esm_roll = data[after + 17];
+        for (size_t i = 0; i < frame.esm_covariance.size(); ++i) {
+          frame.esm_covariance[i] = data[after + 18 + i];
+        }
+        frame.esm_covariance_valid = std::isfinite(frame.esm_covariance[0]);
       }
     }
     ++received_[camera];

@@ -770,6 +770,15 @@ struct TrackFrame
   double esm_yaw = std::numeric_limits<double>::quiet_NaN();
   double esm_pitch = std::numeric_limits<double>::quiet_NaN();
   double esm_roll = std::numeric_limits<double>::quiet_NaN();
+  // Upper triangle of the fit's covariance over (step, yaw, pitch, roll),
+  // row-major: 00 01 02 03 11 12 13 22 23 33. Uncalibrated -- the fit's own
+  // sigma runs about 4.3x optimistic against what the two cameras' hops
+  // disagree by, because a road patch's pixels are not independent samples.
+  // The shape is what it carries honestly: step and pitch come back correlated
+  // at 0.92 to 0.96, which is why holding pitch at zero puts a pitch error
+  // straight into the step.
+  std::array<double, 10> esm_covariance{};
+  bool esm_covariance_valid = false;
   // How distinct each feature is against its surroundings, from the tracker's
   // corner response. Empty when the tracker is not publishing it, which is the
   // default and what every measurement before this was taken with.
@@ -1064,6 +1073,12 @@ struct Diagnostics
     kAnchorAttitude,
     kConsumerCount
   };
+  // Frames on which the road fit's covariance arrived. The fit computes it
+  // and the tracker publishes it behind a marker; nothing here reads it as a
+  // weight yet, so this is the only thing that would notice if the block
+  // stopped coming.
+  int64_t esm_covariance_frames = 0;
+  int64_t esm_frames = 0;
   std::array<int64_t, kConsumerCount> consumer_armed{};
   std::array<int64_t, kConsumerCount> consumer_fed{};
   static const char * consumer_name(int which)

@@ -196,6 +196,12 @@ double stamp_of(const std_msgs::msg::Header & header)
   return header.stamp.sec + header.stamp.nanosec * 1e-9;
 }
 
+// Closes the four-parameter road fit's sub-block. Defined in
+// `feature_tracker.cpp` as `kEsmMarker`; duplicated here rather than shared,
+// because the tracker does not depend on monoscale_core -- the same way the
+// parallax marker below is duplicated. Keep the two in step.
+constexpr double kEsmMarker = -8.126e7;
+
 // The tracker's flat layout:
 //   [stamp, count, width, height, id, prev_x, prev_y, cur_x, cur_y, ...]
 bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::TrackFrame & out)
@@ -277,10 +283,19 @@ bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::T
       out.band_near_forward = data[after + 13];
       out.band_far_forward = data[after + 14];
     }
-    if (data.size() > after + 17) {
+    // The fit's sub-block is closed by a marker. Without it a length test
+    // cannot tell three body angles from the first three values of whatever
+    // block follows -- see the note where this is written.
+    if (data.size() > after + 28 && data[after + 28] == kEsmMarker) {
       out.esm_yaw = data[after + 15];
       out.esm_pitch = data[after + 16];
       out.esm_roll = data[after + 17];
+      bool measured = true;
+      for (size_t i = 0; i < out.esm_covariance.size(); ++i) {
+        out.esm_covariance[i] = data[after + 18 + i];
+      }
+      measured = std::isfinite(out.esm_covariance[0]);
+      out.esm_covariance_valid = measured;
     }
   }
   return true;
@@ -1532,6 +1547,14 @@ int main(int argc, char ** argv)
     std::printf(
       "필터: 마지막 NIS=%.3f  게이트기각=%ld  버림=%ld\n",
       diagnostics.last_nis, diagnostics.filter_rejections, diagnostics.filter_dropped);
+  }
+
+  if (diagnostics.esm_frames > 0) {
+    std::printf(
+      "적합 공분산: %ld/%ld 프레임 도착 (%.1f%%)\n",
+      diagnostics.esm_covariance_frames, diagnostics.esm_frames,
+      100.0 * static_cast<double>(diagnostics.esm_covariance_frames) /
+      static_cast<double>(diagnostics.esm_frames));
   }
 
   // Anything switched on here that never received what it consumes. Printed

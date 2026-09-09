@@ -621,6 +621,10 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
   if (std::isfinite(incoming.esm_yaw) && std::isfinite(incoming.esm_pitch) &&
     std::isfinite(incoming.esm_roll))
   {
+    ++diagnostics_.esm_frames;
+    if (incoming.esm_covariance_valid) {
+      ++diagnostics_.esm_covariance_frames;
+    }
     camera.esm_yaw_since_solve += incoming.esm_yaw;
     camera.esm_pitch_since_solve += incoming.esm_pitch;
     camera.esm_roll_since_solve += incoming.esm_roll;

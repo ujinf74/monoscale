@@ -4189,10 +4189,26 @@ private:
       // when the solve was asked for: with `road_step_esm` off the message is
       // the message it always was, byte for byte. NaN inside that when the fit
       // failed to beat its own seed and the search's answer was kept.
+      // Then what the fit thinks those four are worth: the upper triangle of
+      // its covariance over (step, yaw, pitch, roll), ten values, and a marker
+      // to close the sub-block.
+      //
+      // The marker is not decoration. This block used to be three values
+      // guarded by nothing but a length test on the far side, and the clarity
+      // block follows it in the same array -- so a reader asking "are there at
+      // least eighteen values here" gets yes from clarity when the fit is off,
+      // and reads three clarity numbers as three body angles. It has never
+      // happened, because `publish_clarity` defaults false and is not in the
+      // deployed file, but nothing prevented it. A reader that checks for the
+      // marker cannot be fooled by either block, whatever is switched on.
       if (road_step_esm_) {
         out.data.push_back(esm.yaw);
         out.data.push_back(esm.pitch);
         out.data.push_back(esm.roll);
+        for (const double value : esm.covariance) {
+          out.data.push_back(esm.covariance_ok ? value : kNotMeasured);
+        }
+        out.data.push_back(kEsmMarker);
       }
     }
     // The clarity block, last, with its own length after it. Everything before
@@ -4246,6 +4262,10 @@ private:
   // 2^53 the float64 message carries exactly.
   // Distinctive enough that no pixel, step or identity can be mistaken for it.
   static constexpr double kParallaxMarker = -8.125e7;
+  // Closes the four-parameter fit's sub-block, so a reader can tell it from
+  // whatever else happens to follow the photometric block.
+  static constexpr double kEsmMarker = -8.126e7;
+  static constexpr double kNotMeasured = std::numeric_limits<double>::quiet_NaN();
   static constexpr int64_t kRoadIdentityBase = 1LL << 40;
   int64_t road_next_identity_ = kRoadIdentityBase;
   int max_features_;
