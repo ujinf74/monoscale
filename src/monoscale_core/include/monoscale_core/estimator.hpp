@@ -98,6 +98,11 @@ struct EstimatorSettings
   // The initial heading still comes from the orientation, once, which is the
   // stationary alignment any real system performs before it moves.
   bool imu_yaw_from_gyro = false;
+  // Take the map's answer as a statement about where the vehicle is, with a
+  // covariance, instead of as a hop folded into the displacement.
+  bool map_as_factor = false;
+  // Fallback spread for an alignment that reported none, in metres.
+  double map_factor_sigma_m = 0.05;
   // Weight the two cameras' photometric lengths so the tilt they report
   // cancels, instead of averaging them evenly.
   bool photometric_null_tilt = false;
@@ -1088,6 +1093,12 @@ struct Diagnostics
   // last such weight.
   int64_t photometric_nulled = 0;
   double photometric_null_weight = 0.0;
+  int64_t map_factor_updates = 0;
+  double map_factor_innovation = 0.0;
+  double map_factor_own = 0.0;
+  double map_factor_sigma = 0.0;
+  double map_factor_nis = 0.0;
+  double map_factor_gain = 0.0;
   int64_t esm_covariance_frames = 0;
   int64_t esm_frames = 0;
   std::array<int64_t, kConsumerCount> consumer_armed{};
@@ -1262,6 +1273,10 @@ private:
   // on. Nothing trims it: the bias filter that used to is gone, because the
   // bias it was built for was a recording artefact and estimating one that is
   // not there costs 14x.
+  // How far the map factor's two covariances are out, learned from the
+  // innovation. One if they are honest.
+  double map_innovation_nis_ = 1.0;
+  int64_t map_innovation_samples_ = 0;
   double gyro_yaw_ = 0.0;
   std::optional<double> gyro_yaw_stamp_;
   struct AccelerationSample

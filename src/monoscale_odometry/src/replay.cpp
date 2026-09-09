@@ -1555,6 +1555,16 @@ int main(int argc, char ** argv)
       "기울기 소거 가중: %ld 회, 마지막 %.4f\n",
       diagnostics.photometric_nulled, diagnostics.photometric_null_weight);
   }
+  if (diagnostics.map_factor_updates > 0) {
+    std::printf(
+      "지도 factor: %ld 회, 마지막 이득 %.4f, 평균 혁신 %.2f mm, "
+      "포즈 sigma %.2f mm, 지도 sigma %.2f mm, NIS %.2f\n",
+      diagnostics.map_factor_updates, diagnostics.map_factor_gain,
+      1000.0 * diagnostics.map_factor_innovation / diagnostics.map_factor_updates,
+      1000.0 * diagnostics.map_factor_own / diagnostics.map_factor_updates,
+      1000.0 * diagnostics.map_factor_sigma / diagnostics.map_factor_updates,
+      diagnostics.map_factor_nis);
+  }
   if (diagnostics.esm_frames > 0) {
     std::printf(
       "적합 공분산: %ld/%ld 프레임 도착 (%.1f%%)\n",
