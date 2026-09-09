@@ -1287,14 +1287,16 @@
     # 1.3992 m ahead of the rear axle, the same 1.399 m the frame-tree audit
     # measured from the other side.
     #
-    # It changes nothing today and cannot: a sweep from -1.0 to 3.0 m gives ATE
-    # identical to four decimals on all nine drives. The pivot's only
-    # first-order effect is vertical, x_p*sin t against x_p*(1 - cos t)
-    # horizontally, and the vertical is not on the path while the tilt is the
-    # camera's angle against the road. That is exactly why it is safe to write
-    # the measured value now: turning the vertical on later with this still at
-    # zero would wake the lever up 1.9 m wrong.
-    pitch_centre_x_m: 1.4
+    # It changed nothing on the nine drives -- a sweep from -1.0 to 3.0 m gave
+    # ATE identical to four decimals -- because the pivot's only first-order
+    # effect is vertical, and nothing was reading the vertical. Something is
+    # now: `photometric_null_tilt` needs the lever `-(x_cam - x_pivot)/h`, and
+    # at 1.8992 that term is three quarters of the whole column. It also does
+    # nothing on these recordings for a second reason, below.
+    #
+    # The value was 1.4 while this note argued for 1.8992, which is the read
+    # rather than a fit. Corrected.
+    pitch_centre_x_m: 1.8992
     # Solve on every sixteenth pair. Tracking runs on every frame regardless,
     # so this sets how far apart the two views a solve compares are, not how
     # much of the camera is thrown away. At 2 m/s and 60 Hz that is 53 cm.

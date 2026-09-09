@@ -2321,22 +2321,43 @@ void Estimator::process_pair()
   // tuned. Off by default, because measurement says the even average is
   // already better than this can be.
   //
-  // Tested directly, without ATE: inject a known body tilt and see how far the
-  // fused length moves. Per radian, on straight120_v2 at +1 degree, each
-  // camera's step moves by 0.657 and -0.656 and the even average by -0.0074 --
-  // a factor of 89. The true ratio is within a few per cent of -1, which is
-  // exactly what `[.5, .5]` assumes. The computed `g` gives -0.83 on that
-  // drive and -0.64 on the slalom, so weighting by it moves *away* from the
-  // truth: the same injection then leaves 0.0163 instead of 0.0122.
+  // Off by default for a reason that is about the recordings, not the maths.
   //
-  // The reason no first-order computation can win here is in the numbers too.
-  // The ratio depends on the sign of the injection -- -1.094 at +2 degrees
-  // against -0.732 at -2 -- so the leak is not linear at the size that
-  // matters, and `-H^-1 J^T J_c` cannot represent an asymmetry. It lands
-  // between the two and is 17-36% wrong, while assuming -1 is 2.5% wrong.
+  // Tested by injecting a known body pitch -- rotating both mounts *and*
+  // moving them on their levers, which is what a body pitch does -- and
+  // reading how far the fused length moves. On straight120_v2 at +1 degree
+  // about the measured pivot, front -2.430%, rear +2.571%, ratio -0.945, and
+  // the even average leaves +0.071%. Derived beforehand from the geometry:
+  // the lever puts -3.54% and +3.75% into the two heights and the orientation
+  // adds +1.15% and -1.14%, for -2.39% and +2.61%. Right to two per cent.
   //
-  // Kept, switched off, because it is the instrument that measured this: `g`
-  // is published per frame and can be read again if the geometry changes.
+  // The pivot is what makes that column antisymmetric, and it is not a free
+  // choice. At base_link the levers are +3.694 and -0.820, the rear barely
+  // moves, and the same injection gives -6.198% against -0.023% -- a ratio of
+  // +272, which no weight can null. At the centre of mass the levers are
+  // +1.795 and -2.719, opposite and comparable, and the column comes out
+  // near-antisymmetric. That is why the pair cancels a body pitch at all.
+  //
+  // And on these recordings there is no body pitch to cancel. Truth attitude
+  // out of the bags: 0.0064 degrees of pitch standard deviation on
+  // straight120_v2, 0.0048 on straight110_s4, 0.0005 on curve_s20 -- CARLA
+  // does not render suspension travel. At 0.0064 degrees the leak is 0.015%
+  // of a hop per camera and 0.0004% after the average, against a total of
+  // 0.023%. So whatever the even average is worth on the nine drives, it is
+  // not worth it for this.
+  //
+  // park is the exception, 0.66 degrees of pitch standard deviation and 3.1
+  // at worst, through gear changes and braking. There this earns its keep:
+  // ATE/거리 0.1892% -> 0.1843% mean and 0.2729% -> 0.2631% worst, with
+  // computed weights of 0.503 and 0.377. On the nine it costs 0.0233% ->
+  // 0.0252%, which is what moving the weights off even buys when there is
+  // nothing to cancel.
+  //
+  // Hence the switch: a real vehicle on real suspension has this nuisance and
+  // this rig's recordings do not, so the machinery is built, derived and
+  // measured, and left for the vehicle to turn on. The park result is two
+  // drives and a few per cent -- evidence that it moves the right way when
+  // the nuisance is present, not that it is validated.
   if (settings_.photometric_null_tilt && road_cameras == 2 && cameras_.size() == 2) {
     const auto & a = *cameras_[0];
     const auto & b = *cameras_[1];
@@ -2344,8 +2365,28 @@ void Estimator::process_pair()
       a.photometric_valid && !a.photometric_broken &&
       b.photometric_valid && !b.photometric_broken)
     {
-      const double ga = a.photometric_leak_sum / static_cast<double>(a.photometric_leak_count);
-      const double gb = b.photometric_leak_sum / static_cast<double>(b.photometric_leak_count);
+      // The full column, not just the part the fit sees.
+      //
+      // A body pitch about a pivot moves each camera vertically by its lever
+      // arm, and a plane homography carries dh/h straight into the step. That
+      // term is `-(x_i - x_pivot)/h_i` per radian, exact from the extrinsics
+      // and `pitch_centre_x_m`, and it is three quarters of the whole: at the
+      // measured pivot the front reads -2.017 against the fit's own +0.724.
+      // Leaving it out was measured to give the wrong weight -- 0.499 where
+      // the injection says 0.514 -- which is worse than assuming the pair is
+      // symmetric.
+      const auto lever = [this](const Camera & camera) {
+          const double height = camera.settings.translation_base_from_camera.z();
+          if (!(height > 1e-3)) {
+            return 0.0;
+          }
+          return -(camera.settings.translation_base_from_camera.x() -
+                 settings_.pitch_centre_x_m) / height;
+        };
+      const double ga = lever(a) +
+        a.photometric_leak_sum / static_cast<double>(a.photometric_leak_count);
+      const double gb = lever(b) +
+        b.photometric_leak_sum / static_cast<double>(b.photometric_leak_count);
       const double gap = ga - gb;
       if (ga * gb < 0.0 && std::abs(gap) > 0.2) {
         const double wa = -gb / gap;
