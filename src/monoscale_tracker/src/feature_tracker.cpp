@@ -433,6 +433,24 @@ struct RoadSolve
   double score = std::numeric_limits<double>::quiet_NaN();  // ZNCC at the answer
   int iterations = 0;
   bool ok = false;
+  // The fit's own opinion of how well it settled each of the four, and how
+  // they trade against each other. Upper triangle of sigma, row-major over
+  // (step, yaw, pitch, roll): 00 01 02 03 11 12 13 22 23 33.
+  //
+  // Gauss-Newton: sigma = (cost / (N - dof)) * (J^T J)^-1. All three terms are
+  // already computed here and were being thrown away. The patches are
+  // normalised to zero mean and unit norm, so `cost` is 2(1 - ZNCC) and the
+  // residual is dimensionless -- which is what makes the units of this come
+  // out as the parameters', squared.
+  //
+  // It is not a calibrated covariance and must not be used as one without a
+  // scale measured against something. Neighbouring pixels of a road patch are
+  // not independent samples, so N overstates how much evidence there is and
+  // this is over-confident by roughly the pixels per independent patch. What
+  // it does carry honestly is the *shape*: which of the four is well settled,
+  // and which two the region cannot tell apart.
+  std::array<double, 10> covariance{};
+  bool covariance_ok = false;
 };
 
 struct TrackState
@@ -1438,6 +1456,38 @@ private:
           // stand; see the note on `max_scale_error` in `estimator.cpp`.
           if (state.road_esm.ok && esm_step_) {
             answer = state.road_esm.step / span;
+          }
+          // What the fit says its own step is worth, against what the step
+          // turns out to be. Written before the covariance is allowed to
+          // weight anything: its scale is known to be wrong -- the patch's
+          // pixels are not independent samples -- and the question that has to
+          // be answered first is whether its *shape* moves with the error at
+          // all. A sigma that does not is not a sigma, however it was derived.
+          if (const char * path = std::getenv("MONOSCALE_ESM_SIGMA")) {
+            std::lock_guard<std::mutex> guard(road_step_lock_);
+            if (esm_sigma_file_ == nullptr) {
+              esm_sigma_file_ = std::fopen(path, "w");
+              if (esm_sigma_file_ != nullptr) {
+                std::fprintf(
+                  esm_sigma_file_,
+                  "stamp,camera,step,search,sigma_step,sigma_yaw,sigma_pitch,"
+                  "sigma_roll,corr_step_pitch,score,reach\n");
+              }
+            }
+            if (esm_sigma_file_ != nullptr && state.road_esm.covariance_ok) {
+              const auto & c = state.road_esm.covariance;
+              const auto root = [](double v) {
+                  return v > 0.0 ? std::sqrt(v) : std::numeric_limits<double>::quiet_NaN();
+                };
+              const double sp = root(c[0]) * root(c[7]);
+              std::fprintf(
+                esm_sigma_file_, "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.5f,%.4f\n",
+                stamp, name.c_str(), state.road_esm.step, found * span, root(c[0]),
+                root(c[4]), root(c[7]), root(c[9]),
+                sp > 0.0 ? c[2] / sp : std::numeric_limits<double>::quiet_NaN(),
+                state.road_esm.score, reach);
+              std::fflush(esm_sigma_file_);
+            }
           }
         }
         // What that fit could not explain. Uses the answer it just settled on,
@@ -3363,6 +3413,7 @@ private:
       // A frozen parameter is held by an identity row rather than by shrinking
       // the system: its gradient is zero and its diagonal is one, so Cholesky
       // returns exactly zero for it and the 4x4 algebra below is untouched.
+      held_normal = normal;
       for (int i = freedom; i < 4; ++i) {
         normal(i, i) = 1.0;
       }
@@ -3423,6 +3474,43 @@ private:
     out.score = 1.0 - 0.5 * cost;
     out.iterations = taken;
     out.ok = true;
+
+    // Gauss-Newton covariance from what the loop already built. `held_normal`
+    // is J^T J before the damping and before the frozen rows were set to the
+    // identity, taken at the iterate the last accepted step departed from --
+    // not at the answer. That is the same approximation the rebuild policy
+    // above is built on: over the 35% of a step and three hundredths of a
+    // radian this fit travels, the warp's derivative is nearly constant.
+    // Recomputing it at the answer would cost another eight warps, a third of
+    // the routine, for a second-order correction to a quantity whose scale is
+    // uncalibrated anyway.
+    const double samples = static_cast<double>(residual.total());
+    if (samples > freedom) {
+      cv::Matx44d block = cv::Matx44d::zeros();
+      for (int i = 0; i < freedom; ++i) {
+        for (int j = 0; j < freedom; ++j) {
+          block(i, j) = held_normal(i, j);
+        }
+      }
+      for (int i = freedom; i < 4; ++i) {
+        block(i, i) = 1.0;
+      }
+      cv::Matx44d inverse;
+      if (cv::invert(block, inverse, cv::DECOMP_CHOLESKY)) {
+        const double variance = cost / (samples - freedom);
+        int at_entry = 0;
+        for (int i = 0; i < 4; ++i) {
+          for (int j = i; j < 4; ++j) {
+            // A frozen parameter was never solved for. Its identity row would
+            // otherwise report `variance` as though the region had settled it.
+            out.covariance[at_entry++] = (i < freedom && j < freedom)
+              ? variance * inverse(i, j)
+              : std::numeric_limits<double>::quiet_NaN();
+          }
+        }
+        out.covariance_ok = true;
+      }
+    }
     return out;
   }
 
@@ -4211,6 +4299,7 @@ private:
   std::string road_step_dump_;
   std::mutex road_step_lock_;
   std::FILE * road_step_file_ = nullptr;
+  std::FILE * esm_sigma_file_ = nullptr;
   std::unordered_map<std::string, GroundModel> models_;
   // The step the reference camera last measured, shared with the others. The
   // rig is rigid, so one number serves every camera on it.
