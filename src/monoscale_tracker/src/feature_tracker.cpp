@@ -2739,7 +2739,7 @@ private:
   void road_scores(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double hop, double turn, const cv::Rect & roi, std::vector<double> & out,
-    double * whole = nullptr) const
+    double * whole = nullptr, const cv::Mat & mask = cv::Mat()) const
   {
     // With `road_step_fused` the warp is not built at all: each pixel's source
     // is computed where it is used. The lattice is what sets the precision --
@@ -2820,6 +2820,7 @@ private:
     for (int i = 0; i <= tiles; ++i) {
       edge[static_cast<size_t>(i)] = i * roi.width / tiles;
     }
+    std::vector<int64_t> counted(tiles, 0);
     std::vector<int64_t> sa(tiles, 0), sb(tiles, 0);
     std::vector<int64_t> saa(tiles, 0), sbb(tiles, 0), sab(tiles, 0);
     std::vector<double> fa(tiles, 0.0), fb(tiles, 0.0);
@@ -2828,9 +2829,13 @@ private:
       const uchar * a = target.ptr<uchar>(y);
       if (fused) {
         const double image_y = roi.y + y;
+        const uchar * keep_fused = mask.empty() ? nullptr : mask.ptr<uchar>(y);
         for (int i = 0; i < tiles; ++i) {
           double la = 0.0, lb = 0.0, laa = 0.0, lbb = 0.0, lab = 0.0;
           for (int x = edge[static_cast<size_t>(i)]; x < edge[static_cast<size_t>(i) + 1]; ++x) {
+            if (keep_fused != nullptr && keep_fused[x] == 0) {
+              continue;
+            }
             const cv::Vec3d bearing = inverse * model.bearing(
               cv::Point2f(static_cast<float>(roi.x + x), static_cast<float>(image_y)),
               source_cols, source_rows);
@@ -2842,6 +2847,7 @@ private:
             laa += va * va;
             lbb += vb * vb;
             lab += va * vb;
+            ++counted[static_cast<size_t>(i)];
           }
           fa[static_cast<size_t>(i)] += la;
           fb[static_cast<size_t>(i)] += lb;
@@ -2852,13 +2858,17 @@ private:
         continue;
       }
       const uchar * b = warped.ptr<uchar>(y);
+      const uchar * keep = mask.empty() ? nullptr : mask.ptr<uchar>(y);
       for (int i = 0; i < tiles; ++i) {
         // Accumulated per row into locals first: the totals are int64 and the
         // row's contribution cannot overflow int32 at any region this code
         // will ever see, so the wide adds happen once a row rather than once a
         // pixel.
-        int64_t la = 0, lb = 0, laa = 0, lbb = 0, lab = 0;
+        int64_t la = 0, lb = 0, laa = 0, lbb = 0, lab = 0, ln = 0;
         for (int x = edge[static_cast<size_t>(i)]; x < edge[static_cast<size_t>(i) + 1]; ++x) {
+          if (keep != nullptr && keep[x] == 0) {
+            continue;
+          }
           const int64_t va = a[x];
           const int64_t vb = b[x];
           la += va;
@@ -2866,7 +2876,9 @@ private:
           laa += va * va;
           lbb += vb * vb;
           lab += va * vb;
+          ++ln;
         }
+        counted[static_cast<size_t>(i)] += ln;
         sa[static_cast<size_t>(i)] += la;
         sb[static_cast<size_t>(i)] += lb;
         saa[static_cast<size_t>(i)] += laa;
@@ -2927,7 +2939,7 @@ private:
   // and why that camera uses a third of the band it is given. A photometric
   // score needs no corner. It asks whether the whole region lands on itself,
   // which is the one question thousands of ambiguous pixels can answer together.
-  // Trim the region to the rows whose source is still inside the frame.
+  // Which pixels of the region have a source still inside the frame.
   //
   // The warp asks where each current pixel was in the previous frame. On a
   // mount whose ground recedes -- the rear one, going forwards -- the bottom
@@ -2942,30 +2954,37 @@ private:
   // costs no parameter. Taken once per frame from the seed rather than per
   // candidate, because the region has to be the same for every candidate or
   // their costs are not comparable.
-  cv::Rect trim_to_visible(
+  // Marked per pixel and not by trimming rows, because the invalid region is
+  // not a rectangle: the source leaves the frame at the bottom first but its
+  // edge curves, and cutting whole rows to clear it throws away good pixels on
+  // either side. Measured on straight120_v2 the row cut leaves the rear at
+  // -0.075% where masking leaves it at -0.023%.
+  //
+  // Built once a frame from the seeded step, not per candidate. Every
+  // candidate has to be scored over the same pixels or their costs are not
+  // comparable, and the seed is within a few per cent of every candidate the
+  // search will try.
+  int visible_mask(
     const GroundModel & model, const cv::Rect & roi, double step, double turn,
-    int width, int height) const
+    int width, int height, cv::Mat & mask) const
   {
-    if (roi.height < 8) {
-      return roi;
-    }
+    mask.create(roi.height, roi.width, CV_8U);
     const cv::Matx33d inverse = model.homography(step, turn, 0.0, 0.0, arc_hop_).inv();
-    const double centre_x = roi.x + 0.5 * roi.width;
-    int keep = roi.height;
-    for (int y = roi.height - 1; y >= 0; --y) {
-      const cv::Vec3d b = inverse * model.bearing(
-        cv::Point2f(static_cast<float>(centre_x), static_cast<float>(roi.y + y)),
-        width, height);
-      const cv::Point2f p = model.pixel(b, width, height);
-      if (p.y <= height - 1.0 && p.y >= 0.0 && p.x >= 0.0 && p.x <= width - 1.0) {
-        break;
+    int count = 0;
+    for (int y = 0; y < roi.height; ++y) {
+      uchar * row = mask.ptr<uchar>(y);
+      for (int x = 0; x < roi.width; ++x) {
+        const cv::Vec3d b = inverse * model.bearing(
+          cv::Point2f(static_cast<float>(roi.x + x), static_cast<float>(roi.y + y)),
+          width, height);
+        const cv::Point2f p = model.pixel(b, width, height);
+        const bool inside = p.x >= 0.0 && p.x <= width - 1.0 &&
+          p.y >= 0.0 && p.y <= height - 1.0;
+        row[x] = inside ? 1 : 0;
+        count += inside ? 1 : 0;
       }
-      keep = y;
     }
-    if (keep < 32 || keep == roi.height) {
-      return cv::Rect(roi.x, roi.y, roi.width, std::max(keep, 32));
-    }
-    return cv::Rect(roi.x, roi.y, roi.width, keep);
+    return count;
   }
 
   double measure_step_photometric(
@@ -2982,10 +3001,11 @@ private:
     if (roi.width < 32 || roi.height < 32) {
       return std::numeric_limits<double>::quiet_NaN();
     }
+    cv::Mat mask;
     if (road_step_visible_only_) {
-      roi = trim_to_visible(
+      visible_mask(
         model, roi, (have_centre ? centre : 0.0) * std::max(reach, 1e-3), turn,
-        current.cols, current.rows);
+        current.cols, current.rows, mask);
     }
     const double span = std::max(reach, 1e-3);
     // Each candidate is warped once; the whole-region score and the per-tile
@@ -3140,16 +3160,27 @@ private:
   // Zero mean, unit norm. The squared distance between two regions normalised
   // this way is exactly 2(1 - ZNCC), which turns the score the search maximises
   // into a residual a least-squares step can descend.
-  static bool normalise(const cv::Mat & patch, cv::Mat & out)
+  // Zero mean and unit norm over the pixels that count.
+  //
+  // With a mask the excluded pixels come out exactly zero, so they contribute
+  // nothing to any dot product taken afterwards -- the residual, the normal
+  // equations, the cost -- without any of those having to know about the mask.
+  // That is the whole reason the masking is done here and not at every use.
+  static bool normalise(const cv::Mat & patch, cv::Mat & out, const cv::Mat & mask = cv::Mat())
   {
     cv::Scalar mean;
     cv::Scalar deviation;
-    cv::meanStdDev(patch, mean, deviation);
-    const double norm = deviation[0] * std::sqrt(static_cast<double>(patch.total()));
-    if (!(norm > 1e-9)) {
+    cv::meanStdDev(patch, mean, deviation, mask);
+    const double counted = mask.empty()
+      ? static_cast<double>(patch.total()) : static_cast<double>(cv::countNonZero(mask));
+    const double norm = deviation[0] * std::sqrt(counted);
+    if (!(norm > 1e-9) || counted < 32.0) {
       return false;
     }
     patch.convertTo(out, CV_32F, 1.0 / norm, -mean[0] / norm);
+    if (!mask.empty()) {
+      out.setTo(0.0f, mask == 0);
+    }
     return true;
   }
 
@@ -3253,7 +3284,7 @@ private:
   // The region warped by one candidate (step, yaw, pitch, roll), normalised.
   bool road_patch(
     const GroundModel & model, const cv::Mat & previous, const cv::Rect & roi,
-    const double * candidate, cv::Mat & out) const
+    const double * candidate, cv::Mat & out, const cv::Mat & mask = cv::Mat()) const
   {
     // The fit's own lattice. The search only has to find which candidate is
     // nearest the peak, and a coarse warp does that; this is where the answer
@@ -3275,7 +3306,7 @@ private:
       map_x, map_y, candidate[2], candidate[3], road_step_fit_stride_);
     thread_local cv::Mat warped;
     cv::remap(previous, warped, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-    return normalise(warped, out);
+    return normalise(warped, out, mask);
   }
 
   // What the plane fit could not explain, on a coarse grid.
@@ -3385,14 +3416,15 @@ private:
       cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
       cv::Point(cvRound(band[2] * current.cols), cvRound(band[3] * current.rows))) &
       cv::Rect(0, 0, current.cols, current.rows);
-    if (road_step_visible_only_) {
-      roi = trim_to_visible(model, roi, seed_step, turn, current.cols, current.rows);
-    }
     if (roi.width < 32 || roi.height < 32) {
       return out;
     }
+    cv::Mat mask;
+    if (road_step_visible_only_) {
+      visible_mask(model, roi, seed_step, turn, current.cols, current.rows, mask);
+    }
     cv::Mat target;
-    if (!normalise(current(roi), target)) {
+    if (!normalise(current(roi), target, mask)) {
       return out;
     }
     // The geometry that turns a parameter into pixels, taken exactly as the
@@ -3445,7 +3477,7 @@ private:
 
     double at[4] = {seed_step, turn, 0.0, 0.0};
     cv::Mat patch;
-    if (!road_patch(model, previous, roi, at, patch)) {
+    if (!road_patch(model, previous, roi, at, patch, mask)) {
       return out;
     }
     cv::Mat residual = patch - target;
@@ -3488,8 +3520,8 @@ private:
             down[k] -= probe[k];
             cv::Mat ahead;
             cv::Mat behind;
-            if (!road_patch(model, previous, roi, up, ahead) ||
-              !road_patch(model, previous, roi, down, behind))
+            if (!road_patch(model, previous, roi, up, ahead, mask) ||
+              !road_patch(model, previous, roi, down, behind, mask))
             {
               continue;
             }
@@ -3518,8 +3550,8 @@ private:
         down[k] -= probe[k];
         cv::Mat ahead;
         cv::Mat behind;
-        built = road_patch(model, previous, roi, up, ahead) &&
-          road_patch(model, previous, roi, down, behind);
+        built = road_patch(model, previous, roi, up, ahead, mask) &&
+          road_patch(model, previous, roi, down, behind, mask);
         if (built) {
           column[k] = (ahead - behind) / (2.0 * probe[k]);
         }
@@ -3570,7 +3602,7 @@ private:
             std::abs(trial[1] - turn) <= angle_limit &&
             std::abs(trial[2]) <= angle_limit && std::abs(trial[3]) <= angle_limit;
           cv::Mat moved_patch;
-          if (inside && road_patch(model, previous, roi, trial, moved_patch)) {
+          if (inside && road_patch(model, previous, roi, trial, moved_patch, mask)) {
             cv::Mat next = moved_patch - target;
             const double trial_cost = next.dot(next);
             if (trial_cost < cost) {
@@ -3663,8 +3695,8 @@ private:
         down.rotation_base_from_camera = body_pitch(-tilt) * model.rotation_base_from_camera;
         cv::Mat ahead;
         cv::Mat behind;
-        if (road_patch(up, previous, roi, jacobian_at, ahead) &&
-          road_patch(down, previous, roi, jacobian_at, behind))
+        if (road_patch(up, previous, roi, jacobian_at, ahead, mask) &&
+          road_patch(down, previous, roi, jacobian_at, behind, mask))
         {
           const cv::Mat tilt_column = (ahead - behind) / (2.0 * tilt);
           cv::Vec4d projected(0.0, 0.0, 0.0, 0.0);
