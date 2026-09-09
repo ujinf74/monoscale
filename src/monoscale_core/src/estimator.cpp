@@ -285,6 +285,10 @@ struct Estimator::Solved
   Points2 pair_current;
   Identities pair_ids;
   double spread = 0.0;
+  // The inliers that are actually independent, from the residuals' own mutual
+  // correlation. Equal to the inlier count only if they are uncorrelated,
+  // which they are not.
+  double effective_pairs = 1.0;
   // How well this camera pinned the heading down, when it was asked to solve
   // for one. Infinite when it was not.
   double yaw_sigma = std::numeric_limits<double>::infinity();
@@ -1930,6 +1934,129 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       }
     }
     solved.spread = kept > 0 ? std::sqrt(squared / kept) : 0.0;
+
+    // The independent samples among those inliers, not the inliers.
+    //
+    // `spread^2 / n` treats each pair as its own sample. Measured, the
+    // residuals carry a floor of mutual correlation that does not decay with
+    // separation on the ground -- 0.032 at under 5 cm, 0.079 at 10-15 cm,
+    // 0.055 at 25-30 -- which is the signature of a component common to the
+    // whole solve rather than of neighbours agreeing with neighbours. For a
+    // uniform correlation rho the effective count is
+    //
+    //   N_eff = N / (1 + (N - 1) rho)   ->   1 / rho
+    //
+    // so 906 inliers at rho = 0.06 are worth about seventeen. That is the same
+    // order as the 645-buy-three this stack measured a different way, and it
+    // is what makes `spread^2 / n` optimistic by two orders.
+    //
+    // The correlation is estimated from this frame's own residuals, over pairs
+    // far enough apart that a shared feature patch cannot explain them, and
+    // clamped at zero so a solve whose residuals happen to anti-correlate
+    // cannot claim more information than it has.
+    solved.effective_pairs = static_cast<double>(std::max(kept, 1));
+    if (kept > 32) {
+      double mx = 0.0, my = 0.0, var = 0.0;
+      std::vector<double> px, py, rex, rey;
+      px.reserve(kept); py.reserve(kept); rex.reserve(kept); rey.reserve(kept);
+      for (Eigen::Index i = 0; i < paired; ++i) {
+        if (!estimate->inliers(i)) {continue;}
+        const double ox = previous_ground(i, 0) -
+          (c * current_ground(i, 0) - s * current_ground(i, 1));
+        const double oy = previous_ground(i, 1) -
+          (s * current_ground(i, 0) + c * current_ground(i, 1));
+        px.push_back(previous_ground(i, 0));
+        py.push_back(previous_ground(i, 1));
+        rex.push_back(ox - estimate->motion.x);
+        rey.push_back(oy - estimate->motion.y);
+      }
+      const int n = static_cast<int>(px.size());
+      for (int i = 0; i < n; ++i) {mx += rex[i]; my += rey[i];}
+      mx /= n; my /= n;
+      for (int i = 0; i < n; ++i) {
+        var += (rex[i]-mx)*(rex[i]-mx) + (rey[i]-my)*(rey[i]-my);
+      }
+      var /= (2.0 * n);
+      if (var > 1e-18) {
+        // Every pair beyond one decimetre, which is well past any patch the
+        // tracker follows, so what is left is common to the solve.
+        double num = 0.0;
+        int64_t count = 0;
+        const int stride = std::max(n / 200, 1);
+        for (int i = 0; i < n; i += stride) {
+          for (int j = i + 1; j < n; j += stride) {
+            if (std::hypot(px[i]-px[j], py[i]-py[j]) < 0.10) {continue;}
+            num += 0.5 * ((rex[i]-mx)*(rex[j]-mx) + (rey[i]-my)*(rey[j]-my));
+            ++count;
+          }
+        }
+        if (count > 64) {
+          const double rho = std::clamp(num / (count * var), 0.0, 0.99);
+          solved.effective_pairs =
+            static_cast<double>(n) / (1.0 + (n - 1) * rho);
+        }
+      }
+    }
+
+    // How correlated those residuals are with each other, by separation on the
+    // ground. `spread^2 / n` treats every inlier as an independent sample, and
+    // 645 of them are known to buy the accuracy of about three -- so they are
+    // not. Measured here rather than assumed, the same way the photometric
+    // fit's own sample count is measured from its residual image.
+    if (const char * path = std::getenv("MONOSCALE_PAIR_ACF")) {
+      static std::FILE * pair_acf = nullptr;
+      if (pair_acf == nullptr) {
+        pair_acf = std::fopen(path, "w");
+        if (pair_acf != nullptr) {
+          std::fprintf(pair_acf, "n,var,mx,my");
+          for (int k = 0; k < 6; ++k) {std::fprintf(pair_acf, ",r%d,c%d", k, k);}
+          std::fprintf(pair_acf, "\n");
+        }
+      }
+      if (pair_acf != nullptr && kept > 32) {
+        std::vector<double> px, py, ex_, ey_;
+        px.reserve(kept); py.reserve(kept); ex_.reserve(kept); ey_.reserve(kept);
+        for (Eigen::Index i = 0; i < paired; ++i) {
+          if (!estimate->inliers(i)) {continue;}
+          const double ox = previous_ground(i, 0) -
+            (c * current_ground(i, 0) - s * current_ground(i, 1));
+          const double oy = previous_ground(i, 1) -
+            (s * current_ground(i, 0) + c * current_ground(i, 1));
+          px.push_back(previous_ground(i, 0));
+          py.push_back(previous_ground(i, 1));
+          ex_.push_back(ox - estimate->motion.x);
+          ey_.push_back(oy - estimate->motion.y);
+        }
+        const int n = static_cast<int>(px.size());
+        double mx = 0.0, my = 0.0;
+        for (int i = 0; i < n; ++i) {mx += ex_[i]; my += ey_[i];}
+        mx /= n; my /= n;
+        double var = 0.0;
+        for (int i = 0; i < n; ++i) {
+          var += (ex_[i]-mx)*(ex_[i]-mx) + (ey_[i]-my)*(ey_[i]-my);
+        }
+        var /= (2.0 * n);
+        // Six separation bands, 0.05 m wide, out to 0.30 m.
+        double num[6] = {}; int cnt[6] = {};
+        for (int i = 0; i < n; ++i) {
+          for (int j = i + 1; j < n; ++j) {
+            const double d = std::hypot(px[i]-px[j], py[i]-py[j]);
+            const int b = static_cast<int>(d / 0.05);
+            if (b < 0 || b >= 6) {continue;}
+            num[b] += 0.5 * ((ex_[i]-mx)*(ex_[j]-mx) + (ey_[i]-my)*(ey_[j]-my));
+            ++cnt[b];
+          }
+        }
+        std::fprintf(pair_acf, "%d,%.9g,%.9g,%.9g", n, var, mx, my);
+        for (int b = 0; b < 6; ++b) {
+          std::fprintf(
+            pair_acf, ",%.5f,%d",
+            cnt[b] > 0 && var > 1e-18 ? num[b] / (cnt[b] * var) : 0.0, cnt[b]);
+        }
+        std::fprintf(pair_acf, "\n");
+        std::fflush(pair_acf);
+      }
+    }
   }
 
   // A running mean, not the last value: solves come in at ten to fifty a
@@ -2984,11 +3111,27 @@ void Estimator::process_pair()
         if (!entry.has_value() || !entry->motion.has_value()) {
           continue;
         }
-        const double n = std::max(entry->motion->inliers, 1);
+        const double n = std::max(static_cast<double>(entry->motion->inliers), 1.0);
         weighted += entry->spread * n;
         total += n;
       }
       if (total > 0.0) {
+        // The part of the hop's error that actually accumulates.
+        //
+        // Correcting `n` to the independent count makes each hop honestly
+        // uncertain -- 5.9 mm rather than 0.9 -- and then propagating that as
+        // a random walk is wrong twice over. The inflation came from a
+        // component *common* to the solve, and a common component does not
+        // random-walk: it points the same way every hop, so it appears in the
+        // trajectory as a scale error and not as growth. Adding it to the pose
+        // covariance every hop claimed 18 cm of drift over 900 hops where 3 cm
+        // is measured, and drove the map factor's normalised innovation from
+        // 3.6 to 0.04 -- past one and out the other side.
+        //
+        // So the walk grows by the independent part only, `spread^2 / n` on
+        // the raw count, and the common part is left where it belongs: it is a
+        // bias on the length, which is what `photometric_scale` and the scale
+        // learners are still standing in for.
         const double spread = weighted / total;
         const double hop_variance = std::max(spread * spread / total, 1e-12);
         pose_covariance_(0, 0) += hop_variance;
@@ -3039,7 +3182,15 @@ void Estimator::process_pair()
         }
         // The alignment's own scatter over the votes behind it: the standard
         // error of a mean, the same form the pair solve's variance takes.
-        const double n = std::max(entry->placed_inliers, 1);
+        // The alignment's own inlier count, uncorrected.
+        //
+        // Its residuals carry the same common component the pair solve's do,
+        // but they are not kept here, so there is nothing to measure it from.
+        // Borrowing the pair solve's ratio was tried and is not defensible:
+        // it drove the map sigma to 24 mm against a 4 mm innovation and the
+        // normalised innovation to 0.04, past one and out the other side. The
+        // ratio has to come from the alignment's own residuals or not at all.
+        const double n = std::max(static_cast<double>(entry->placed_inliers), 1.0);
         const double spread = entry->placed_spread > 0.0
           ? entry->placed_spread : settings_.map_factor_sigma_m;
         const double variance = std::max(spread * spread / n, 1e-12);
