@@ -602,6 +602,24 @@ private:
       diagnostics.filter_rejections, diagnostics.imu_yaw_misses, pose.x, pose.y, pose.yaw,
       diagnostics.obstacle_usable, diagnostics.obstacle_ready, diagnostics.obstacle_no_slip,
       diagnostics.obstacle_out_of_band, diagnostics.obstacle_points);
+
+    // The failure that says nothing on its own. See the note on
+    // `consumer_armed` in `estimator.hpp`.
+    for (int which = 0; which < monoscale::Diagnostics::kConsumerCount; ++which) {
+      const int64_t armed = diagnostics.consumer_armed[which];
+      const int64_t fed = diagnostics.consumer_fed[which];
+      if (armed > 0 && fed == 0) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "굶은 소비자: %s 가 %ld 프레임 무장했으나 한 번도 먹지 못했다. %s 를 켜라.",
+          monoscale::Diagnostics::consumer_name(which), armed,
+          monoscale::Diagnostics::consumer_needs(which));
+      } else if (armed > 0 && fed * 4 < armed) {
+        RCLCPP_WARN(
+          get_logger(), "마른 소비자: %s %ld/%ld 프레임만 먹었다.",
+          monoscale::Diagnostics::consumer_name(which), fed, armed);
+      }
+    }
   }
 
   Configuration configuration_;

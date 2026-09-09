@@ -1361,11 +1361,15 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // below reads the same motion off a correspondence set that goes asymmetric
   // as the patch overlap shrinks, and pays for it with a bias that grows with
   // the step.
+  if (settings_.esm_yaw_source) {
+    ++diagnostics_.consumer_armed[Diagnostics::kEsmYawSource];
+  }
   if (!yaw.has_value() && settings_.esm_yaw_source && camera.esm_valid &&
     std::isfinite(camera.esm_yaw_since_solve) &&
     std::abs(camera.esm_yaw_since_solve) <= settings_.max_yaw_per_frame_rad)
   {
     yaw = camera.esm_yaw_since_solve;
+    ++diagnostics_.consumer_fed[Diagnostics::kEsmYawSource];
   }
   // The ESM's turn as an *observation* of the heading that was handed in,
   // rather than as a replacement for it.
@@ -1377,6 +1381,18 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // the alignment residual barely moves. Measured on curve_s05, where the gyro
   // bias is +0.903 deg/s: 261 updates recovered 21% of it. The ESM reads its
   // rotation off the image and does not turn with that frame.
+  // Armed by the setting alone, deliberately. Every other condition here --
+  // the heading filter being on, the ESM having spoken -- is something this
+  // observation *needs*, and folding a need into the arming test is how an
+  // instrument for dead configuration ends up unable to see it. Written the
+  // other way first, and it reported nothing on a configuration with two dead
+  // layers in it.
+  if (settings_.esm_yaw_sigma_rad > 0.0 &&
+    (settings_.esm_yaw_camera.empty() ||
+    settings_.esm_yaw_camera == camera.settings.name))
+  {
+    ++diagnostics_.consumer_armed[Diagnostics::kEsmYawObservation];
+  }
   if (settings_.esm_yaw_sigma_rad > 0.0 && heading_.enabled() &&
     (settings_.esm_yaw_camera.empty() ||
     settings_.esm_yaw_camera == camera.settings.name) &&
@@ -1408,6 +1424,13 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       innovation,
       settings_.esm_yaw_sigma_rad +
       settings_.esm_yaw_sigma_rate * std::abs(camera.esm_yaw_since_solve));
+    ++diagnostics_.consumer_fed[Diagnostics::kEsmYawObservation];
+  }
+  if (settings_.vision_yaw) {
+    ++diagnostics_.consumer_armed[Diagnostics::kVisionYaw];
+    if (solved.ground_valid.any()) {
+      ++diagnostics_.consumer_fed[Diagnostics::kVisionYaw];
+    }
   }
   if (!yaw.has_value() && settings_.vision_yaw && solved.ground_valid.any()) {
     Eigen::Index usable_pairs = 0;
@@ -2440,17 +2463,27 @@ void Estimator::process_pair()
   if (settings_.esm_attitude) {
     const double leak = settings_.esm_attitude_leak_sec > 0.0 && dt > 0.0
       ? std::min(1.0, dt / settings_.esm_attitude_leak_sec) : 1.0;
+    ++diagnostics_.consumer_armed[Diagnostics::kEsmAttitude];
     for (auto & held : cameras_) {
       double target_pitch = 0.0;
       double target_roll = 0.0;
+      if (settings_.anchor_attitude) {
+        ++diagnostics_.consumer_armed[Diagnostics::kAnchorAttitude];
+      }
+      if (settings_.band_attitude) {
+        ++diagnostics_.consumer_armed[Diagnostics::kBandAttitude];
+      }
       if (settings_.anchor_attitude && held->anchor_ready) {
         target_pitch = held->anchor_pitch;
         target_roll = held->anchor_roll;
+        ++diagnostics_.consumer_fed[Diagnostics::kAnchorAttitude];
       } else if (settings_.band_attitude && held->band_ready) {
         target_pitch = held->band_pitch;
         target_roll = held->band_roll;
+        ++diagnostics_.consumer_fed[Diagnostics::kBandAttitude];
       }
       if (held->esm_valid) {
+        ++diagnostics_.consumer_fed[Diagnostics::kEsmAttitude];
         held->esm_tilt_pitch += held->esm_pitch_since_solve;
         held->esm_tilt_roll += held->esm_roll_since_solve;
       }

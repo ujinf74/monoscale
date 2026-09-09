@@ -1539,6 +1539,26 @@ int main(int argc, char ** argv)
       diagnostics.heading_updates);
   }
 
+  // Anything switched on here that never received what it consumes. Printed
+  // unconditionally, because the case that costs is the silent one: a consumer
+  // armed against a producer that is off says nothing at all otherwise, and the
+  // benchmark scores it happily.
+  for (int which = 0; which < monoscale::Diagnostics::kConsumerCount; ++which) {
+    const int64_t armed = diagnostics.consumer_armed[which];
+    const int64_t fed = diagnostics.consumer_fed[which];
+    if (armed > 0 && fed == 0) {
+      std::printf(
+        "굶은 소비자: %s 가 %ld 프레임 무장했으나 한 번도 먹지 못함 -- %s 필요\n",
+        monoscale::Diagnostics::consumer_name(which), armed,
+        monoscale::Diagnostics::consumer_needs(which));
+    } else if (armed > 0 && fed * 4 < armed) {
+      std::printf(
+        "마른 소비자: %s %ld/%ld 프레임만 먹음 (%.0f%%)\n",
+        monoscale::Diagnostics::consumer_name(which), fed, armed,
+        100.0 * static_cast<double>(fed) / static_cast<double>(armed));
+    }
+  }
+
   if (!tum_directory.empty() && !rows.empty()) {
     std::ofstream estimate_file(tum_directory + "/estimate.tum");
     std::ofstream truth_file(tum_directory + "/truth.tum");

@@ -1058,6 +1058,59 @@ struct Diagnostics
   double last_disparity = -1.0;
   int anchors = 0;
   std::map<std::string, double> stage_seconds;
+
+  // A consumer that is switched on and never receives what it consumes is the
+  // failure this pipeline is most prone to. The producer lives in the tracker
+  // and the consumer here, each behind its own switch and neither aware of the
+  // other, so one can be off for weeks with no symptom -- `road_step_esm` was
+  // off in deployment while `esm_yaw_sigma_rad` armed the observation that
+  // needs it, and the difference was a factor of two in ATE.
+  //
+  // Counted, not asserted at startup: the two nodes do not share a parameter
+  // set, and what matters is whether the data arrives, whatever the reason it
+  // does not -- wrong switch, wrong topic, a producer that died. `armed` is the
+  // frames on which the consumer was enabled, `fed` those on which it actually
+  // had something to consume. armed > 0 with fed == 0 is dead configuration;
+  // the ratio between them is worth reading on its own.
+  enum Consumer
+  {
+    kEsmYawObservation = 0,
+    kEsmYawSource,
+    kEsmAttitude,
+    kBandAttitude,
+    kAnchorAttitude,
+    kVisionYaw,
+    kConsumerCount
+  };
+  std::array<int64_t, kConsumerCount> consumer_armed{};
+  std::array<int64_t, kConsumerCount> consumer_fed{};
+  static const char * consumer_name(int which)
+  {
+    switch (which) {
+      case kEsmYawObservation: return "esm_yaw_sigma_rad";
+      case kEsmYawSource: return "esm_yaw_source";
+      case kEsmAttitude: return "esm_attitude";
+      case kBandAttitude: return "band_attitude";
+      case kAnchorAttitude: return "anchor_attitude";
+      case kVisionYaw: return "vision_yaw";
+      default: return "?";
+    }
+  }
+  // What each one needs, for a message that says how to fix it rather than
+  // only that it is broken.
+  static const char * consumer_needs(int which)
+  {
+    switch (which) {
+      case kEsmYawObservation:
+        return "road_step_esm on the tracker and gyro_bias_sigma_rad_s > 0";
+      case kEsmYawSource:
+      case kEsmAttitude: return "road_step_esm on the tracker";
+      case kBandAttitude: return "road_step_calibrate on the tracker";
+      case kAnchorAttitude: return "anchors reaching a bearing solve";
+      case kVisionYaw: return "a ground solve with valid pairs";
+      default: return "?";
+    }
+  }
 };
 
 class Estimator
