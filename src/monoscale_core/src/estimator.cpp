@@ -2257,7 +2257,8 @@ void Estimator::process_pair()
       ++road_cameras;
     }
   }
-  // Evenly, and that is not a default -- it is the only weighting available.
+  // Evenly, and that is not a default -- it is the only weighting available,
+  // and it is spent on the one direction it can cancel.
   //
   // Two cameras give `w` two degrees of freedom. `w'1 = 1` spends one. The
   // second is spent by `w'g = 0`, where `g` is the direction a nuisance common
@@ -2273,6 +2274,30 @@ void Estimator::process_pair()
   //
   //   t     0      0.1     0.25    0.5     1.0
   //   ATE   0.0233 0.0250  0.0356  0.0590  0.1111 %
+  //
+  // The columns of `g` themselves, measured 2026-09-09 by perturbing each
+  // parameter and reading how far each camera's photometric step moved, on
+  // straight120_v2 (10 mm of height, 0.5 degrees of angle, 1% of focal):
+  //
+  //   perturbation      front     rear     fused
+  //   height, both    +1.123%  +0.794%   +0.958%
+  //   pitch, both     +0.520%  -0.534%   -0.010%
+  //   roll, both      +0.082%  -0.159%   -0.043%
+  //   focal, both     -0.234%  -0.319%   -0.279%
+  //
+  // The height column is the derivation to three digits: a plane-induced
+  // homography constrains t/h, so the step carries dh/h, and 10 mm over the
+  // front's 0.89 m is 1.124% against the rear's 10/1.26 = 0.794%. Same sign,
+  // so the even average keeps 0.958% of it -- which is why
+  // `ground_plane_offset_m` had to be measured rather than tuned, and why 5.5
+  // mm of it dominated eleven metrics.
+  //
+  // Pitch is the one that flips: +0.520 against -0.534, equal to within 3%,
+  // and the even average takes it to -0.010%. A factor of 52. That is the
+  // cancellation, and it is the whole of what two cameras can buy: `w` has two
+  // freedoms, `w'1 = 1` spends one and `w'g_pitch = 0` spends the other.
+  // Height and focal are same-sign and linearly independent of pitch, so they
+  // pass through and no weighting can stop them -- they have to be measured.
   //
   // Monotone from the first step and 4.8x at the end. Inverse-variance
   // weighting is the correct answer to a question this fusion is not being
