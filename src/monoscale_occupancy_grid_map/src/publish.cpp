@@ -19,20 +19,37 @@ namespace monoscale_occupancy
 namespace
 {
 
+// World to view cell. Anchored on the global lattice rather than on the
+// window's own world origin: that origin is `s.origin_x + cell_x * resolution`
+// and carries the rounding of a large product, so subtracting it loses a bit
+// exactly when the map is far from the anchor. At 500 m the naive form put a
+// point one cell short of where it belongs.
+inline double view_column(
+  const double world, const SweepSettings & s, const GridWindow & window)
+{
+  return (world - s.origin_x) / s.resolution - static_cast<double>(window.cell_x);
+}
+
+inline double view_row(
+  const double world, const SweepSettings & s, const GridWindow & window)
+{
+  return (world - s.origin_y) / s.resolution - static_cast<double>(window.cell_y);
+}
+
 // Subcell occupied vote: split each point's weight across the four cells it
 // falls between, so a surface near a boundary registers between the cells
 // rather than a whole cell out. Matches mark_occupied(subcell=True).
 void mark_occupied_subcell(
-  CameraGrid & grid, const SweepSettings & s,
+  GridView & view, const SweepSettings & s,
   const std::vector<double> & wx, const std::vector<double> & wy,
   const std::vector<double> & weight)
 {
-  const int W = s.grid_width;
-  const int H = s.grid_height;
+  const int W = view.window.width;
+  const int H = view.window.height;
   cv::Mat votes = cv::Mat::zeros(H, W, CV_32F);
   for (size_t i = 0; i < wx.size(); ++i) {
-    const double cx = (wx[i] - s.origin_x) / s.resolution - 0.5;
-    const double cy = (wy[i] - s.origin_y) / s.resolution - 0.5;
+    const double cx = view_column(wx[i], s, view.window) - 0.5;
+    const double cy = view_row(wy[i], s, view.window) - 0.5;
     const int left = static_cast<int>(std::floor(cx));
     const int bottom = static_cast<int>(std::floor(cy));
     const float fx = static_cast<float>(cx - left);
@@ -57,8 +74,8 @@ void mark_occupied_subcell(
   // observations and not pixels.
   for (int r = 0; r < H; ++r) {
     const float * v = votes.ptr<float>(r);
-    float * lo = grid.log_odds.ptr<float>(r);
-    uint8_t * ob = grid.observed.ptr<uint8_t>(r);
+    float * lo = view.log_odds.ptr<float>(r);
+    uint8_t * ob = view.observed.ptr<uint8_t>(r);
     for (int c = 0; c < W; ++c) {
       float w = v[c];
       if (w <= 0.0f) {continue;}
@@ -79,11 +96,11 @@ void mark_occupied_subcell(
 // bar) says nothing beyond it. Matches mark_free's carve_rays with
 // respect_occupied and the per-ray dedup (bincount over unique cells).
 void carve_ray(
-  CameraGrid & grid, const SweepSettings & s, double ex, double ey,
+  const GridView & view, const SweepSettings & s, double ex, double ey,
   double wx, double wy, const cv::Mat & stop, cv::Mat & hits, double free_update)
 {
-  const int W = s.grid_width;
-  const int H = s.grid_height;
+  const int W = view.window.width;
+  const int H = view.window.height;
   const double dx = wx - ex;
   const double dy = wy - ey;
   const double reach = std::hypot(dx, dy);
@@ -96,8 +113,8 @@ void carve_ray(
     const double frac = std::min(1.0, (t * spacing) / reach);
     const double px = ex + frac * dx;
     const double py = ey + frac * dy;
-    const int c = static_cast<int>(std::floor((px - s.origin_x) / s.resolution));
-    const int r = static_cast<int>(std::floor((py - s.origin_y) / s.resolution));
+    const int c = static_cast<int>(std::floor(view_column(px, s, view.window)));
+    const int r = static_cast<int>(std::floor(view_row(py, s, view.window)));
     if (c < 0 || c >= W || r < 0 || r >= H) {continue;}
     if (c == last_c && r == last_r) {continue;}
     last_c = c;
@@ -123,6 +140,14 @@ void Sweep::integrate(
   const double ex = reference_pose.x + eye.x();
   const double ey = reference_pose.y + eye.y();
   const double ez = eye.z();
+
+  // Everything this keyframe can touch lies within max_range of the eye: the
+  // placements are gated on it, and the carve runs from the eye to a placement.
+  // Two cells of margin for the subcell vote, which spills into left+1 and
+  // bottom+1. Tiles under this window are created now so the commit lands.
+  const GridWindow window =
+    CameraGrid::around(s, ex, ey, s.max_range + 2.0 * s.resolution);
+  GridView view = grid.view(s, window, true);
 
   // --- Occupied placements: believed pixels, put where their ray meets their
   // own swept height, world frame. Soft-voted by confidence, far-weighted.
@@ -160,19 +185,19 @@ void Sweep::integrate(
     }
   }
   if (!ox.empty()) {
-    mark_occupied_subcell(grid, s, ox, oy, ow);
+    mark_occupied_subcell(view, s, ox, oy, ow);
   }
 
   // The occlusion barrier: cells whose belief is past the bar block carving.
   cv::Mat stop;
   if (s.occlusion_aware > 0.0) {
     const double bar = std::log(s.occlusion_aware / (1.0 - s.occlusion_aware));
-    stop = cv::Mat::zeros(s.grid_height, s.grid_width, CV_8U);
-    for (int r = 0; r < s.grid_height; ++r) {
-      const uint8_t * ob = grid.observed.ptr<uint8_t>(r);
-      const float * lo = grid.log_odds.ptr<float>(r);
+    stop = cv::Mat::zeros(window.height, window.width, CV_8U);
+    for (int r = 0; r < window.height; ++r) {
+      const uint8_t * ob = view.observed.ptr<uint8_t>(r);
+      const float * lo = view.log_odds.ptr<float>(r);
       uint8_t * st = stop.ptr<uint8_t>(r);
-      for (int c = 0; c < s.grid_width; ++c) {
+      for (int c = 0; c < window.width; ++c) {
         st[c] = (ob[c] && lo[c] > bar) ? 1 : 0;
       }
     }
@@ -210,15 +235,15 @@ void Sweep::integrate(
 
   auto carve_group = [&](const std::vector<size_t> & idx, double update) {
     if (idx.empty()) {return;}
-    cv::Mat hits = cv::Mat::zeros(s.grid_height, s.grid_width, CV_32F);
+    cv::Mat hits = cv::Mat::zeros(window.height, window.width, CV_32F);
     for (size_t k = 0; k < idx.size(); k += s.free_ray_stride) {
-      carve_ray(grid, s, ex, ey, fx[idx[k]], fy[idx[k]], stop, hits, update);
+      carve_ray(view, s, ex, ey, fx[idx[k]], fy[idx[k]], stop, hits, update);
     }
-    for (int r = 0; r < s.grid_height; ++r) {
+    for (int r = 0; r < window.height; ++r) {
       float * h = hits.ptr<float>(r);
-      float * lo = grid.log_odds.ptr<float>(r);
-      uint8_t * ob = grid.observed.ptr<uint8_t>(r);
-      for (int c = 0; c < s.grid_width; ++c) {
+      float * lo = view.log_odds.ptr<float>(r);
+      uint8_t * ob = view.observed.ptr<uint8_t>(r);
+      for (int c = 0; c < window.width; ++c) {
         float n = h[c];
         if (n <= 0.0f) {continue;}
         if (s.free_cap > 0.0) {n = std::min(n, static_cast<float>(s.free_cap));}
@@ -264,31 +289,79 @@ void Sweep::integrate(
         const double py = ey + frac * dy;
         const double pz = ez * (1.0 - frac);
         if (pz <= 0.03) {continue;}
-        const int c = static_cast<int>(std::floor((px - s.origin_x) / s.resolution));
-        const int r = static_cast<int>(std::floor((py - s.origin_y) / s.resolution));
-        if (c < 0 || c >= s.grid_width || r < 0 || r >= s.grid_height) {continue;}
+        const int c = static_cast<int>(std::floor(view_column(px, s, window)));
+        const int r = static_cast<int>(std::floor(view_row(py, s, window)));
+        if (c < 0 || c >= window.width || r < 0 || r >= window.height) {continue;}
         const int band = pz < s.slab_split ? 0 : 1;
-        int16_t & cell = grid.slab_free[band].at<int16_t>(r, c);
+        int16_t & cell = view.slab_free[band].at<int16_t>(r, c);
         if (cell < 32000) {cell += 1;}
       }
     }
   }
+  grid.commit(s, view);
   (void)heights;
   (void)road;
   (void)best;
 }
 
-cv::Mat publish(const SweepSettings & s, std::vector<CameraGrid *> grids)
+Published publish(
+  const SweepSettings & s, std::vector<CameraGrid *> grids, const GridWindow & request)
 {
-  const int W = s.grid_width;
-  const int H = s.grid_height;
+  Published out;
+  // The extent to draw: what was asked for, or -- for the live node, which
+  // asks for nothing -- the union of what the cameras have actually mapped.
+  GridWindow window = request;
+  if (window.empty()) {
+    int32_t x0 = 0;
+    int32_t y0 = 0;
+    int32_t x1 = 0;
+    int32_t y1 = 0;
+    bool any = false;
+    for (const auto * g : grids) {
+      const GridWindow held = g->extent(s);
+      if (held.empty()) {continue;}
+      const int32_t hx1 = held.cell_x + held.width;
+      const int32_t hy1 = held.cell_y + held.height;
+      if (!any) {
+        x0 = held.cell_x;
+        y0 = held.cell_y;
+        x1 = hx1;
+        y1 = hy1;
+        any = true;
+      } else {
+        x0 = std::min(x0, held.cell_x);
+        y0 = std::min(y0, held.cell_y);
+        x1 = std::max(x1, hx1);
+        y1 = std::max(y1, hy1);
+      }
+    }
+    if (!any) {return out;}
+    window.cell_x = x0;
+    window.cell_y = y0;
+    window.width = static_cast<int>(x1 - x0);
+    window.height = static_cast<int>(y1 - y0);
+    window.origin_x = s.origin_x + window.cell_x * s.resolution;
+    window.origin_y = s.origin_y + window.cell_y * s.resolution;
+  }
+  out.window = window;
+
+  const int W = window.width;
+  const int H = window.height;
+  // Dense working copies. Nothing below this line knows the storage is
+  // sparse, which is the point: the chain is the one that was measured.
+  std::vector<GridView> views;
+  views.reserve(grids.size());
+  for (auto * g : grids) {views.push_back(g->view(s, window, false));}
+  std::vector<GridView *> views_ptr;
+  views_ptr.reserve(views.size());
+  for (auto & v : views) {views_ptr.push_back(&v);}
 
   // Per-cell slab pass/fail, pooled over cameras.
   cv::Mat low_ok = cv::Mat::zeros(H, W, CV_8U);
   cv::Mat high_ok = cv::Mat::zeros(H, W, CV_8U);
   cv::Mat occupied_any = cv::Mat::zeros(H, W, CV_8U);
   if (s.slab_carve) {
-    for (auto * g : grids) {
+    for (auto * g : views_ptr) {
       for (int r = 0; r < H; ++r) {
         const int16_t * l = g->slab_free[0].ptr<int16_t>(r);
         const int16_t * h = g->slab_free[1].ptr<int16_t>(r);
@@ -331,7 +404,7 @@ cv::Mat publish(const SweepSettings & s, std::vector<CameraGrid *> grids)
         }
       }
     }
-    for (auto * g : grids) {
+    for (auto * g : views_ptr) {
       for (int r = 0; r < H; ++r) {
         const uint8_t * f = failing.ptr<uint8_t>(r);
         float * lo = g->log_odds.ptr<float>(r);
@@ -347,7 +420,7 @@ cv::Mat publish(const SweepSettings & s, std::vector<CameraGrid *> grids)
   cv::Mat values(H, W, CV_8S, cv::Scalar(-1));
   cv::Mat occupied = cv::Mat::zeros(H, W, CV_8U);
   cv::Mat freed = cv::Mat::zeros(H, W, CV_8U);
-  for (auto * g : grids) {
+  for (auto * g : views_ptr) {
     for (int r = 0; r < H; ++r) {
       const uint8_t * ob = g->observed.ptr<uint8_t>(r);
       const float * lo = g->log_odds.ptr<float>(r);
@@ -401,7 +474,10 @@ cv::Mat publish(const SweepSettings & s, std::vector<CameraGrid *> grids)
       }
     }
   }
-  return values;
+  // neutralise_slab wrote into the views' log odds; put that back.
+  for (size_t i = 0; i < grids.size(); ++i) {grids[i]->commit(s, views[i]);}
+  out.values = values;
+  return out;
 }
 
 }  // namespace monoscale_occupancy

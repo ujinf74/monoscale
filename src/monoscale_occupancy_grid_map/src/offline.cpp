@@ -548,7 +548,11 @@ int main(int argc, char ** argv)
     keyframes += run_camera(front_sweep, front_grays, front_stamps, table, front_grid);
     keyframes += run_camera(rear_sweep, rear_grays, rear_stamps, table, rear_grid);
 
-    cv::Mat map = monoscale_occupancy::publish(settings, {&front_grid, &rear_grid});
+    // The legacy fixed extent: this writes a bare .npy with no origin in it,
+    // and the scoring reference reads it as 600 x 600 at (-30, -30).
+    cv::Mat map = monoscale_occupancy::publish(
+      settings, {&front_grid, &rear_grid},
+      monoscale_occupancy::legacy_window(settings)).values;
     if (map.type() != CV_8S) {
       cv::Mat converted;
       map.convertTo(converted, CV_8S);

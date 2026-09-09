@@ -16,7 +16,9 @@
 #ifndef MONOSCALE_SWEEP__SWEEP_HPP_
 #define MONOSCALE_SWEEP__SWEEP_HPP_
 
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -138,10 +140,19 @@ struct SweepSettings
 
   // Grid and publish.
   double resolution = 0.1;
+  // Cells live in tiles allocated where something is seen, so the map is not
+  // bounded by an extent chosen up front. What these four values still do is
+  // fix the lattice (which world point falls on a cell corner) and describe
+  // the legacy fixed extent that `sweep_offline` asks for, so its .npy stays
+  // the size and origin the scoring reference expects. The live node asks for
+  // no extent and gets what has actually been mapped.
   int grid_width = 600;
   int grid_height = 600;
   double origin_x = -30.0;
   double origin_y = -30.0;
+  // 64 cells is 6.4 m at 0.1 m. Tiles are created on demand and never
+  // reclaimed: the sweep's own grid is the drive's record.
+  int tile_size_cells = 64;
   double free_update = 0.45;
   double occupied_update = 0.9;
   double free_probability = 0.35;
@@ -160,13 +171,85 @@ struct SweepSettings
   bool use_cuda = true;
 };
 
-// One camera's accumulation state.
-struct CameraGrid
+// A rectangle of the global cell lattice, and where its lower-left corner
+// sits in the world.
+struct GridWindow
 {
+  int32_t cell_x = 0;
+  int32_t cell_y = 0;
+  int width = 0;
+  int height = 0;
+  double origin_x = 0.0;
+  double origin_y = 0.0;
+  bool empty() const {return width <= 0 || height <= 0;}
+};
+
+// A dense working copy of one window of a camera's grid. Every accumulation
+// and publish step runs against one of these, which is what lets the whole
+// validated dense chain -- the subcell votes, the ray carve, the slab counts,
+// distanceTransform, erode -- stay exactly as it was measured while the
+// storage underneath became sparse.
+struct GridView
+{
+  GridWindow window;
   cv::Mat log_odds;      // CV_32F
   cv::Mat observed;      // CV_8U
   cv::Mat slab_free[2];  // CV_16S, counts per z-slab
+};
+
+// One camera's accumulation state: tiles of cells, keyed by tile coordinate,
+// created where the sweep puts something and held for the life of the drive.
+struct CameraGrid
+{
+  struct Key
+  {
+    int32_t x = 0;
+    int32_t y = 0;
+    bool operator==(const Key & other) const {return x == other.x && y == other.y;}
+  };
+  struct KeyHash
+  {
+    std::size_t operator()(const Key & key) const
+    {
+      return static_cast<std::size_t>(static_cast<uint32_t>(key.x)) * 0x9E3779B97F4A7C15ull ^
+             static_cast<std::size_t>(static_cast<uint32_t>(key.y));
+    }
+  };
+  struct Tile
+  {
+    cv::Mat log_odds;      // CV_32F
+    cv::Mat observed;      // CV_8U
+    cv::Mat slab_free[2];  // CV_16S
+  };
+
   void reset(const SweepSettings & settings);
+
+  // A dense copy of the cells in `window`. With `create`, tiles the window
+  // covers are allocated so a later commit has somewhere to land; without it,
+  // absent tiles read as zeros and are not stored.
+  GridView view(const SweepSettings & s, const GridWindow & window, bool create);
+
+  // The window that covers `centre` out to `reach` metres, in whole cells.
+  static GridWindow around(
+    const SweepSettings & s, double x, double y, double reach);
+
+  // Write a view's cells back into the tiles. Cells outside any existing tile
+  // are dropped, so a read-only view commits only where it read.
+  void commit(const SweepSettings & s, const GridView & view);
+
+  // The window covering every tile held. Empty when nothing has been mapped.
+  GridWindow extent(const SweepSettings & s) const;
+
+  std::size_t tile_count() const {return tiles.size();}
+
+  std::unordered_map<Key, Tile, KeyHash> tiles;
+};
+
+// What `publish` produced, and the piece of the world it covers.
+struct Published
+{
+  cv::Mat values;   // CV_8S
+  GridWindow window;
 };
 
 class Sweep
@@ -233,9 +316,21 @@ private:
 
 // The publish chain: neutralise the slab-failing free belief, combine the
 // cameras by union, apply the column gate, erode the free rind. Returns the
-// ternary map (-1 unknown / 0 free / 50 undecided / 100 occupied).
-cv::Mat publish(
-  const SweepSettings & settings, std::vector<CameraGrid *> grids);
+// ternary map (-1 unknown / 0 free / 50 undecided / 100 occupied) and the
+// window it covers.
+//
+// `request` names the extent to publish. Leave it empty and the map is
+// cropped to the tiles that carry something, which is what the live node
+// wants: the message then grows with the drive instead of being a box chosen
+// before it started. `sweep_offline` passes the legacy fixed extent, because
+// it writes a bare .npy with no origin in it and the scoring reference reads
+// that file as 600 x 600 at (-30, -30).
+Published publish(
+  const SweepSettings & settings, std::vector<CameraGrid *> grids,
+  const GridWindow & request = GridWindow());
+
+// The legacy fixed extent named by grid_width/grid_height/origin_x/origin_y.
+GridWindow legacy_window(const SweepSettings & settings);
 
 }  // namespace monoscale_occupancy
 

@@ -378,9 +378,6 @@ static void ground_reach(
 
 Estimator::Estimator(const EstimatorSettings & settings)
 : settings_(settings),
-  heading_(
-    settings.gyro_bias_sigma_rad_s, settings.gyro_bias_walk_sigma_rad_s,
-    settings.gyro_noise_sigma_rad_s),
   inertial_(
     [&settings]() {
       PlanarInertialPropagator::Settings inertial;
@@ -491,8 +488,6 @@ Estimator::Estimator(const EstimatorSettings & settings)
   }
   // Only the gyro path corrects its own source; a quaternion heading is read
   // as it comes and the filter's prediction is the whole of what it knows.
-  heading_.set_source_corrected(
-    settings.imu_yaw_from_gyro ? settings.gyro_bias_apply : 0.0);
   if (settings.fusion_model == FusionModel::Displacement) {
     PlanarDisplacementFilter::Settings filter;
     filter.acceleration_noise = settings.filter_acceleration_noise;
@@ -722,7 +717,7 @@ void Estimator::ingest_imu(const ImuSample & measured)
         // that has a bias, which is what pointed at it.
         gyro_yaw_ = wrap_pi(
           gyro_yaw_ +
-          (sample.angular_velocity.z() + settings_.gyro_bias_apply * heading_.rate()) * step);
+          sample.angular_velocity.z() * step);
       }
     }
     gyro_yaw_stamp_ = sample.stamp;
@@ -1357,191 +1352,29 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // always been discarded, because a heading was always supplied; when it is
   // not, this is where it comes from.
   std::optional<double> yaw = yaw_delta;
-  // The photometric rotation first where it is being solved: the two-frame fit
-  // below reads the same motion off a correspondence set that goes asymmetric
-  // as the patch overlap shrinks, and pays for it with a bias that grows with
-  // the step.
-  if (settings_.esm_yaw_source) {
-    ++diagnostics_.consumer_armed[Diagnostics::kEsmYawSource];
-  }
-  if (!yaw.has_value() && settings_.esm_yaw_source && camera.esm_valid &&
-    std::isfinite(camera.esm_yaw_since_solve) &&
-    std::abs(camera.esm_yaw_since_solve) <= settings_.max_yaw_per_frame_rad)
-  {
-    yaw = camera.esm_yaw_since_solve;
-    ++diagnostics_.consumer_fed[Diagnostics::kEsmYawSource];
-  }
-  // The ESM's turn as an *observation* of the heading that was handed in,
-  // rather than as a replacement for it.
+  // Three alternative sources for the hop's yaw used to sit here -- the ESM's
+  // turn as a replacement, the ground pairs' own rotation, and the ESM's turn
+  // as an observation folded through a gyro-bias filter. All three are gone.
   //
-  // The gyro's error over a hop is its bias times the interval, and a bias is
-  // a constant the filter already carries as a state. What it lacked was
-  // anything that could see it: the anchor map is built in the estimator's own
-  // frame, so a slow heading drift turns the map and the vehicle together and
-  // the alignment residual barely moves. Measured on curve_s05, where the gyro
-  // bias is +0.903 deg/s: 261 updates recovered 21% of it. The ESM reads its
-  // rotation off the image and does not turn with that frame.
-  // Armed by the setting alone, deliberately. Every other condition here --
-  // the heading filter being on, the ESM having spoken -- is something this
-  // observation *needs*, and folding a need into the arming test is how an
-  // instrument for dead configuration ends up unable to see it. Written the
-  // other way first, and it reported nothing on a configuration with two dead
-  // layers in it.
-  if (settings_.esm_yaw_sigma_rad > 0.0 &&
-    (settings_.esm_yaw_camera.empty() ||
-    settings_.esm_yaw_camera == camera.settings.name))
-  {
-    ++diagnostics_.consumer_armed[Diagnostics::kEsmYawObservation];
-  }
-  if (settings_.esm_yaw_sigma_rad > 0.0 && heading_.enabled() &&
-    (settings_.esm_yaw_camera.empty() ||
-    settings_.esm_yaw_camera == camera.settings.name) &&
-    yaw_delta.has_value() && camera.esm_valid &&
-    std::isfinite(camera.esm_yaw_since_solve) &&
-    std::abs(camera.esm_yaw_since_solve) <= settings_.max_yaw_per_frame_rad)
-  {
-    // Sign: `error_` is the correction the filter adds to the pose, so an
-    // instrument that over-reads the turn by b dt needs -b dt applied, and the
-    // ESM minus the instrument is that difference already.
-    const double innovation = wrap_pi(camera.esm_yaw_since_solve - *yaw_delta);
-    // The sigma this observation deserves is the spread of this residual, which
-    // is the ESM's own error plus the instrument's over the same interval. It
-    // has to be measured rather than assumed, so it can be written out.
-    if (const char * path = std::getenv("MONOSCALE_HEADING_INNOVATION")) {
-      if (heading_innovation_file_ == nullptr) {
-        heading_innovation_file_ = std::fopen(path, "w");
-        if (heading_innovation_file_ != nullptr) {
-          std::fprintf(heading_innovation_file_, "stamp,innovation,esm_yaw,instrument\n");
-        }
-      }
-      if (heading_innovation_file_ != nullptr) {
-        std::fprintf(
-          heading_innovation_file_, "%.6f,%.9f,%.9f,%.9f\n", camera.band_stamp, innovation,
-          camera.esm_yaw_since_solve, *yaw_delta);
-      }
-    }
-    heading_observations_.emplace_back(
-      innovation,
-      settings_.esm_yaw_sigma_rad +
-      settings_.esm_yaw_sigma_rate * std::abs(camera.esm_yaw_since_solve));
-    ++diagnostics_.consumer_fed[Diagnostics::kEsmYawObservation];
-  }
-  if (settings_.vision_yaw) {
-    ++diagnostics_.consumer_armed[Diagnostics::kVisionYaw];
-    if (solved.ground_valid.any()) {
-      ++diagnostics_.consumer_fed[Diagnostics::kVisionYaw];
-    }
-  }
-  if (!yaw.has_value() && settings_.vision_yaw && solved.ground_valid.any()) {
-    Eigen::Index usable_pairs = 0;
-    for (Eigen::Index i = 0; i < count; ++i) {
-      if (solved.ground_valid(i)) {
-        ++usable_pairs;
-      }
-    }
-    if (usable_pairs >= settings_.ground_min_inliers) {
-      Points2 before(usable_pairs, 2);
-      Points2 after(usable_pairs, 2);
-      Eigen::Index at = 0;
-      for (Eigen::Index i = 0; i < count; ++i) {
-        if (!solved.ground_valid(i)) {
-          continue;
-        }
-        before.row(at) = solved.previous_ground.row(i);
-        after.row(at) = solved.current_ground.row(i);
-        ++at;
-      }
-      const auto free_fit = estimate_planar_motion(
-        before, after, settings_.ground_ransac_threshold_m,
-        settings_.ground_min_inliers, settings_.max_scale_error);
-      if (free_fit.has_value() && std::isfinite(free_fit->motion.yaw) &&
-        std::abs(free_fit->motion.yaw) <= settings_.max_yaw_per_frame_rad)
-      {
-        yaw = free_fit->motion.yaw;
-        // The similarity fit carries a scale as well, and the ground's scale is
-        // set by the camera height rather than by this hop. With a patch held
-        // four metres off the rotation centre a yaw and a sideways slide are
-        // already nearly the same thing -- conditioning 45.5 against 2.4 for a
-        // patch about the origin -- and a free scale is a third direction for
-        // them to trade against. So the rotation is taken again rigidly, over
-        // the correspondences that fit agreed on, with the scale held at one.
-        if (settings_.vision_yaw_rigid && free_fit->inliers.size() == before.rows()) {
-          Eigen::Vector2d mean_before = Eigen::Vector2d::Zero();
-          Eigen::Vector2d mean_after = Eigen::Vector2d::Zero();
-          double kept_terms = 0.0;
-          for (Eigen::Index i = 0; i < before.rows(); ++i) {
-            if (!free_fit->inliers(i)) {
-              continue;
-            }
-            mean_before += before.row(i).transpose();
-            mean_after += after.row(i).transpose();
-            kept_terms += 1.0;
-          }
-          if (kept_terms >= 3.0) {
-            mean_before /= kept_terms;
-            mean_after /= kept_terms;
-            double cross = 0.0;
-            double dot = 0.0;
-            for (Eigen::Index i = 0; i < before.rows(); ++i) {
-              if (!free_fit->inliers(i)) {
-                continue;
-              }
-              const double bx = before(i, 0) - mean_before.x();
-              const double by = before(i, 1) - mean_before.y();
-              const double ax = after(i, 0) - mean_after.x();
-              const double ay = after(i, 1) - mean_after.y();
-              // The similarity fit above maps the current cloud onto the
-              // earlier one, so this has to turn the same way round or the two
-              // disagree by exactly a sign.
-              cross += ax * by - ay * bx;
-              dot += bx * ax + by * ay;
-            }
-                const double rigid = std::atan2(cross, dot);
-            if (std::isfinite(rigid) &&
-              std::abs(rigid) <= settings_.max_yaw_per_frame_rad)
-            {
-              yaw = rigid;
-            }
-          }
-          if (settings_.vision_yaw_vehicle) {
-            // The vehicle's own two freedoms, over the same inliers. To first
-            // order a step s and a yaw d move a ground point at (x, y) by
-            // (-s + d*y, -d*x), which is linear in both, so this is two normal
-            // equations and no search.
-            double a11 = 0.0;
-            double a12 = 0.0;
-            double a22 = 0.0;
-            double b1 = 0.0;
-            double b2 = 0.0;
-            for (Eigen::Index i = 0; i < before.rows(); ++i) {
-              if (!free_fit->inliers(i)) {
-                continue;
-              }
-              const double px = before(i, 0);
-              const double py = before(i, 1);
-              const double dx = after(i, 0) - px;
-              const double dy = after(i, 1) - py;
-              // Row for dx: -1 * s + py * d.  Row for dy: 0 * s + (-px) * d.
-              a11 += 1.0;
-              a12 += -py;
-              a22 += py * py + px * px;
-              b1 += -dx;
-              b2 += py * dx - px * dy;
-            }
-            const double det = a11 * a22 - a12 * a12;
-            if (std::abs(det) > 1e-12) {
-              const double vehicle = (a11 * b2 - a12 * b1) / det;
-              if (std::isfinite(vehicle) &&
-                std::abs(vehicle) <= settings_.max_yaw_per_frame_rad)
-              {
-                yaw = vehicle;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+  // Measured 2026-09-09 on the nine drives, from the replay side so nothing
+  // else moved. `esm_yaw_source` and `vision_yaw` both sit behind
+  // `!yaw.has_value()`, which `use_imu_yaw` has already filled on every frame,
+  // so turning either on changes nothing at all and the starvation counter
+  // reports them unfed. The observation path needed `HeadingBiasFilter`, which
+  // is `enabled_(bias_sigma > 0.0)` against a deployed
+  // `gyro_bias_sigma_rad_s` of 0.0 -- and giving it a bias to estimate costs
+  // 14 to 16 times the error (0.0229% to 0.32-0.36%), because the bias it was
+  // built for was a PhysX substepping artefact in the recordings and the
+  // instrument underneath it does not have one. A free state chasing a
+  // quantity that is zero is a random walk.
+  //
+  // What is left is one source: the heading handed in, integrated from the
+  // gyro. That now costs 3% against CARLA's truth attitude (0.0229% against
+  // 0.0222%) where it once cost 9.7x, so being self-contained is nearly free.
+  //
+  // The photometric fit does measure a turn, and it is thrown away here on
+  // purpose: what it lacked was never a place to go but an honest weight. Its
+  // covariance is computed inside the fit and discarded; see the note there.
   solved.solved_yaw = yaw.value_or(std::numeric_limits<double>::quiet_NaN());
 
   if (!yaw.has_value() || !solved.ground_valid.any()) {
@@ -1816,8 +1649,14 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       aligned = align_to_anchors(
         body, world, weights, handed, gate,
         settings_.ground_min_inliers,
-        settings_.align_solves_yaw &&
-        heading_.enabled(),
+        // Never. This read `align_solves_yaw && heading_.enabled()`, and the
+        // deployed `gyro_bias_sigma_rad_s` of 0.0 made the second term false on
+        // every frame, so the alignment has never solved for yaw in any
+        // configuration that shipped or was benchmarked. Dropping the filter
+        // and keeping the switch turns on a path nothing has ever measured:
+        // done by accident here, it took the nine drives 0.0229% -> 0.0358%
+        // and the worst 0.0391% -> 0.0922%.
+        false,
         lens, settings_.radial_min_range_m, lens_height,
         softness_for(camera, settings_.ground_align_softness_m),
         road_centre.has_value() ? &*road_centre
@@ -1874,15 +1713,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
               camera.range_scale_learned * (1.0 + step), 0.9, 1.1);
           }
         }
-      }
-      // Recorded, not applied. Both cameras see the same heading and each has
-      // its own opinion of how far it is out; folding them in one at a time
-      // gives the filter two updates against one prediction.
-      if (heading_.enabled() && std::isfinite(aligned->yaw_sigma) &&
-        aligned->yaw_sigma > 0.0)
-      {
-        heading_observations_.emplace_back(
-          wrap_pi(aligned->yaw - handed), aligned->yaw_sigma);
       }
       // With the MSCKF the heading the ground settled on is what the filter is
       // being told; without it the heading handed in stands, which is what
@@ -2128,8 +1958,6 @@ void Estimator::process_pair()
   frames_since_solve_ = 0;
 
   // Before the cameras speak, not after: they are what fills this.
-  heading_.predict(std::max(dt, 0.0));
-  heading_observations_.clear();
 
   // The MSCKF propagates before it measures, which is the order an MSCKF runs
   // in and the reason the heading it hands the solve is worth more than the
@@ -2816,45 +2644,15 @@ void Estimator::process_pair()
     update.applied_hop = Eigen::Vector2d(motion->x, motion->y);
     update.applied_valid = true;
     pose_ = pose_.compose(*motion);
-    // One update against one prediction, from both cameras at once, weighted
-    // the way two measurements of the same quantity are.
-    if (heading_.enabled() && !heading_observations_.empty()) {
-      double precision = 0.0;
-      double weighted = 0.0;
-      for (const auto & [residual, sigma] : heading_observations_) {
-        precision += 1.0 / (sigma * sigma);
-        weighted += residual / (sigma * sigma);
-      }
-      if (precision > 0.0) {
-        const double offset =
-          heading_.update(weighted / precision, std::sqrt(1.0 / precision));
-        pose_.yaw = wrap_pi(pose_.yaw + offset);
-        // Reported so a run can be asked whether this loop ran at all. Both
-        // fields were declared and never assigned, so the diagnostic line they
-        // gate was unreachable and their absence proved nothing.
-        diagnostics_.gyro_bias = heading_.rate();
-        diagnostics_.heading_drift = offset;
-        ++diagnostics_.heading_updates;
-      }
-    }
     // The map's own reading of the heading, applied where there is no
     // instrument to hold it. Taken only from cameras whose anchors answered
     // this solve -- a carried-over value is the same measurement applied twice.
-    if (settings_.anchor_heading_gain != 0.0) {
-      double total = 0.0;
-      int terms = 0;
-      for (auto & camera : cameras_) {
-        if (camera->anchor_yaw_fresh) {
-          total += camera->anchor_yaw_last;
-          ++terms;
-          camera->anchor_yaw_fresh = false;
-        }
-      }
-      if (terms > 0 && std::isfinite(total)) {
-        pose_.yaw = wrap_pi(
-          pose_.yaw + settings_.anchor_heading_gain * total / static_cast<double>(terms));
-      }
-    }
+    // The map's own heading correction used to be folded in here. It costs 13x
+    // at a gain of 0.1 and 53x at 0.5 (0.0229% -> 0.2989% -> 1.2093%), which is
+    // the same defect the bias filter had: the anchor map is built in the
+    // estimator's frame, so it turns with the vehicle and its residual cannot
+    // see a heading error. Correcting the heading from it feeds the estimate
+    // back into itself.
     last_accept_stamp_ = current_stamp;
 
     double vx = 0.0;
@@ -2873,11 +2671,10 @@ void Estimator::process_pair()
     if (!anchor_weight_yaw_.has_value()) {
       anchor_weight_yaw_ = pose_.yaw;
     } else {
-      const double yaw_alpha = settings_.anchor_weight_yaw_tau_sec <= 0.0
-        ? 1.0
-        : dt / (settings_.anchor_weight_yaw_tau_sec + dt);
-      anchor_weight_yaw_ = wrap_pi(
-        *anchor_weight_yaw_ + yaw_alpha * wrap_pi(pose_.yaw - *anchor_weight_yaw_));
+      // Was a first-order filter on `anchor_weight_yaw_tau_sec`, whose
+      // deployed value of 0 made it the identity. The heading the weights are
+      // judged from is the heading.
+      anchor_weight_yaw_ = pose_.yaw;
     }
 
     {

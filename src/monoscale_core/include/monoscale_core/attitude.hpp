@@ -111,61 +111,6 @@ private:
   int corrections_ = 0;
 };
 
-// Two states: how far the heading is out, and how fast it is going out.
-//
-// The reason this exists rather than a gain. The heading the estimator is
-// handed drifts because the instrument behind it has a bias, and a bias is not
-// noise: inflate its variance and pay the variance off against a measurement,
-// and the next interval simply earns it back. Measured, that is exactly what
-// happens -- a precision weighted share of the ground solve's own heading left
-// a drifting drive at 0.172 m where believing the gyro outright gave 0.169, and
-// made the two undrifted drives worse. The bias has to be a state or it cannot
-// be cancelled.
-//
-// So: the error and its rate, the error fed by the rate, both corrected by what
-// the ground says the heading should have been. The error is injected into the
-// pose and reset to zero after every update, which is what makes this an error
-// state filter rather than a filter on the heading itself -- the heading lives
-// in the pose, where the rest of the estimator can see it.
-class HeadingBiasFilter
-{
-public:
-  HeadingBiasFilter(double bias_sigma, double walk_sigma, double noise_sigma);
-
-  bool enabled() const {return enabled_;}
-  double rate() const {return rate_;}
-  const Eigen::Matrix2d & covariance() const {return covariance_;}
-  // Writable so a test can deny the filter its second state and show that the
-  // rate is what does the work.
-  Eigen::Matrix2d & covariance() {return covariance_;}
-
-  // What fraction of `rate_` whoever supplies the heading already takes out at
-  // the source. The drift this filter should then expect over a step is the
-  // part that was left, `(1 - fraction) rate_ dt`; advancing by the whole of
-  // it counts the correction twice, and at fraction 1 that makes the residual
-  // carry -(b + r) dt against a prediction of r dt, so the innovation vanishes
-  // at r = -b/2. Measured before this existed: 47-58% recovery on every drive
-  // with a bias. The covariance grows the same either way.
-  void set_source_corrected(double fraction) {corrected_ = fraction;}
-
-  void predict(double dt);
-
-  // Fold in one ground solve's opinion and return the heading offset.
-  //
-  // `residual` is how far that solve wanted to move the heading from where it
-  // was handed. Returns what to actually move it by, which is the error state
-  // after the update and before it is reset.
-  double update(double residual, double sigma);
-
-private:
-  double error_ = 0.0;
-  double rate_ = 0.0;
-  Eigen::Matrix2d covariance_ = Eigen::Matrix2d::Zero();
-  double walk_;
-  double noise_;
-  bool enabled_;
-  double corrected_ = 0.0;
-};
 
 }  // namespace monoscale
 

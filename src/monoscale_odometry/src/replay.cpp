@@ -1528,15 +1528,10 @@ int main(int argc, char ** argv)
       diagnostics.height, diagnostics.levelled, diagnostics.range_scale);
     std::printf("hop 잔차: 갱신직후=%.4f 최종=%.4f m\n", diagnostics.hop_taken, diagnostics.hop_residual);
   }
-  if (diagnostics.last_nis != 0.0 || diagnostics.gyro_bias != 0.0 ||
-    diagnostics.heading_updates != 0)
-  {
+  if (diagnostics.last_nis != 0.0 || diagnostics.filter_rejections != 0) {
     std::printf(
-      "필터: 자이로바이어스=%+.5f rad/s  헤딩끌림=%+.5f rad/hop  마지막 NIS=%.3f  "
-      "게이트기각=%ld  버림=%ld  헤딩갱신=%ld\n",
-      diagnostics.gyro_bias, diagnostics.heading_drift, diagnostics.last_nis,
-      diagnostics.filter_rejections, diagnostics.filter_dropped,
-      diagnostics.heading_updates);
+      "필터: 마지막 NIS=%.3f  게이트기각=%ld  버림=%ld\n",
+      diagnostics.last_nis, diagnostics.filter_rejections, diagnostics.filter_dropped);
   }
 
   // Anything switched on here that never received what it consumes. Printed

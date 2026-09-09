@@ -225,19 +225,16 @@
     # A real MEMS gyro does carry turn-on bias and in-run instability, so this
     # will have to come back for hardware -- but tuned against a real gyro,
     # not against a square wave that only ever existed in the simulator.
-    gyro_bias_sigma_rad_s: 0.0
     # How fast the bias is allowed to move. Never swept until now, and the code
     # default of 1e-5 costs 12% of worst-drive: 1e-6/1e-5/1e-4/3e-4/1e-3 give
     # 0.3657/0.3656/0.3632/0.4297/0.6939. An interior optimum, so the bias in
     # these recordings is not a constant.
-    gyro_bias_walk_sigma_rad_s: 0.0001
     gyro_noise_sigma_rad_s: 0.001
     # Front only. Over eleven drives the front camera's accumulated ESM yaw
     # error stays inside 0.29-2.52 deg while the rear's reaches -36.78 on
     # straight120_v3 and +35.58 on v4 -- one condition, two recordings,
     # opposite sign. Averaging the two taught the filter the bias backwards on
     # exactly those drives.
-    esm_yaw_camera: front
     # Sigma is `esm_yaw_sigma_rad + esm_yaw_sigma_rate * |turn|`. The rate part
     # is the load-bearing one: the ESM's yaw error is a scale on the rotation,
     # 0.93/1.66/1.97% of the angle turned on curve_s05/s10/s20, so at 1.0 the
@@ -263,12 +260,9 @@
     # fitting the score. The plateau the old comment recorded -- 2e-6 and 2e-5
     # both giving 0.3632 -- was measured before `road_step_esm` reached this
     # file, so the observation it describes was never running in deployment.
-    esm_yaw_sigma_rad: 0.00005
-    esm_yaw_sigma_rate: 1.0
     # How much of the learned bias to take out of the gyro itself. Zero: the
     # value is in the filter correcting the pose, not in correcting the source.
     # 0.15 is a wash, 1.0 is +27%, and negative is worse still.
-    gyro_bias_apply: 0.0
     # 100 Hz IMU against the same simulation clock as the images.
     imu_max_age_sec: 0.02
 

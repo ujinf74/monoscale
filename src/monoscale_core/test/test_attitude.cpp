@@ -20,7 +20,6 @@
 #include "monoscale_core/attitude.hpp"
 
 using monoscale::AttitudeFilter;
-using monoscale::HeadingBiasFilter;
 
 namespace
 {
@@ -50,93 +49,7 @@ private:
   unsigned int state_;
 };
 
-// Drive the filter with a heading that drifts at `bias` radians a second.
-// Returns how far the heading was out at the end, after every correction the
-// filter asked for has been applied to it.
-double run(
-  HeadingBiasFilter & filter, double bias, int steps, double dt = 0.02,
-  double sigma = 0.01, unsigned int seed = 0)
-{
-  Noise noise(seed);
-  double error = 0.0;
-  for (int i = 0; i < steps; ++i) {
-    error += bias * dt;
-    filter.predict(dt);
-    // What the ground says the heading should have been, seen through a solve
-    // of finite precision.
-    const double measured = -error + noise.normal(sigma);
-    error += filter.update(measured, sigma);
-  }
-  return error;
-}
-
 }  // namespace
-
-TEST(Heading, DisabledByDefaultTheHeadingIsLeftAlone)
-{
-  HeadingBiasFilter quiet(0.0, 1e-5, 1e-3);
-
-  EXPECT_FALSE(quiet.enabled());
-  EXPECT_DOUBLE_EQ(quiet.update(0.5, 0.01), 0.0);
-  EXPECT_NEAR(run(quiet, 0.005, 200), 0.005 * 0.02 * 200, 1e-12);
-}
-
-TEST(Heading, AConstantBiasIsLearnedAndStopsAccumulating)
-{
-  const double bias = 0.005;
-  HeadingBiasFilter filter(0.01, 1e-6, 1e-4);
-
-  const double left = run(filter, bias, 600);
-
-  // The rate it settled on is the one that was there.
-  EXPECT_NEAR(filter.rate(), -bias, 0.2 * bias);
-  // And what the heading has left over is a fraction of a milliradian, against
-  // the 60 mrad it would have accumulated untouched.
-  EXPECT_LT(std::abs(left), 0.002);
-}
-
-TEST(Heading, LearningTheRateIsWhatMakesTheDifference)
-{
-  // The same filter, denied its second state, cannot keep up. Pinning the rate
-  // to zero leaves something that can only chase the error it can already see,
-  // which is the shape both earlier attempts had.
-  const double bias = 0.005;
-  HeadingBiasFilter full(0.01, 1e-6, 1e-4);
-  HeadingBiasFilter rateless(0.01, 1e-6, 1e-4);
-  rateless.covariance()(1, 1) = 0.0;
-
-  const double with_rate = std::abs(run(full, bias, 600));
-  const double without = std::abs(run(rateless, bias, 600));
-
-  EXPECT_LT(with_rate, 0.25 * without);
-}
-
-TEST(Heading, AQuietInstrumentIsNotTalkedOutOfItsHeading)
-{
-  // Nothing to find, so nothing should be done. This is the case the simulator
-  // provides and a vehicle never will, and the filter costing accuracy here is
-  // the price of it working elsewhere -- but the price has to stay small.
-  HeadingBiasFilter filter(0.01, 1e-6, 1e-4);
-
-  const double left = std::abs(run(filter, 0.0, 600, 0.02, 0.01, 3));
-
-  EXPECT_LT(left, 0.002);
-  EXPECT_LT(std::abs(filter.rate()), 0.001);
-}
-
-TEST(Heading, TheCovarianceStaysSymmetricAndPositive)
-{
-  HeadingBiasFilter filter(0.01, 1e-6, 1e-4);
-
-  run(filter, 0.005, 300);
-
-  const Eigen::Matrix2d & covariance = filter.covariance();
-  EXPECT_NEAR(covariance(0, 1), covariance(1, 0), 1e-15);
-  EXPECT_GT(covariance(0, 0), 0.0);
-  EXPECT_GT(covariance(1, 1), 0.0);
-  EXPECT_GT(covariance.determinant(), 0.0);
-  EXPECT_TRUE(covariance.allFinite());
-}
 
 TEST(Attitude, LevelIsTheStartingPriorNotTheFirstSample)
 {

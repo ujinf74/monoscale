@@ -121,49 +121,5 @@ Eigen::Matrix3d AttitudeFilter::body_tilt() const
   return tilt;
 }
 
-HeadingBiasFilter::HeadingBiasFilter(double bias_sigma, double walk_sigma, double noise_sigma)
-: walk_(walk_sigma * walk_sigma),
-  noise_(noise_sigma * noise_sigma),
-  enabled_(bias_sigma > 0.0)
-{
-  // No idea which way the bias points, every idea of how big it is.
-  covariance_(1, 1) = bias_sigma * bias_sigma;
-}
-
-void HeadingBiasFilter::predict(double dt)
-{
-  if (!enabled_ || dt <= 0.0) {
-    return;
-  }
-  error_ += (1.0 - corrected_) * rate_ * dt;
-  Eigen::Matrix2d transition;
-  transition << 1.0, dt, 0.0, 1.0;
-  covariance_ = transition * covariance_ * transition.transpose();
-  covariance_(0, 0) += noise_ * dt;
-  covariance_(1, 1) += walk_ * dt;
-}
-
-double HeadingBiasFilter::update(double residual, double sigma)
-{
-  if (!enabled_ || !std::isfinite(sigma) || sigma <= 0.0) {
-    return 0.0;
-  }
-  const double innovation = residual - error_;
-  const double variance = covariance_(0, 0) + sigma * sigma;
-  if (variance <= 0.0) {
-    return 0.0;
-  }
-  const Eigen::Vector2d gain = covariance_.col(0) / variance;
-  error_ += gain(0) * innovation;
-  rate_ += gain(1) * innovation;
-  Eigen::Matrix2d reduction = Eigen::Matrix2d::Identity();
-  reduction -= gain * Eigen::RowVector2d(1.0, 0.0);
-  covariance_ = reduction * covariance_;
-  const double applied = error_;
-  // Injected into the pose, so the error state starts again from zero while
-  // what it taught us about the rate stays.
-  error_ = 0.0;
-  return applied;
-}
 
 }  // namespace monoscale

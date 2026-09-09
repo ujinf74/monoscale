@@ -45,12 +45,173 @@ Eigen::Matrix3d attitude(const Pose5 & pose)
   return yaw * pitch * roll;
 }
 
-void CameraGrid::reset(const SweepSettings & s)
+namespace
 {
-  log_odds = cv::Mat::zeros(s.grid_height, s.grid_width, CV_32F);
-  observed = cv::Mat::zeros(s.grid_height, s.grid_width, CV_8U);
-  slab_free[0] = cv::Mat::zeros(s.grid_height, s.grid_width, CV_16S);
-  slab_free[1] = cv::Mat::zeros(s.grid_height, s.grid_width, CV_16S);
+
+int32_t floor_div(const int32_t value, const int32_t by)
+{
+  const int32_t quotient = value / by;
+  return (value % by != 0 && ((value < 0) != (by < 0))) ? quotient - 1 : quotient;
+}
+
+int32_t cell_of(const double world, const double origin, const double resolution)
+{
+  return static_cast<int32_t>(std::floor((world - origin) / resolution));
+}
+
+int tile_side(const SweepSettings & s)
+{
+  return std::max(8, s.tile_size_cells);
+}
+
+}  // namespace
+
+void CameraGrid::reset(const SweepSettings &)
+{
+  tiles.clear();
+}
+
+GridWindow CameraGrid::around(
+  const SweepSettings & s, const double x, const double y, const double reach)
+{
+  GridWindow window;
+  window.cell_x = cell_of(x - reach, s.origin_x, s.resolution);
+  window.cell_y = cell_of(y - reach, s.origin_y, s.resolution);
+  const int32_t x1 = cell_of(x + reach, s.origin_x, s.resolution);
+  const int32_t y1 = cell_of(y + reach, s.origin_y, s.resolution);
+  window.width = static_cast<int>(x1 - window.cell_x + 1);
+  window.height = static_cast<int>(y1 - window.cell_y + 1);
+  window.origin_x = s.origin_x + window.cell_x * s.resolution;
+  window.origin_y = s.origin_y + window.cell_y * s.resolution;
+  return window;
+}
+
+GridWindow CameraGrid::extent(const SweepSettings & s) const
+{
+  GridWindow window;
+  if (tiles.empty()) {return window;}
+  const int side = tile_side(s);
+  bool first = true;
+  int32_t x0 = 0;
+  int32_t y0 = 0;
+  int32_t x1 = 0;
+  int32_t y1 = 0;
+  for (const auto & entry : tiles) {
+    const Key & key = entry.first;
+    if (first) {
+      x0 = x1 = key.x;
+      y0 = y1 = key.y;
+      first = false;
+    } else {
+      x0 = std::min(x0, key.x);
+      x1 = std::max(x1, key.x);
+      y0 = std::min(y0, key.y);
+      y1 = std::max(y1, key.y);
+    }
+  }
+  window.cell_x = x0 * side;
+  window.cell_y = y0 * side;
+  window.width = static_cast<int>((x1 - x0 + 1) * side);
+  window.height = static_cast<int>((y1 - y0 + 1) * side);
+  window.origin_x = s.origin_x + window.cell_x * s.resolution;
+  window.origin_y = s.origin_y + window.cell_y * s.resolution;
+  return window;
+}
+
+GridView CameraGrid::view(
+  const SweepSettings & s, const GridWindow & window, const bool create)
+{
+  GridView out;
+  out.window = window;
+  if (window.empty()) {return out;}
+  out.log_odds = cv::Mat::zeros(window.height, window.width, CV_32F);
+  out.observed = cv::Mat::zeros(window.height, window.width, CV_8U);
+  out.slab_free[0] = cv::Mat::zeros(window.height, window.width, CV_16S);
+  out.slab_free[1] = cv::Mat::zeros(window.height, window.width, CV_16S);
+
+  const int side = tile_side(s);
+  const int32_t tx0 = floor_div(window.cell_x, side);
+  const int32_t ty0 = floor_div(window.cell_y, side);
+  const int32_t tx1 = floor_div(window.cell_x + window.width - 1, side);
+  const int32_t ty1 = floor_div(window.cell_y + window.height - 1, side);
+  for (int32_t ty = ty0; ty <= ty1; ++ty) {
+    for (int32_t tx = tx0; tx <= tx1; ++tx) {
+      auto found = tiles.find(Key{tx, ty});
+      if (found == tiles.end()) {
+        if (!create) {continue;}
+        Tile fresh;
+        fresh.log_odds = cv::Mat::zeros(side, side, CV_32F);
+        fresh.observed = cv::Mat::zeros(side, side, CV_8U);
+        fresh.slab_free[0] = cv::Mat::zeros(side, side, CV_16S);
+        fresh.slab_free[1] = cv::Mat::zeros(side, side, CV_16S);
+        found = tiles.emplace(Key{tx, ty}, std::move(fresh)).first;
+      }
+      // The overlap of this tile with the window, in each one's own cells.
+      const int32_t ox = std::max(window.cell_x, tx * side);
+      const int32_t oy = std::max(window.cell_y, ty * side);
+      const int32_t ex = std::min(window.cell_x + window.width, (tx + 1) * side);
+      const int32_t ey = std::min(window.cell_y + window.height, (ty + 1) * side);
+      if (ex <= ox || ey <= oy) {continue;}
+      const cv::Rect in_tile(
+        static_cast<int>(ox - tx * side), static_cast<int>(oy - ty * side),
+        static_cast<int>(ex - ox), static_cast<int>(ey - oy));
+      const cv::Rect in_view(
+        static_cast<int>(ox - window.cell_x), static_cast<int>(oy - window.cell_y),
+        in_tile.width, in_tile.height);
+      const Tile & tile = found->second;
+      tile.log_odds(in_tile).copyTo(out.log_odds(in_view));
+      tile.observed(in_tile).copyTo(out.observed(in_view));
+      tile.slab_free[0](in_tile).copyTo(out.slab_free[0](in_view));
+      tile.slab_free[1](in_tile).copyTo(out.slab_free[1](in_view));
+    }
+  }
+  return out;
+}
+
+void CameraGrid::commit(const SweepSettings & s, const GridView & view)
+{
+  const GridWindow & window = view.window;
+  if (window.empty()) {return;}
+  const int side = tile_side(s);
+  const int32_t tx0 = floor_div(window.cell_x, side);
+  const int32_t ty0 = floor_div(window.cell_y, side);
+  const int32_t tx1 = floor_div(window.cell_x + window.width - 1, side);
+  const int32_t ty1 = floor_div(window.cell_y + window.height - 1, side);
+  for (int32_t ty = ty0; ty <= ty1; ++ty) {
+    for (int32_t tx = tx0; tx <= tx1; ++tx) {
+      auto found = tiles.find(Key{tx, ty});
+      // Only where the view read from: a read-only view must not mint tiles.
+      if (found == tiles.end()) {continue;}
+      const int32_t ox = std::max(window.cell_x, tx * side);
+      const int32_t oy = std::max(window.cell_y, ty * side);
+      const int32_t ex = std::min(window.cell_x + window.width, (tx + 1) * side);
+      const int32_t ey = std::min(window.cell_y + window.height, (ty + 1) * side);
+      if (ex <= ox || ey <= oy) {continue;}
+      const cv::Rect in_tile(
+        static_cast<int>(ox - tx * side), static_cast<int>(oy - ty * side),
+        static_cast<int>(ex - ox), static_cast<int>(ey - oy));
+      const cv::Rect in_view(
+        static_cast<int>(ox - window.cell_x), static_cast<int>(oy - window.cell_y),
+        in_tile.width, in_tile.height);
+      Tile & tile = found->second;
+      view.log_odds(in_view).copyTo(tile.log_odds(in_tile));
+      view.observed(in_view).copyTo(tile.observed(in_tile));
+      view.slab_free[0](in_view).copyTo(tile.slab_free[0](in_tile));
+      view.slab_free[1](in_view).copyTo(tile.slab_free[1](in_tile));
+    }
+  }
+}
+
+GridWindow legacy_window(const SweepSettings & s)
+{
+  GridWindow window;
+  window.cell_x = 0;
+  window.cell_y = 0;
+  window.width = s.grid_width;
+  window.height = s.grid_height;
+  window.origin_x = s.origin_x;
+  window.origin_y = s.origin_y;
+  return window;
 }
 
 Sweep::Sweep(const SweepSettings & settings, const Lens & lens)

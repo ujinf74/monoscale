@@ -98,12 +98,14 @@ struct EstimatorSettings
   // The initial heading still comes from the orientation, once, which is the
   // stationary alignment any real system performs before it moves.
   bool imu_yaw_from_gyro = false;
+  // The gyro's own noise, used to grow the heading's variance between solves.
+  // A property of the instrument, not a tuning axis.
+  double gyro_noise_sigma_rad_s = 1.0e-3;
   // What the ESM's turn is worth as an observation of the handed-in heading,
   // in radians over one hop. 0 is off. Its per-hop scatter measures 0.0003 to
   // 0.009 deg (5e-6 to 1.6e-4 rad), but its error is dominated by a scale term
   // that grows with the turn -- 1 to 2 per cent of the angle travelled -- so
   // the scatter is a floor for this number and not the number.
-  double esm_yaw_sigma_rad = 0.0;
   // Which camera's ESM turn is allowed to be that observation. Empty is all of
   // them, which is what the first version did and is wrong: over eleven drives
   // the front camera's accumulated yaw error stays inside 0.29 to 2.52 deg
@@ -111,14 +113,12 @@ struct EstimatorSettings
   // condition, two recordings, opposite sign. Averaging a stable observer with
   // an unstable one gives the filter a residual that changes sign between
   // recordings, and it learned the bias backwards on exactly those drives.
-  std::string esm_yaw_camera;
   // The part of that sigma that grows with the turn. The ESM's yaw error is not
   // scatter: over three curve drives its accumulated error divided by the angle
   // actually turned is 0.93, 1.66 and 1.97 per cent, so the error is a scale on
   // the rotation and a constant sigma over-trusts it exactly where the vehicle
   // is turning hardest. Sigma is `esm_yaw_sigma_rad + this * |turn|`, and this
   // number is that measured fraction rather than a tuned one.
-  double esm_yaw_sigma_rate = 0.0;
   // How much of the learned bias to actually take out of the gyro. 1 is the
   // whole of it and is not obviously right: the observation that taught the
   // filter is the ESM, which carries a bias of its own, so the estimate is
@@ -127,14 +127,12 @@ struct EstimatorSettings
   // the observation sigma -- sigma sets how fast and how noisily the filter
   // converges, not what a biased observation converges to, which is why that
   // axis runs to its low edge and stops mattering.
-  double gyro_bias_apply = 1.0;
   // Solve the hop's rotation from the ground points instead of reading it off
   // the instrument. The two-frame similarity fit already recovers it -- it is
   // thrown away because a heading has always been supplied. Without this the
   // stack cannot run at all without an orientation from outside, and on this
   // simulator that orientation is the truth, so nothing here is tested against
   // a heading a real vehicle would have.
-  bool vision_yaw = false;
   // How much of the anchors' own opinion of the heading to apply each solve.
   // Without an instrument the hop's rotation is all there is, and the two-frame
   // fit carries a bias of a tenth of a degree a hop -- tens of degrees over a
@@ -142,9 +140,7 @@ struct EstimatorSettings
   // residual says how far the heading has slid against the anchors, and that
   // error does not accumulate the way the hop's does. Small, because one
   // measurement of it is worth about 0.08 degrees.
-  double anchor_heading_gain = 0.0;
   // Take the vision heading from a rigid fit rather than the similarity one.
-  bool vision_yaw_rigid = true;
   // Fit the hop as the vehicle's own two freedoms -- a forward step and a yaw
   // about base_link -- instead of as a free similarity.
   //
@@ -158,13 +154,11 @@ struct EstimatorSettings
   // this constraint -- its translation is (step, 0, 0) and its yaw carries the
   // mount on its own lever -- which is why its yaw bias is 0.0025 deg against
   // the same drive's 0.177.
-  bool vision_yaw_vehicle = false;
   // Take the hop's rotation from the photometric solve rather than from the
   // two-frame similarity fit. The fit's rotation carries a bias that grows with
   // the step -- 0.001 deg a hop at 2 m/s against 0.173 at 7.5 -- because the
   // correspondence set goes asymmetric as the patch overlap shrinks. The
   // photometric answer uses whatever overlaps, weighted by the image.
-  bool esm_yaw_source = false;
   // Carry the photometric solve's pitch and roll increments into the camera's
   // tilt, leaked back toward whatever absolute source is enabled. Integrating
   // them alone runs away -- on a drive whose true attitude never moves the
@@ -221,9 +215,6 @@ struct EstimatorSettings
   // What the heading source is expected to do wrong, as the part's own numbers
   // rather than as tuning. Setting the first to 0 believes the reported heading
   // outright, which is what every measurement before this assumed.
-  double gyro_bias_sigma_rad_s = 0.0;
-  double gyro_bias_walk_sigma_rad_s = 1.0e-5;
-  double gyro_noise_sigma_rad_s = 1.0e-3;
 
   bool coast_on_reject = true;
   double twist_lowpass_tau = 0.12;
@@ -392,7 +383,6 @@ struct EstimatorSettings
   double anchor_lookahead_sec = 0.0;
   // Time constant of the heading the anchor weights are judged from. 0 uses the
   // pose's own heading, which is what every measurement before this used.
-  double anchor_weight_yaw_tau_sec = 0.0;
   double anchor_geometry_power = 0.0;
   bool anchor_weight_by_variance = false;
   double anchor_bearing_variance = 3.6e-6;
@@ -483,7 +473,6 @@ struct EstimatorSettings
   // independent heading. On a rig whose gyro is already exact that trade is
   // all cost: turning it on under the displacement model takes mean ATE from
   // 0.1703 to 0.8056.
-  bool align_solves_yaw = true;
   // Largest sweep across the frame, in pixels over the whole solve, that a
   // ground feature may have and still be used. Zero is no limit. The band this
   // sits beside is in metres, and metres do not say whether the flow could
@@ -994,16 +983,12 @@ struct Diagnostics
 
   // What the MSCKF learned and what it thought of the last measurement. The
   // gyro bias is the state the older filters had no place for, so its value is
-  // the whole claim; the NIS says whether the covariance is honest.
-  double gyro_bias = 0.0;
   double last_nis = 0.0;
   double nis_total = 0.0;
   int64_t nis_samples = 0;
   // The one-sided part of vision's yaw residual, in radians per hop: how far
   // the reported heading is pulling the estimate away from the ground.
-  double heading_drift = 0.0;
   // How many times the heading filter was actually folded in.
-  int64_t heading_updates = 0;
   int64_t filter_dropped = 0;
   // What only the six degree of freedom filter has to report: how it thinks the
   // vehicle is leaning, how high it thinks it is, and how many of the
@@ -1074,12 +1059,9 @@ struct Diagnostics
   // the ratio between them is worth reading on its own.
   enum Consumer
   {
-    kEsmYawObservation = 0,
-    kEsmYawSource,
-    kEsmAttitude,
+    kEsmAttitude = 0,
     kBandAttitude,
     kAnchorAttitude,
-    kVisionYaw,
     kConsumerCount
   };
   std::array<int64_t, kConsumerCount> consumer_armed{};
@@ -1087,12 +1069,9 @@ struct Diagnostics
   static const char * consumer_name(int which)
   {
     switch (which) {
-      case kEsmYawObservation: return "esm_yaw_sigma_rad";
-      case kEsmYawSource: return "esm_yaw_source";
       case kEsmAttitude: return "esm_attitude";
       case kBandAttitude: return "band_attitude";
       case kAnchorAttitude: return "anchor_attitude";
-      case kVisionYaw: return "vision_yaw";
       default: return "?";
     }
   }
@@ -1101,13 +1080,9 @@ struct Diagnostics
   static const char * consumer_needs(int which)
   {
     switch (which) {
-      case kEsmYawObservation:
-        return "road_step_esm on the tracker and gyro_bias_sigma_rad_s > 0";
-      case kEsmYawSource:
       case kEsmAttitude: return "road_step_esm on the tracker";
       case kBandAttitude: return "road_step_calibrate on the tracker";
       case kAnchorAttitude: return "anchors reaching a bearing solve";
-      case kVisionYaw: return "a ground solve with valid pairs";
       default: return "?";
     }
   }
@@ -1258,9 +1233,9 @@ private:
 
   std::deque<std::pair<double, double>> imu_yaw_samples_;
   // The gyro's own integral of the heading, kept when `imu_yaw_from_gyro` is
-  // on. It carries the bias the heading filter has learned taken out, so the
-  // two halves close a loop: the anchor solve says how far the heading is out,
-  // `HeadingBiasFilter` turns that into a rate, and this subtracts it.
+  // on. Nothing trims it: the bias filter that used to is gone, because the
+  // bias it was built for was a recording artefact and estimating one that is
+  // not there costs 14x.
   double gyro_yaw_ = 0.0;
   std::optional<double> gyro_yaw_stamp_;
   struct AccelerationSample
@@ -1303,8 +1278,6 @@ private:
 
   std::unique_ptr<AttitudeFilter> attitude_;
   std::optional<Eigen::Matrix3d> tilt_override_;
-  HeadingBiasFilter heading_;
-  std::vector<std::pair<double, double>> heading_observations_;
   PlanarInertialPropagator inertial_;
   PlanarVelocityFilter velocity_filter_;
   std::unique_ptr<PlanarDisplacementFilter> displacement_filter_;

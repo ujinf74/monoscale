@@ -85,15 +85,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   topics.imu = declare_string("imu_topic", topics.imu);
   settings.use_imu_yaw = declare_bool("use_imu_yaw", true);
   settings.imu_yaw_from_gyro = declare_bool("imu_yaw_from_gyro", false);
-  settings.esm_yaw_sigma_rad = declare_double("esm_yaw_sigma_rad", 0.0);
-  settings.esm_yaw_camera = declare_string("esm_yaw_camera", "");
-  settings.esm_yaw_sigma_rate = declare_double("esm_yaw_sigma_rate", 0.0);
-  settings.gyro_bias_apply = declare_double("gyro_bias_apply", 1.0);
-  settings.vision_yaw = declare_bool("vision_yaw", false);
-  settings.anchor_heading_gain = declare_double("anchor_heading_gain", 0.0);
-  settings.vision_yaw_rigid = declare_bool("vision_yaw_rigid", true);
-  settings.vision_yaw_vehicle = declare_bool("vision_yaw_vehicle", false);
-  settings.esm_yaw_source = declare_bool("esm_yaw_source", false);
+  settings.gyro_noise_sigma_rad_s = declare_double("gyro_noise_sigma_rad_s", 1.0e-3);
   settings.esm_attitude = declare_bool("esm_attitude", false);
   settings.esm_attitude_leak_sec = declare_double("esm_attitude_leak_sec", 2.0);
   // The CARLA bridge publishes the IMU against simulation time.
@@ -278,9 +270,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   // absolute heading that never drifts and a MEMS part on a vehicle does not.
   // Rerecording the same drive with a 0.3 deg/s bias took position RMSE from
   // 0.038 m to 0.169 and drift from 0.24% to 1.17%.
-  settings.gyro_bias_sigma_rad_s = declare_double("gyro_bias_sigma_rad_s", 0.0);
-  settings.gyro_bias_walk_sigma_rad_s = declare_double("gyro_bias_walk_sigma_rad_s", 1.0e-5);
-  settings.gyro_noise_sigma_rad_s = declare_double("gyro_noise_sigma_rad_s", 1.0e-3);
 
   settings.coast_on_reject = declare_bool("coast_on_reject", true);
   settings.twist_lowpass_tau = declare_double("twist_lowpass_tau", 0.12);
@@ -356,8 +345,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_weight_by_information = declare_bool("anchor_weight_by_information", false);
   settings.anchor_lookahead_m = declare_double("anchor_lookahead_m", 0.0);
   settings.anchor_lookahead_sec = declare_double("anchor_lookahead_sec", 0.0);
-  settings.anchor_weight_yaw_tau_sec =
-    declare_double("anchor_weight_yaw_tau_sec", 0.0);
   settings.anchor_geometry_power = declare_double("anchor_geometry_power", 0.0);
   settings.anchor_weight_by_variance =
     declare_bool("anchor_weight_by_variance", false);
@@ -392,7 +379,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.fuse_camera_points = declare_bool("fuse_camera_points", false);
   settings.anchor_drift_variance_per_m =
     declare_double("anchor_drift_variance_per_m", 0.0);
-  settings.align_solves_yaw = declare_bool("align_solves_yaw", true);
   settings.solve_max_pixel_flow = declare_double("solve_max_pixel_flow", 0.0);
   settings.solve_min_pixel_flow = declare_double("solve_min_pixel_flow", 0.0);
   settings.tilt_at_capture = declare_bool("tilt_at_capture", false);

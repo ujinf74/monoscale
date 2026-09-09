@@ -74,4 +74,12 @@ install(TARGETS monoscale_occupancy_core sweep_offline sweep_node
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  # The dense sweep chain is unchanged and is covered by the offline parity
+  # run; what is new is the tile storage the chain now reads its window from.
+  ament_add_gtest(test_tiles test/test_tiles.cpp)
+  target_link_libraries(test_tiles monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART})
+endif()
+
 ament_package()

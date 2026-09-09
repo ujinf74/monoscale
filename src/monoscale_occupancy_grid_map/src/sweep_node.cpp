@@ -182,6 +182,8 @@ private:
     pose.pitch = std::abs(sinp) >= 1.0 ? std::copysign(M_PI / 2.0, sinp) : std::asin(sinp);
     odometry_.push_back({stamp, pose});
     while (odometry_.size() > 4000) {odometry_.pop_front();}
+    // The pose that just arrived is what the held frames were waiting for.
+    for (const auto & name : cameras_) {drain(name);}
   }
 
   // The pose at an image stamp, interpolated from the odometry ring. Nullopt
@@ -227,28 +229,79 @@ private:
     resized.convertTo(gray32, CV_32F);
 
     std::lock_guard<std::mutex> guard(mutex_);
-    auto pose = pose_at(stamp);
-    if (!pose) {return;}
+    // Hold the frame rather than resolving its pose now. The odometry is
+    // solved from these very images, so its stamps can never lead them: at
+    // arrival every frame is newer than the newest pose, `pose_at` returns
+    // nothing, and dropping it here meant the live node made no keyframes at
+    // all -- ever, at any speed. Measured 09-08 on the driving rig: 400 of
+    // 400 frames arrived ahead of the newest pose, by a median of 0.70 s.
+    // Offline never saw this because there the whole trajectory is loaded
+    // before the first frame is placed.
+    auto & queue = pending_[name];
+    queue.push_back({stamp, gray32});
+    while (queue.size() > kPendingFrames) {queue.pop_front();}
+    drain(name);
+  }
 
+  // Admit every held frame the odometry can now place, oldest first so the
+  // ring stays ordered and `travelled` keeps accumulating along the path.
+  void drain(const std::string & name)
+  {
+    auto & queue = pending_[name];
+    while (!queue.empty()) {
+      const double stamp = queue.front().first;
+      const auto pose = pose_at(stamp);
+      if (!pose) {
+        if (!odometry_.empty() && stamp < odometry_.front().first) {
+          // Older than any pose still held: it can never be placed now.
+          queue.pop_front();
+          continue;
+        }
+        return;  // Newer than the newest pose. Wait for the odometry.
+      }
+      admit(name, stamp, queue.front().second, *pose);
+      queue.pop_front();
+    }
+  }
+
+  void admit(
+    const std::string & name, const double stamp, const cv::Mat & gray,
+    const monoscale_occupancy::Pose5 & pose)
+  {
     auto & ring = rings_[name];
     double travelled = 0.0;
     if (!ring.empty()) {
       const auto & last = ring.back();
       travelled = last.travelled +
-        std::hypot(pose->x - last.pose.x, pose->y - last.pose.y);
+        std::hypot(pose.x - last.pose.x, pose.y - last.pose.y);
     }
     Frame frame;
     frame.stamp = stamp;
-    frame.gray = gray32;
-    frame.pose = *pose;
+    frame.gray = gray;
+    frame.pose = pose;
     frame.travelled = travelled;
-    ring.push_back(std::move(frame));
+    // A frame from where the last one already stands carries no baseline the
+    // ring does not have, so take its place instead of joining it. Without
+    // this a stationary vehicle grows the ring at the frame rate for ever --
+    // the travel-based trim below cannot fire when travel does not advance,
+    // and the node reached 8.3 GB in three minutes of standing still.
+    const bool moved = ring.empty() ||
+      travelled - ring.back().travelled > kRingMinStep;
+    if (moved) {
+      ring.push_back(std::move(frame));
+    } else {
+      ring.back() = std::move(frame);
+    }
     // Keep enough baseline for the widest source offset, plus a margin.
     while (ring.size() > 2 &&
       travelled - ring.front().travelled > 6.0)
     {
       ring.pop_front();
     }
+    // Backstop: the trim above is distance-based, so anything that keeps the
+    // travel small keeps the ring long. Each frame is a float image.
+    while (ring.size() > kRingFrames) {ring.pop_front();}
+    ++placed_;
     ensure_sweep(name);
     maybe_keyframe(name);
   }
@@ -305,16 +358,21 @@ private:
     if (!have_stamp_) {return;}
     std::vector<monoscale_occupancy::CameraGrid *> grids;
     for (const auto & name : cameras_) {grids.push_back(&grids_[name]);}
-    const cv::Mat values = monoscale_occupancy::publish(settings_, grids);
+    // No extent asked for: the map published is the part of the world that
+    // has actually been mapped, so it grows with the drive instead of being
+    // the 60 m box the run started in.
+    const auto published = monoscale_occupancy::publish(settings_, grids);
+    if (published.window.empty()) {return;}
+    const cv::Mat & values = published.values;
 
     nav_msgs::msg::OccupancyGrid message;
     message.header.stamp = rclcpp::Time(static_cast<int64_t>(last_stamp_ * 1e9));
     message.header.frame_id = map_frame_;
     message.info.resolution = static_cast<float>(settings_.resolution);
-    message.info.width = static_cast<uint32_t>(settings_.grid_width);
-    message.info.height = static_cast<uint32_t>(settings_.grid_height);
-    message.info.origin.position.x = settings_.origin_x;
-    message.info.origin.position.y = settings_.origin_y;
+    message.info.width = static_cast<uint32_t>(published.window.width);
+    message.info.height = static_cast<uint32_t>(published.window.height);
+    message.info.origin.position.x = published.window.origin_x;
+    message.info.origin.position.y = published.window.origin_y;
     message.info.origin.orientation.w = 1.0;
     message.data.resize(static_cast<size_t>(values.total()));
     std::memcpy(message.data.data(), values.data, values.total());
@@ -325,8 +383,17 @@ private:
   void report()
   {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (keyframes_ == 0) {return;}
-    RCLCPP_INFO(get_logger(), "sweep: keyframes=%ld published=%d cells", keyframes_, published_);
+    // Said even at zero. A node silent until it has already succeeded cannot
+    // be told from a dead one, and that is how the live keyframe fault stayed
+    // invisible: no frame was ever placed, so nothing was ever logged.
+    size_t held = 0;
+    size_t ringed = 0;
+    for (const auto & entry : pending_) {held += entry.second.size();}
+    for (const auto & entry : rings_) {ringed += entry.second.size();}
+    RCLCPP_INFO(
+      get_logger(),
+      "sweep: keyframes=%ld placed=%ld held=%zu ring=%zu poses=%zu published=%d cells",
+      keyframes_, placed_, held, ringed, odometry_.size(), published_);
   }
 
   std::vector<std::string> cameras_;
@@ -343,6 +410,16 @@ private:
   std::map<std::string, std::unique_ptr<monoscale_occupancy::Sweep>> sweeps_;
   std::map<std::string, monoscale_occupancy::CameraGrid> grids_;
   std::map<std::string, std::deque<Frame>> rings_;
+  // Frames waiting for odometry to reach their stamp. At 22 Hz this bounds
+  // the wait at about twenty seconds, well past the 0.7 s actually seen.
+  static constexpr size_t kPendingFrames = 512;
+  // A frame closer than this to the ring's newest replaces it rather than
+  // extending the ring: half the smallest source offset's tolerance.
+  static constexpr double kRingMinStep = 0.02;
+  // Hard cap on ring length. 6 m of baseline at the 5 cm keyframe spacing
+  // needs 120; this is double that, and bounds the ring near 1 GB per camera.
+  static constexpr size_t kRingFrames = 256;
+  std::map<std::string, std::deque<std::pair<double, cv::Mat>>> pending_;
   std::map<std::string, double> next_at_;
   std::deque<std::pair<double, monoscale_occupancy::Pose5>> odometry_;
 
@@ -355,6 +432,7 @@ private:
 
   std::mutex mutex_;
   int64_t keyframes_ = 0;
+  int64_t placed_ = 0;
   double last_stamp_ = 0.0;
   bool have_stamp_ = false;
   int published_ = 0;
