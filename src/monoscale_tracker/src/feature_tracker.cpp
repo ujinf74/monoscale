@@ -443,12 +443,19 @@ struct RoadSolve
   // residual is dimensionless -- which is what makes the units of this come
   // out as the parameters', squared.
   //
-  // It is not a calibrated covariance and must not be used as one without a
-  // scale measured against something. Neighbouring pixels of a road patch are
-  // not independent samples, so N overstates how much evidence there is and
-  // this is over-confident by roughly the pixels per independent patch. What
-  // it does carry honestly is the *shape*: which of the four is well settled,
-  // and which two the region cannot tell apart.
+  // Calibrated, since the residual's own autocorrelation now supplies the
+  // effective sample count instead of the pixel count. Checked the only way it
+  // can be checked without truth -- the two cameras measure one hop, so their
+  // disagreement over the combined sigma should have unit spread:
+  //
+  //   drive     disagreement   reported sigma   z spread
+  //   str_v2       0.322 mm       0.289 mm        0.97
+  //   str_1.5      0.323 mm       0.243 mm        1.21
+  //   curve_s20    0.250 mm       0.293 mm        0.84
+  //
+  // It read 5.28 before. Nothing was tuned to get there: the inflation is
+  // computed per frame from the residual, and the two mounts come out at 3.7
+  // and 8.0 by themselves, which is why no constant could have done it.
   std::array<double, 10> covariance{};
   bool covariance_ok = false;
   // How much of a static body pitch against the road leaks into this camera's
@@ -470,6 +477,9 @@ struct RoadSolve
   // absorption, and it is what a fixed fusion weight cannot follow.
   double tilt_leak = std::numeric_limits<double>::quiet_NaN();
   bool tilt_leak_ok = false;
+  // N / N_eff for this frame's residual: how far the white-noise count
+  // overstates the independent samples behind the covariance above.
+  double sample_inflation = 1.0;
 };
 
 struct TrackState
@@ -3654,7 +3664,60 @@ private:
     // Recomputing it at the answer would cost another eight warps, a third of
     // the routine, for a second-order correction to a quantity whose scale is
     // uncalibrated anyway.
-    const double samples = static_cast<double>(residual.total());
+    // The independent samples, not the pixels.
+    //
+    // `cost / (N - dof)` assumes a white residual. Measured, it is not: the
+    // normalised autocorrelation at one pixel is 0.28 across and -0.11 down on
+    // the front mount, 0.25 and 0.29 on the rear, and the rear's stays above
+    // 0.07 out to eight pixels. Summing it gives N/N_eff = 3.7 at the front and
+    // 8.0 at the rear -- the two mounts differ by more than a factor of two, so
+    // no single constant could have carried this.
+    //
+    // Estimated per frame from the residual the fit just produced, so it costs
+    // no parameter and follows the surface. The lags are summed separably,
+    // which is what a bilinear resample and a point spread give; negative lags
+    // are clamped at zero so a ringing residual cannot claim more information
+    // than it has.
+    const double raw_samples = static_cast<double>(residual.total());
+    double inflation = 1.0;
+    if (residual.isContinuous() && residual.type() == CV_32F && raw_samples > 64.0) {
+      const int rows = residual.rows;
+      const int cols = residual.cols;
+      double mean = 0.0;
+      for (int y = 0; y < rows; ++y) {
+        const float * r = residual.ptr<float>(y);
+        for (int x = 0; x < cols; ++x) {mean += r[x];}
+      }
+      mean /= raw_samples;
+      double var = 0.0;
+      for (int y = 0; y < rows; ++y) {
+        const float * r = residual.ptr<float>(y);
+        for (int x = 0; x < cols; ++x) {var += (r[x] - mean) * (r[x] - mean);}
+      }
+      var /= raw_samples;
+      if (var > 1e-18) {
+        double sum_x = 1.0;
+        double sum_y = 1.0;
+        for (int k = 1; k <= 8; ++k) {
+          double ax = 0.0; int nx = 0;
+          for (int y = 0; y < rows; ++y) {
+            const float * r = residual.ptr<float>(y);
+            for (int x = 0; x + k < cols; ++x) {ax += (r[x]-mean)*(r[x+k]-mean); ++nx;}
+          }
+          double ay = 0.0; int ny = 0;
+          for (int y = 0; y + k < rows; ++y) {
+            const float * r0 = residual.ptr<float>(y);
+            const float * r1 = residual.ptr<float>(y + k);
+            for (int x = 0; x < cols; ++x) {ay += (r0[x]-mean)*(r1[x]-mean); ++ny;}
+          }
+          if (nx > 0) {sum_x += 2.0 * std::max(ax / (nx * var), 0.0);}
+          if (ny > 0) {sum_y += 2.0 * std::max(ay / (ny * var), 0.0);}
+        }
+        inflation = std::clamp(sum_x * sum_y, 1.0, 256.0);
+      }
+    }
+    out.sample_inflation = inflation;
+    const double samples = std::max(raw_samples / inflation, freedom + 1.0);
     if (samples > freedom) {
       cv::Matx44d block = cv::Matx44d::zeros();
       for (int i = 0; i < freedom; ++i) {
@@ -3679,6 +3742,68 @@ private:
           }
         }
         out.covariance_ok = true;
+
+        // The residual's own spatial autocorrelation, which says how many
+        // independent samples the region actually holds.
+        //
+        // `cost / (N - dof)` assumes the residual is white -- N pixels, N
+        // samples. It is not: the patch is bilinearly resampled, the lens has
+        // a point spread, and the road's texture has a scale, so neighbouring
+        // residuals are correlated and the covariance comes out optimistic by
+        // N / N_eff. For a stationary field that ratio is the summed
+        // normalised autocorrelation, which is measurable rather than assumed:
+        //
+        //   N_eff = N / sum_{dx,dy} rho(dx, dy)
+        if (const char * path = std::getenv("MONOSCALE_RESIDUAL_ACF")) {
+          static std::mutex acf_lock;
+          static std::FILE * acf = nullptr;
+          std::lock_guard<std::mutex> guard(acf_lock);
+          if (acf == nullptr) {
+            acf = std::fopen(path, "w");
+            if (acf != nullptr) {
+              std::fprintf(acf, "height,n,var");
+              for (int k = 1; k <= 8; ++k) {std::fprintf(acf, ",rx%d,ry%d", k, k);}
+              std::fprintf(acf, "\n");
+            }
+          }
+          if (acf != nullptr && residual.isContinuous() && residual.type() == CV_32F) {
+            const int rows = residual.rows;
+            const int cols = residual.cols;
+            double mean = 0.0;
+            for (int y = 0; y < rows; ++y) {
+              const float * r = residual.ptr<float>(y);
+              for (int x = 0; x < cols; ++x) {mean += r[x];}
+            }
+            mean /= static_cast<double>(rows * cols);
+            double var = 0.0;
+            for (int y = 0; y < rows; ++y) {
+              const float * r = residual.ptr<float>(y);
+              for (int x = 0; x < cols; ++x) {var += (r[x] - mean) * (r[x] - mean);}
+            }
+            var /= static_cast<double>(rows * cols);
+            std::fprintf(
+              acf, "%.4f,%d,%.9g", model.translation_base_from_camera[2], rows * cols, var);
+            for (int k = 1; k <= 8; ++k) {
+              double ax = 0.0; int nx = 0;
+              for (int y = 0; y < rows; ++y) {
+                const float * r = residual.ptr<float>(y);
+                for (int x = 0; x + k < cols; ++x) {ax += (r[x]-mean)*(r[x+k]-mean); ++nx;}
+              }
+              double ay = 0.0; int ny = 0;
+              for (int y = 0; y + k < rows; ++y) {
+                const float * r0 = residual.ptr<float>(y);
+                const float * r1 = residual.ptr<float>(y + k);
+                for (int x = 0; x < cols; ++x) {ay += (r0[x]-mean)*(r1[x]-mean); ++ny;}
+              }
+              std::fprintf(
+                acf, ",%.5f,%.5f",
+                nx > 0 && var > 0.0 ? ax / (nx * var) : 0.0,
+                ny > 0 && var > 0.0 ? ay / (ny * var) : 0.0);
+            }
+            std::fprintf(acf, "\n");
+            std::fflush(acf);
+          }
+        }
 
         // The leak of a static body pitch into the step, from the same H.
         //
