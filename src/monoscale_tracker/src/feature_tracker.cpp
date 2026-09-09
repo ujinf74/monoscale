@@ -1457,8 +1457,10 @@ private:
       const auto found = models_.find(name);
       if (found != models_.end() && found->second.ready && !gray.empty()) {
         const double truth = std::atof(synthetic);
+        const char * spin = std::getenv("MONOSCALE_SYNTHETIC_TURN");
+        const double truth_turn = spin != nullptr ? std::atof(spin) : 0.0;
         const cv::Matx33d forward =
-          found->second.homography(truth, 0.0, 0.0, 0.0, arc_hop_);
+          found->second.homography(truth, truth_turn, 0.0, 0.0, arc_hop_);
         cv::Mat mx(gray.rows, gray.cols, CV_32F);
         cv::Mat my(gray.rows, gray.cols, CV_32F);
         for (int y = 0; y < gray.rows; ++y) {
@@ -1474,7 +1476,7 @@ private:
           }
         }
         cv::remap(gray, state.previous_gray, mx, my, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-        turn = 0.0;
+        turn = truth_turn;
         turn_known = true;
       }
     }

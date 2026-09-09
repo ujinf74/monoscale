@@ -2472,6 +2472,40 @@ void Estimator::process_pair()
   if (!any_from_map) {
     ++diagnostics_.photometric_mapless;
   }
+  // A turn term nobody has found yet, recorded so the next attempt does not
+  // start from zero.
+  //
+  // Against truth the photometric length carries a common bias that is small
+  // and positive on every drive that goes straight and -0.29% on the sharpest
+  // slalom. It is the largest single piece of the 0.481 percentage points the
+  // residual spans, against a 0.004 point noise floor.
+  //
+  // What it is not, each ruled out by a measurement that could have shown it:
+  //
+  //  - the model failing to represent an arc. Fitting the four-parameter model
+  //    to an exactly-computed arc flow, analytically and with no tracker, the
+  //    step comes back to 0.0003% -- a thousandth of what is seen.
+  //  - the arc not being an arc. Truth yaw rate changes by 0.00000 degrees
+  //    within a hop on every slalom: the curvature is constant, so there is no
+  //    clothoid term.
+  //  - the aligner. A synthetic pair warped by a *known* turn of 0.28 degrees
+  //    a hop reads 0.01-0.02%, twenty times smaller.
+  //  - the road. The slaloms share their road with str_8.0, which starts at
+  //    the same place on the same heading and turns 0.0 degrees; its bias is
+  //    +0.174% against curve_s20's -0.288%. Turning is the variable, not the
+  //    surface.
+  //  - off-plane content entering the region. Narrowing the band from
+  //    0.25-0.75 to 0.35-0.65 leaves it at -0.316%; an intrusion arrives at
+  //    the edges and would shrink.
+  //  - accumulation. Binned by total turn so far it is +0.216% over the first
+  //    3 degrees and -0.31% to -0.38% flat for the remaining 280. It switches
+  //    on when the vehicle starts turning and does not grow.
+  //
+  // What is known: on the slaloms the fit reports a *better* alignment than on
+  // the straights -- ZNCC 0.945 against 0.877, sigma_step 0.044 mm against
+  // 0.048, step-pitch correlation 0.935 against 0.966 -- while its answer is
+  // ten times further from truth. Aligning better and answering worse means
+  // what it aligns is not the plane the geometry assumes.
   last_photometric_distance_ = road_mean;
   last_fused_length_ = motion.has_value()
     ? std::hypot(motion->x, motion->y) : std::numeric_limits<double>::quiet_NaN();
