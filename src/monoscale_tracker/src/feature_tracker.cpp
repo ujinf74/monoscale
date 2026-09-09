@@ -451,6 +451,25 @@ struct RoadSolve
   // and which two the region cannot tell apart.
   std::array<double, 10> covariance{};
   bool covariance_ok = false;
+  // How much of a static body pitch against the road leaks into this camera's
+  // step, as a fraction of the step per radian of tilt.
+  //
+  // The nuisance is the vehicle's attitude relative to the road surface --
+  // load, crown, slope -- which both cameras share, and which is not the same
+  // quantity as the per-hop pitch this fit already frees. A tilt perturbs the
+  // model rather than the state, so the residual gains `J_c dc` and the
+  // solution moves by `-H^-1 J^T J_c dc`. Its step component over the step is
+  // this. H is the matrix the loop already built; J_c is one more warp,
+  // against a copy of the ground model tilted by a small angle.
+  //
+  // The whole point of computing it here rather than assuming it: `H^-1`
+  // decides how much of the tilt the free pitch absorbs and how much lands on
+  // the step, and `H` changes with the manoeuvre. Measured offline, the
+  // geometric leak has a fixed front/rear ratio of -1.12 while what survives
+  // the fit ranges from -0.97 to -1.62 -- the difference is entirely this
+  // absorption, and it is what a fixed fusion weight cannot follow.
+  double tilt_leak = std::numeric_limits<double>::quiet_NaN();
+  bool tilt_leak_ok = false;
 };
 
 struct TrackState
@@ -1471,7 +1490,7 @@ private:
                 std::fprintf(
                   esm_sigma_file_,
                   "stamp,camera,step,search,sigma_step,sigma_yaw,sigma_pitch,"
-                  "sigma_roll,corr_step_pitch,score,reach\n");
+                  "sigma_roll,corr_step_pitch,score,reach,tilt_leak\n");
               }
             }
             if (esm_sigma_file_ != nullptr && state.road_esm.covariance_ok) {
@@ -1481,11 +1500,14 @@ private:
                 };
               const double sp = root(c[0]) * root(c[7]);
               std::fprintf(
-                esm_sigma_file_, "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.5f,%.4f\n",
+                esm_sigma_file_,
+                "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.5f,%.4f,%.6f\n",
                 stamp, name.c_str(), state.road_esm.step, found * span, root(c[0]),
                 root(c[4]), root(c[7]), root(c[9]),
                 sp > 0.0 ? c[2] / sp : std::numeric_limits<double>::quiet_NaN(),
-                state.road_esm.score, reach);
+                state.road_esm.score, reach,
+                state.road_esm.tilt_leak_ok ? state.road_esm.tilt_leak
+                : std::numeric_limits<double>::quiet_NaN());
               std::fflush(esm_sigma_file_);
             }
           }
@@ -2653,6 +2675,17 @@ private:
     return (n * sab - sa * sb) / std::sqrt(variance);
   }
 
+  // A rotation about the body's right axis, nose-down positive. Applied on the
+  // left of `rotation_base_from_camera` so it tilts the body against the road
+  // rather than the camera against the body -- the same perturbation for both
+  // mounts, which is what makes the nuisance common.
+  static cv::Matx33d body_pitch(double angle)
+  {
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+    return cv::Matx33d(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
+  }
+
   void road_scores(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double hop, double turn, const cv::Rect & roi, std::vector<double> & out,
@@ -3323,6 +3356,7 @@ private:
     int taken = 0;
     cv::Mat column[4];
     cv::Matx44d held_normal;
+    double jacobian_at[4] = {0.0, 0.0, 0.0, 0.0};
     bool have_jacobian = false;
     for (int iteration = 0; iteration < 10; ++iteration) {
       // How often the Jacobian is rebuilt.
@@ -3414,6 +3448,9 @@ private:
       // the system: its gradient is zero and its diagonal is one, so Cholesky
       // returns exactly zero for it and the 4x4 algebra below is untouched.
       held_normal = normal;
+      // Where the Jacobian was taken. The tilt column has to be differenced at
+      // the same point or the product J^T J_c mixes two linearisations.
+      std::copy(at, at + 4, jacobian_at);
       for (int i = freedom; i < 4; ++i) {
         normal(i, i) = 1.0;
       }
@@ -3509,6 +3546,42 @@ private:
           }
         }
         out.covariance_ok = true;
+
+        // The leak of a static body pitch into the step, from the same H.
+        //
+        // `J_c` is the residual's sensitivity to the model being tilted, taken
+        // as a central difference against two copies of the ground model
+        // rotated about the body's right axis. Two warps; the fit spends about
+        // twenty-seven, so this is under a tenth of it.
+        //
+        // Sign convention follows the perturbation: positive `tilt` is the
+        // same nose-down rotation for both cameras, which is what makes this a
+        // *common* nuisance and the thing a pair of cameras can cancel.
+        const double tilt = 1.0e-3;
+        GroundModel up = model;
+        GroundModel down = model;
+        up.rotation_base_from_camera = body_pitch(tilt) * model.rotation_base_from_camera;
+        down.rotation_base_from_camera = body_pitch(-tilt) * model.rotation_base_from_camera;
+        cv::Mat ahead;
+        cv::Mat behind;
+        if (road_patch(up, previous, roi, jacobian_at, ahead) &&
+          road_patch(down, previous, roi, jacobian_at, behind))
+        {
+          const cv::Mat tilt_column = (ahead - behind) / (2.0 * tilt);
+          cv::Vec4d projected(0.0, 0.0, 0.0, 0.0);
+          for (int k = 0; k < freedom; ++k) {
+            projected[k] = column[k].dot(tilt_column);
+          }
+          cv::Vec4d shift;
+          if (cv::solve(block, projected, shift, cv::DECOMP_CHOLESKY) &&
+            std::abs(jacobian_at[0]) > 1e-6)
+          {
+            // `-H^-1 J^T J_c`, over the step, so the number is a fractional
+            // step error per radian and comparable between the two cameras.
+            out.tilt_leak = -shift[0] / jacobian_at[0];
+            out.tilt_leak_ok = std::isfinite(out.tilt_leak);
+          }
+        }
       }
     }
     return out;
@@ -4208,6 +4281,7 @@ private:
         for (const double value : esm.covariance) {
           out.data.push_back(esm.covariance_ok ? value : kNotMeasured);
         }
+        out.data.push_back(esm.tilt_leak_ok ? esm.tilt_leak : kNotMeasured);
         out.data.push_back(kEsmMarker);
       }
     }

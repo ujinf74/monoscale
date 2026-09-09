@@ -338,7 +338,7 @@ private:
       // The fit's sub-block is closed by a marker. Without it a length test
       // cannot tell three body angles from the first three values of whatever
       // block follows -- see the note where this is written.
-      if (data.size() > after + 28 && data[after + 28] == kEsmMarker) {
+      if (data.size() > after + 29 && data[after + 29] == kEsmMarker) {
         frame.esm_yaw = data[after + 15];
         frame.esm_pitch = data[after + 16];
         frame.esm_roll = data[after + 17];
@@ -346,6 +346,7 @@ private:
           frame.esm_covariance[i] = data[after + 18 + i];
         }
         frame.esm_covariance_valid = std::isfinite(frame.esm_covariance[0]);
+        frame.esm_tilt_leak = data[after + 28];
       }
     }
     ++received_[camera];

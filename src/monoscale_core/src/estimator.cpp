@@ -172,6 +172,9 @@ struct Estimator::Camera
   double radial_pitch_sum = 0.0;
   int64_t radial_terms = 0;
   double photometric_since_solve = 0.0;
+  // The tilt leak this camera reported, averaged over the hops in the sum.
+  double photometric_leak_sum = 0.0;
+  int64_t photometric_leak_count = 0;
   // The variance of that sum, from the fit's own covariance. Summed over the
   // hops it is summed over, which assumes the hops are independent -- they are
   // not, they share features, so this is optimistic in the same direction for
@@ -614,6 +617,10 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
     camera.photometric_since_solve +=
       settings_.photometric_scale * incoming.photometric_step;
     camera.photometric_valid = true;
+    if (std::isfinite(incoming.esm_tilt_leak)) {
+      camera.photometric_leak_sum += incoming.esm_tilt_leak;
+      ++camera.photometric_leak_count;
+    }
     // Whether this camera is measuring the road at all.
     //
     // Not a weight -- the pair's weights are fixed by the cancellation and
@@ -2307,8 +2314,76 @@ void Estimator::process_pair()
   // be spent is on whether a camera is measuring at all, and on weighting this
   // fused length against the pair solve, which is a different instrument and
   // carries no such constraint.
-  const double road_mean = road_cameras > 0
+  double road_mean = road_cameras > 0
     ? road_distance / road_cameras : std::numeric_limits<double>::quiet_NaN();
+  // The weight that would null the tilt, `w_front = -g_rear/(g_front - g_rear)`
+  // from `w'1 = 1` and `w'g = 0`, with `g` computed inside the fit rather than
+  // tuned. Off by default, because measurement says the even average is
+  // already better than this can be.
+  //
+  // Tested directly, without ATE: inject a known body tilt and see how far the
+  // fused length moves. Per radian, on straight120_v2 at +1 degree, each
+  // camera's step moves by 0.657 and -0.656 and the even average by -0.0074 --
+  // a factor of 89. The true ratio is within a few per cent of -1, which is
+  // exactly what `[.5, .5]` assumes. The computed `g` gives -0.83 on that
+  // drive and -0.64 on the slalom, so weighting by it moves *away* from the
+  // truth: the same injection then leaves 0.0163 instead of 0.0122.
+  //
+  // The reason no first-order computation can win here is in the numbers too.
+  // The ratio depends on the sign of the injection -- -1.094 at +2 degrees
+  // against -0.732 at -2 -- so the leak is not linear at the size that
+  // matters, and `-H^-1 J^T J_c` cannot represent an asymmetry. It lands
+  // between the two and is 17-36% wrong, while assuming -1 is 2.5% wrong.
+  //
+  // Kept, switched off, because it is the instrument that measured this: `g`
+  // is published per frame and can be read again if the geometry changes.
+  if (settings_.photometric_null_tilt && road_cameras == 2 && cameras_.size() == 2) {
+    const auto & a = *cameras_[0];
+    const auto & b = *cameras_[1];
+    if (a.photometric_leak_count > 0 && b.photometric_leak_count > 0 &&
+      a.photometric_valid && !a.photometric_broken &&
+      b.photometric_valid && !b.photometric_broken)
+    {
+      const double ga = a.photometric_leak_sum / static_cast<double>(a.photometric_leak_count);
+      const double gb = b.photometric_leak_sum / static_cast<double>(b.photometric_leak_count);
+      const double gap = ga - gb;
+      if (ga * gb < 0.0 && std::abs(gap) > 0.2) {
+        const double wa = -gb / gap;
+        if (wa > 0.2 && wa < 0.8) {
+          road_mean = wa * a.photometric_since_solve +
+            (1.0 - wa) * b.photometric_since_solve;
+          diagnostics_.photometric_null_weight = wa;
+          ++diagnostics_.photometric_nulled;
+        }
+      }
+    }
+  }
+
+  // The even weight is the best single choice, and it is not exactly right on
+  // any drive. Sweeping a fixed weight on the front camera, ATE/거리 per drive:
+  //
+  //   w_front     0.40    0.45    0.50    0.55    0.60
+  //   str_v2    0.0173  0.0136  0.0243  0.0426  0.0613
+  //   str_1.5   0.0497  0.0252  0.0098  0.0192  0.0437
+  //   str_8.0   0.0382  0.0303  0.0261  0.0271  0.0330
+  //   curve_s20 0.0537  0.0330  0.0157  0.0242  0.0456
+  //   curve_s05 0.0683  0.0456  0.0278  0.0259  0.0406
+  //
+  // Each drive has an optimum between 0.45 and 0.55 and they do not agree, so
+  // the direction being cancelled is not quite the same one from drive to
+  // drive. The curve is sharp -- str_v2 reads 0.0136 at 0.45 against 0.0243 at
+  // 0.50 -- so what a fixed weight leaves behind is not small. This is the
+  // residual that no gain can chase: it needs `g` observed per drive, not
+  // chosen.
+  //
+  // Predicting those optima from the static-tilt columns above does not work,
+  // and the failure is instructive. Nulling `g` for two cameras has a closed
+  // form, w_front = -g_rear/(g_front - g_rear), which gives 0.507 at 2 m/s,
+  // 0.552 at 8 m/s and 0.382 on the slalom. The slalom's 0.382 is far worse
+  // than even (0.077 against 0.0157). The columns were measured by perturbing
+  // a *static* mount pitch, and what the fusion has to cancel is the body's
+  // pitch *over the hop*. They are different columns; the static one describes
+  // calibration error and was read here as though it described this.
   bool any_from_map = false;
   ++diagnostics_.photometric_chances;
   for (const auto & entry : solved) {
@@ -2442,6 +2517,8 @@ void Estimator::process_pair()
   }
   for (auto & held : cameras_) {
     held->photometric_since_solve = 0.0;
+    held->photometric_leak_sum = 0.0;
+    held->photometric_leak_count = 0;
     held->photometric_valid = false;
     held->photometric_broken = false;
     held->esm_yaw_since_solve = 0.0;

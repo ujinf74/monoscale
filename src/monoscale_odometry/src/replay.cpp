@@ -286,7 +286,7 @@ bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::T
     // The fit's sub-block is closed by a marker. Without it a length test
     // cannot tell three body angles from the first three values of whatever
     // block follows -- see the note where this is written.
-    if (data.size() > after + 28 && data[after + 28] == kEsmMarker) {
+    if (data.size() > after + 29 && data[after + 29] == kEsmMarker) {
       out.esm_yaw = data[after + 15];
       out.esm_pitch = data[after + 16];
       out.esm_roll = data[after + 17];
@@ -296,6 +296,7 @@ bool parse_tracks(const std_msgs::msg::Float64MultiArray & message, monoscale::T
       }
       measured = std::isfinite(out.esm_covariance[0]);
       out.esm_covariance_valid = measured;
+      out.esm_tilt_leak = data[after + 28];
     }
   }
   return true;
@@ -1549,6 +1550,11 @@ int main(int argc, char ** argv)
       diagnostics.last_nis, diagnostics.filter_rejections, diagnostics.filter_dropped);
   }
 
+  if (diagnostics.photometric_nulled > 0) {
+    std::printf(
+      "기울기 소거 가중: %ld 회, 마지막 %.4f\n",
+      diagnostics.photometric_nulled, diagnostics.photometric_null_weight);
+  }
   if (diagnostics.esm_frames > 0) {
     std::printf(
       "적합 공분산: %ld/%ld 프레임 도착 (%.1f%%)\n",

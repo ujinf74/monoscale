@@ -85,6 +85,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   topics.imu = declare_string("imu_topic", topics.imu);
   settings.use_imu_yaw = declare_bool("use_imu_yaw", true);
   settings.imu_yaw_from_gyro = declare_bool("imu_yaw_from_gyro", false);
+  settings.photometric_null_tilt = declare_bool("photometric_null_tilt", false);
   settings.gyro_noise_sigma_rad_s = declare_double("gyro_noise_sigma_rad_s", 1.0e-3);
   settings.esm_attitude = declare_bool("esm_attitude", false);
   settings.esm_attitude_leak_sec = declare_double("esm_attitude_leak_sec", 2.0);

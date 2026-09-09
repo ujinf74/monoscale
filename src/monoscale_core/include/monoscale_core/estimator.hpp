@@ -98,6 +98,9 @@ struct EstimatorSettings
   // The initial heading still comes from the orientation, once, which is the
   // stationary alignment any real system performs before it moves.
   bool imu_yaw_from_gyro = false;
+  // Weight the two cameras' photometric lengths so the tilt they report
+  // cancels, instead of averaging them evenly.
+  bool photometric_null_tilt = false;
   // The gyro's own noise, used to grow the heading's variance between solves.
   // A property of the instrument, not a tuning axis.
   double gyro_noise_sigma_rad_s = 1.0e-3;
@@ -779,6 +782,10 @@ struct TrackFrame
   // straight into the step.
   std::array<double, 10> esm_covariance{};
   bool esm_covariance_valid = false;
+  // How much a static body pitch against the road leaks into this camera's
+  // step, per radian, as a fraction of the step. Computed by the fit from its
+  // own normal equations; see the note on `tilt_leak` there.
+  double esm_tilt_leak = std::numeric_limits<double>::quiet_NaN();
   // How distinct each feature is against its surroundings, from the tracker's
   // corner response. Empty when the tracker is not publishing it, which is the
   // default and what every measurement before this was taken with.
@@ -1077,6 +1084,10 @@ struct Diagnostics
   // and the tracker publishes it behind a marker; nothing here reads it as a
   // weight yet, so this is the only thing that would notice if the block
   // stopped coming.
+  // Solves whose photometric length used the tilt-nulling weight, and the
+  // last such weight.
+  int64_t photometric_nulled = 0;
+  double photometric_null_weight = 0.0;
   int64_t esm_covariance_frames = 0;
   int64_t esm_frames = 0;
   std::array<int64_t, kConsumerCount> consumer_armed{};
