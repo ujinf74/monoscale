@@ -432,44 +432,22 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.rebuild_measure_only = settings.rebuild_measure_only;
   anchor_settings.link_radius_m = settings.anchor_link_radius_m;
   anchor_settings.link_cross_source_only = settings.anchor_link_cross_source_only;
-  anchor_settings.density_replace_margin = settings.anchor_density_replace_margin;
-  anchor_settings.link_measure_only = settings.anchor_link_measure_only;
   anchor_settings.link_adopter_writes = settings.anchor_link_adopter_writes;
   anchor_settings.max_age_frames = settings.anchor_max_age_frames;
   anchor_settings.update_gain = settings.anchor_update_gain;
-  anchor_settings.max_observations = settings.anchor_max_observations;
   anchor_settings.select_by_consistency = settings.anchor_select_by_consistency;
-  anchor_settings.initial_variance = settings.anchor_initial_variance;
   anchor_settings.max_variance = settings.anchor_max_variance;
   anchor_settings.trial_observations = settings.anchor_trial_observations;
-  anchor_settings.min_update_gain = settings.anchor_min_update_gain;
-  anchor_settings.weight_by_information = settings.anchor_weight_by_information;
   anchor_settings.lookahead_m = settings.anchor_lookahead_m;
   anchor_settings.lookahead_sec = settings.anchor_lookahead_sec;
-  anchor_settings.geometry_power = settings.anchor_geometry_power;
-  anchor_settings.weight_by_variance = settings.anchor_weight_by_variance;
   anchor_settings.bearing_variance = settings.anchor_bearing_variance;
-  anchor_settings.weight_by_trend = settings.anchor_weight_by_trend;
   anchor_settings.trend_gain = settings.anchor_trend_gain;
-  anchor_settings.trend_power = settings.anchor_trend_power;
-  anchor_settings.trend_evict_variance = settings.anchor_trend_evict_variance;
   anchor_settings.admit_by_information = settings.anchor_admit_by_information;
   anchor_settings.admit_by_clarity = settings.anchor_admit_by_clarity;
   anchor_settings.found_after_observations = settings.anchor_found_after_observations;
   anchor_settings.priority_identity_floor =
     settings.anchor_road_priority ? kRoadIdentity : 0;
-  anchor_settings.evict_by_age = settings.anchor_evict_by_age;
-  anchor_settings.evict_for_new = settings.anchor_evict_for_new;
-  anchor_settings.evict_by_weight = settings.anchor_evict_by_weight;
   anchor_settings.evict_unseen_solves = settings.anchor_evict_unseen_solves;
-  anchor_settings.evict_by_information = settings.anchor_evict_by_information;
-  anchor_settings.admit_per_update = settings.anchor_admit_per_update;
-  anchor_settings.anchored_min_observations =
-    settings.anchored_min_observations;
-  anchor_settings.forget_beyond_bearing_deg =
-    settings.anchor_forget_beyond_bearing_deg;
-  anchor_settings.density_cell_m = settings.anchor_density_cell_m;
-  anchor_settings.density_quota = settings.anchor_density_quota;
   anchor_settings.polar_sector_deg = settings.anchor_polar_sector_deg;
   anchor_settings.polar_ring_m = settings.anchor_polar_ring_m;
   anchor_settings.polar_rings = settings.anchor_polar_rings;

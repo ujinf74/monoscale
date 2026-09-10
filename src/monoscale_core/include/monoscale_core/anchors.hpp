@@ -37,11 +37,6 @@ struct AnchorSettings
   int max_anchors = 4000;
   int max_age_frames = 40;
   double update_gain = 0.35;
-  int max_observations = 20;
-  // How far each anchor's sightings scatter around it. A point on a parked car,
-  // on a slope, or simply mistracked keeps landing somewhere else, and counting
-  // sightings cannot tell that apart from a good one seen often.
-  double initial_variance = 0.04;
   // How far an anchor's sightings may scatter about its stored position, m^2,
   // before it is judged not to be a landmark. Absolute and not scaled by the
   // geometry, for the reason `consistent_at` sets out.
@@ -50,12 +45,6 @@ struct AnchorSettings
   // Off, an anchor is trusted for having been seen often, which was the
   // original rule. On, it also has to keep landing in the same place.
   bool select_by_consistency = true;
-  // Floor under the precision-weighted gain, which is what bounds the anchor's
-  // effective averaging window. Without it `information_` accumulates without
-  // limit, the gain decays to zero, and an anchor stops following its own
-  // sightings: whatever pose error it was born with is frozen in, and a later,
-  // better estimate cannot wash it out. 0 keeps the unbounded mean.
-  double min_update_gain = 0.0;
   // How close a sighting must land to an existing anchor for a camera that has
   // not seen it before to adopt it rather than found its own. This is what
   // makes the map shared in fact and not just in storage: the front camera
@@ -63,71 +52,6 @@ struct AnchorSettings
   // second sighting starts a second anchor carrying whatever pose error the
   // estimate had at that moment. 0 keeps each camera to its own anchors.
   double link_radius_m = 0.0;
-  // When full, evict whatever was seen longest ago rather than whatever is
-  // least well observed.
-  bool evict_by_age = false;
-  // Evict the longest-unseen anchors to seat features arriving now.
-  bool evict_for_new = false;
-  // Rank the eviction by what the solve trusts, not by when it was last seen.
-  //
-  // Seniority and worth are different things. An anchor seen a moment ago on
-  // one poor sighting is a worse thing to keep than one seen a second ago that
-  // a dozen sightings agree on, and it is the second that a revisit will
-  // actually register against. `weight_at` is the number the alignment already
-  // weighs by, so evicting its smallest is evicting what the solve would have
-  // ignored anyway.
-  bool evict_by_weight = false;
-  // Rank the eviction by what the anchor is worth to the solve, which is its
-  // history times the axis it actually measures.
-  //
-  // A translation along the heading moves a point at bearing b and range R
-  // radially by cos b and tangentially by sin b, and the two are not measured
-  // alike: the radial direction carries the bearing error amplified by
-  // (R^2+h^2)/h while the tangential carries only R. So the information a point
-  // holds about *longitudinal* motion is
-  //
-  //   cos^2 b h^2/(R^2+h^2)^2 + sin^2 b / R^2
-  //
-  // -- seven times larger at 90 degrees than at 0 for a point at 2 m, and
-  // thirty-three times at 5 m. Measured on the live map: the 92-98% of anchors
-  // sitting within 15 degrees of straight behind hold 10-14% of the
-  // longitudinal information, while twenty anchors off to the side hold as much
-  // as all of them. The error this estimator carries is longitudinal.
-  bool evict_by_information = false;
-  // At most this many new anchors per update. Zero leaves it unbounded.
-  //
-  // Capacity is doing two jobs at once today. It holds the map's memory, and by
-  // being full it rate-limits admission to whatever ageing frees -- about
-  // thirty a solve. Freeing the wasted slots without replacing that limit lets
-  // a solve's ~1600 fresh points in at once, the map fills with anchors carrying
-  // one sighting each, and the weighting the alignment depends on collapses:
-  // measured, walk 1.93 -> 8.4. So the two jobs have to be separated.
-  int admit_per_update = 0;
-  // Sightings an anchor needs before the solve will register against it.
-  //
-  // `anchored` asks only whether a slot exists, so a point seen once counts as
-  // known and the map answers on it. Capacity saturation has been supplying
-  // this condition by accident: a full map admits almost nothing, so the few it
-  // knows are old and well settled, and it answers 42% of solves. Free the
-  // wasted slots and it answers **every** solve on one-sighting anchors --
-  // reachable anchors 171 -> 6506, known 11% -> 86%, map frames 377 -> 898 --
-  // and ATE goes 0.0701 -> 0.1804. Rare good corrections help; frequent poor
-  // ones hurt. Zero keeps the old behaviour.
-  int anchored_min_observations = 0;
-  // Forget an anchor once its bearing off the heading passes this, in degrees.
-  //
-  // Past about 165 degrees a ground point is astern and receding: it will never
-  // be seen again, and its information about motion along the heading has gone
-  // to `cos^2 b h^2/(R^2+h^2)^2`, which at that bearing and that range is
-  // nothing. Measured, 92-98% of the map sits there holding 13.6% of the
-  // longitudinal information.
-  //
-  // This is *not* the same policy as evicting the lowest-ranked whenever a new
-  // anchor wants a slot. That runs every solve against 1600 candidates and
-  // replaces the population wholesale; this kills only what has actually
-  // crossed the line, so in the steady state the death rate equals the birth
-  // rate and the map is never flooded. Zero leaves it off.
-  double forget_beyond_bearing_deg = 0.0;
   // ...and only past this range as well. Both conditions, not either.
   //
   // Bearing alone is wrong and the mistake is expensive: the rear camera looks
@@ -139,32 +63,6 @@ struct AnchorSettings
   double forget_beyond_range_m = 0.0;
   // Ground cell size and how many anchors one cell may hold. Zero is off.
   //
-  // Admission control by density, not eviction. The map piles 92-98% of its
-  // slots into a thin trail directly astern, which holds 13.6% of the
-  // longitudinal information -- but the answer is not to delete that trail
-  // afterwards. Every eviction policy tried loses, and they lose for one
-  // reason: replacing the population destroys the accumulated sightings the
-  // alignment weighs by, and the map's drift binding with it (walk 1.93 -> 6.9,
-  // which is what this estimator reads with no working map at all). Refusing
-  // the redundant anchor at birth costs nothing, because nothing that has
-  // accumulated anything is touched. And a cell in metres is speed-independent,
-  // where a life in solves is not: 250 solves is 123 m at 8 m/s and 31 m at 2.
-  double density_cell_m = 0.0;
-  int density_quota = 0;
-  // The same admission control, but on cells of bearing off the heading crossed
-  // with range, rather than on ground squares.
-  //
-  // The pile-up is angular: 92-98% of the map sits within fifteen degrees of
-  // straight astern. Bearing alone is not enough to act on, because the rear
-  // camera *looks* along 105-180 degrees and the anchors a metre or two back
-  // are its working set -- cutting by bearing alone took curve_s10 from 0.0821
-  // to 0.5330. Crossing bearing with range separates the two: the far astern
-  // ring saturates and stops taking births, while the near astern ring stays
-  // open for the camera that is actually using it.
-  //
-  // A polar cell is in the vehicle's frame, so an anchor's membership changes
-  // as the vehicle moves. The counts are therefore rebuilt once per solve
-  // rather than carried, which is one pass over the live anchors.
   double polar_sector_deg = 0.0;
   double polar_ring_m = 0.0;
   int polar_rings = 0;
@@ -211,36 +109,6 @@ struct AnchorSettings
   // the roll as well; the rear, being 0.82 m from the axle rather than 3.694,
   // barely moves, which is the same asymmetry the physics has.
   bool bearing_nonholonomic = false;
-  // What a full density cell does with a fresh sighting. Off, it refuses the
-  // birth and the cell keeps whatever it has, however old and however far
-  // astern -- so the map's capacity settles on the ground it has already
-  // driven past, which is where its longitudinal information is *lowest*:
-  // measured, 92% of anchors sit within fifteen degrees of straight astern
-  // holding 9.7% of it, and 0.2% abreast hold 57%.
-  //
-  // On, the cell's least informative anchor is compared against the candidate
-  // and gives way if the candidate beats it by this margin. This is not the
-  // global eviction that lost every time it was tried -- age, weight,
-  // information, unseen count -- because it never changes how many anchors a
-  // cell holds, so the accumulated sightings the alignment weighs by are not
-  // churned wholesale; one anchor is exchanged for a better-placed one.
-  //
-  // 1.0 replaces on any improvement. Higher is stickier.
-  double density_replace_margin = 0.0;
-  // Look for the crossing and record it, but do not bind it. Adoption itself
-  // was measured and lost; the measurement it makes possible is separate.
-  // Weigh an anchor in the registration by what is known about its position
-  // rather than by how many times it was seen.
-  //
-  // `weight_at` has always returned the observation count. The map computes a
-  // proper information for every sighting -- (h / (R^2 + h^2))^2, the inverse
-  // variance the geometry implies -- averages the anchor's position with it,
-  // and then throws it away at the one place it decides the pose. A near
-  // anchor seen three times weighs less than a far one seen ten, which is
-  // backwards: the registration residual grows sevenfold from the 1-2 m ring
-  // to the 4-5 m one. `min_update_gain` already bounds how far the accumulated
-  // information can run, so using it here is bounded too.
-  bool weight_by_information = false;
   // Metres ahead of the vehicle at which an anchor's information is valued.
   // An anchor is not used where it is now; it is used where it will be when the
   // solve next reaches it. Valued at the current position a feature entering
@@ -256,68 +124,12 @@ struct AnchorSettings
   // question: an anchor's usable life is a fixed stretch of band, which argues
   // metres, but how long the solve takes to reach it is a time.
   double lookahead_sec = 0.0;
-  // Exponent on the anchor's geometric worth in the solve weight:
-  //   I(b, R) = cos^2 b / radial(R)^2 + sin^2 b / R^2,  radial = (R^2+h^2)/h
-  // evaluated `lookahead_m` ahead. Astern the first term dominates and falls as
-  // R^4; abeam the second holds at R^2, so close side ground keeps its worth
-  // where distant ground behind loses it -- continuously, with no cutoff.
-  double geometry_power = 0.0;
-
-  // Weight an anchor by the inverse variance of what it measures, instead of by
-  // a count divided by a variance.
-  //
-  // A bearing error is homoscedastic -- the lens is equidistant, so half a
-  // pixel is the same angle everywhere -- and reaches the ground as
-  // `sigma_b * radial` radially and `sigma_b * R` tangentially. Projected on
-  // the heading, the Fisher information about longitudinal displacement is
-  // `I(b,R)/sigma_b^2` with I as above, so this frame's measurement of the
-  // anchor has variance `sigma_b^2 / I`. The anchor's own stored position
-  // carries a second, independent variance. They add:
-  //
-  //   w = 1 / ( sigma_b^2 / I(b_T,R_T)  +  variance_(slot) + drift * travelled )
-  //
-  // Everything the old weight tried to say is in there and nothing is said
-  // twice. The observation count is gone because `variance_` already falls with
-  // observations -- counting both was counting maturity twice, and the count
-  // was capped at `max_observations` anyway, which left it a 1.25x range over
-  // a population spanning 400:1. The drift is a variance growing linearly with
-  // the path, which is what a random walk does, rather than a hyperbolic
-  // discount that only reached 8x at 139 m. And the geometry is present at its
-  // own strength rather than behind an exponent that existed to trade against
-  // those two faults.
-  bool weight_by_variance = false;
   // Variance of a tracked bearing, rad^2. Measured, not chosen: half a pixel at
   // the 640-wide processing width is 1.9e-3 rad against fx_eff 262.95 px/rad.
   double bearing_variance = 3.6e-6;
-
-  // Weight an anchor by whether its re-observations agree with where it said it
-  // would be, and by whether that agreement is getting better or worse.
-  //
-  // The bearing model above says where an anchor *ought* to be informative.
-  // This says nothing about geometry and measures the same thing instead: an
-  // anchor that is far, or on a bad patch, or not really a landmark, scatters
-  // when it is seen again, and that scatter is already what `variance_` holds.
-  // Modelling the noise is replaced by measuring it.
-  //
-  // The second EWMA is the part the level alone cannot give. Two anchors at the
-  // same scatter are not worth the same if one is settling and the other coming
-  // apart, and which one it is decides whether re-observing is buying anything.
-  //
-  //   sigma2_pred = fast * (fast / slow)^trend_power
-  //
-  // The ratio is below one while the residuals shrink, so the anchor is
-  // credited with the improvement it is on course for rather than the one it
-  // has banked; above one it is charged for the decline. `trend_power` 0 leaves
-  // the level alone, 1 extrapolates one step of it.
-  bool weight_by_trend = false;
   // Gain of the slow average. Smaller is a longer memory; it must be slower
   // than the fast one or the ratio carries no information.
   double trend_gain = 0.05;
-  double trend_power = 0.0;
-  // An anchor whose predicted scatter passes this is not a landmark and goes,
-  // whatever its age and whatever room there is. In metres squared, so it is
-  // the same quantity `max_variance` already gates on.
-  double trend_evict_variance = 0.0;
 
   // Identities at or above this go to the front of the admission queue.
   //
@@ -359,7 +171,6 @@ struct AnchorSettings
   // did not survive one frame, and committed in the first ten metres, after
   // which nothing else can get in.
   int found_after_observations = 1;
-  bool link_measure_only = false;
   // Compute the rebuild but do not apply it.
   bool rebuild_measure_only = false;
   // How fast an anchor's worth decays with the distance driven since it was
@@ -678,12 +489,6 @@ private:
   bool saturated_ = false;
   // Coarse spatial index over live anchors, one bucket per link-radius cell.
   std::unordered_map<int64_t, std::vector<int64_t>> grid_;
-  // Live anchors per density cell, kept alongside births and deaths.
-  std::unordered_map<int64_t, int> density_;
-  // Which slots each density cell holds, so a full cell can be asked what its
-  // least valuable anchor is rather than only how many it has.
-  std::unordered_map<int64_t, std::vector<int64_t>> density_slots_;
-  int64_t density_cell_of(double x, double y) const;
   int polar_cell_of(double x, double y) const;
   void rebuild_polar_counts();
   std::vector<int> polar_;

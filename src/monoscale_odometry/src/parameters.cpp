@@ -304,32 +304,13 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_update_gain = declare_double("anchor_update_gain", 0.0);
   // Where an anchor's weight stops growing. Reached in a third of a second at
   // 60 Hz, it stops telling a long-lived landmark apart from a fresh one.
-  settings.anchor_max_observations = declare_int("anchor_max_observations", 20);
   settings.anchor_select_by_consistency = declare_bool("anchor_select_by_consistency", true);
-  settings.anchor_initial_variance = declare_double("anchor_initial_variance", 0.04);
   settings.anchor_max_variance = declare_double("anchor_max_variance", 0.09);
   settings.anchor_trial_observations = declare_int("anchor_trial_observations", 4);
-  settings.anchor_min_update_gain = declare_double("anchor_min_update_gain", 0.0);
-  settings.anchor_evict_by_age = declare_bool("anchor_evict_by_age", false);
-  settings.anchor_evict_for_new = declare_bool("anchor_evict_for_new", false);
-  settings.anchor_evict_by_weight =
-    declare_bool("anchor_evict_by_weight", false);
   settings.anchor_evict_unseen_solves =
     declare_int("anchor_evict_unseen_solves", 1);
-  settings.anchor_evict_by_information =
-    declare_bool("anchor_evict_by_information", false);
-  settings.anchor_admit_per_update =
-    declare_int("anchor_admit_per_update", 0);
-  settings.anchored_min_observations =
-    declare_int("anchored_min_observations", 0);
-  settings.anchor_forget_beyond_bearing_deg =
-    declare_double("anchor_forget_beyond_bearing_deg", 0.0);
   settings.anchor_forget_beyond_range_m =
     declare_double("anchor_forget_beyond_range_m", 0.0);
-  settings.anchor_density_cell_m =
-    declare_double("anchor_density_cell_m", 0.0);
-  settings.anchor_density_quota =
-    declare_int("anchor_density_quota", 0);
   settings.anchor_polar_sector_deg =
     declare_double("anchor_polar_sector_deg", 15.0);
   settings.anchor_polar_ring_m =
@@ -338,19 +319,11 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_int("anchor_polar_rings", 4);
   settings.anchor_polar_quota =
     declare_int("anchor_polar_quota", 0);
-  settings.anchor_weight_by_information = declare_bool("anchor_weight_by_information", false);
   settings.anchor_lookahead_m = declare_double("anchor_lookahead_m", 0.0);
   settings.anchor_lookahead_sec = declare_double("anchor_lookahead_sec", 0.0);
-  settings.anchor_geometry_power = declare_double("anchor_geometry_power", 0.0);
-  settings.anchor_weight_by_variance =
-    declare_bool("anchor_weight_by_variance", false);
   settings.anchor_bearing_variance =
     declare_double("anchor_bearing_variance", 3.6e-6);
-  settings.anchor_weight_by_trend = declare_bool("anchor_weight_by_trend", false);
   settings.anchor_trend_gain = declare_double("anchor_trend_gain", 0.05);
-  settings.anchor_trend_power = declare_double("anchor_trend_power", 0.0);
-  settings.anchor_trend_evict_variance =
-    declare_double("anchor_trend_evict_variance", 0.0);
   settings.anchor_road_priority = declare_bool("anchor_road_priority", false);
   settings.anchor_admit_by_information =
     declare_bool("anchor_admit_by_information", false);
@@ -407,12 +380,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_bearing_cell_rad = declare_double("anchor_bearing_cell_rad", 0.0);
   settings.anchor_bearing_cell_rho = declare_double("anchor_bearing_cell_rho", 1.0);
     declare_bool("anchor_bearing_nonholonomic", false);
-  settings.anchor_density_replace_margin =
-    declare_double("anchor_density_replace_margin", 0.0);
   settings.anchor_link_adopter_writes =
     declare_bool("anchor_link_adopter_writes", false);
-  settings.anchor_link_measure_only =
-    declare_bool("anchor_link_measure_only", false);
   settings.ground_plane_offset_m =
     declare_double("ground_plane_offset_m", 0.0);
   settings.pair_scale_gain = declare_double("pair_scale_gain", 0.0);

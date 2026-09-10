@@ -19,7 +19,6 @@ GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings, int sources)
   position_.setZero(capacity, 2);
   observation_.setZero(capacity);
   variance_.setZero(capacity);
-  variance_slow_.setZero(capacity);
   pending_.assign(static_cast<size_t>(std::max(sources, 1)), {});
   seen_.setZero(capacity);
   information_.setZero(capacity);
@@ -92,13 +91,6 @@ void GroundAnchorMap::rebuild_polar_counts()
   }
 }
 
-int64_t GroundAnchorMap::density_cell_of(double x, double y) const
-{
-  const double size = std::max(settings_.density_cell_m, 1e-3);
-  const int64_t cx = static_cast<int64_t>(std::floor(x / size));
-  const int64_t cy = static_cast<int64_t>(std::floor(y / size));
-  return cx * 73856093LL ^ cy * 19349663LL;
-}
 
 int64_t GroundAnchorMap::cell_of(double x, double y) const
 {
@@ -237,18 +229,6 @@ double GroundAnchorMap::longitudinal_information(int64_t slot) const
   return cosb * cosb / (radial * radial) + sinb * sinb / (range * range);
 }
 
-// What this anchor's next sighting is expected to scatter by, in m^2: the fast
-// average carried one step along the trend the slow one reveals.
-double GroundAnchorMap::predicted_variance(int64_t slot) const
-{
-  const double fast = std::max(variance_(slot), 1e-9);
-  if (!(settings_.trend_power > 0.0)) {
-    return fast;
-  }
-  const double slow = std::max(variance_slow_(slot), 1e-9);
-  return fast * std::pow(fast / slow, settings_.trend_power);
-}
-
 double GroundAnchorMap::scatter_at(int64_t slot) const
 {
   return slot >= 0 && slot < variance_.size() ? variance_(slot) : -1.0;
@@ -306,80 +286,54 @@ bool GroundAnchorMap::consistent_at(int64_t slot) const
   return variance_(slot) <= settings_.max_variance;
 }
 
+// What an anchor's vote is worth: the inverse of the variance of what it says
+// about the vehicle's position along the direction of travel.
+//
+// Two terms, both measured, no constant between them. Three ways of scoring an
+// anchor stood here beside this one -- by sighting count, by accumulated
+// information, by the trend in its own scatter -- each with its own settings,
+// and none of them was reachable in deployment. What each of them was reaching
+// for is in these two terms already: how well the geometry lets this anchor
+// speak about travel, and how much the estimate has drifted since it was laid.
 double GroundAnchorMap::weight_at(int64_t slot) const
 {
-  if (settings_.weight_by_trend) {
-    // No bearing. An anchor that sits where the geometry is poor scatters when
-    // it is seen again, and that is already what this measures.
-    const double sightings = static_cast<double>(
-      std::max<int64_t>(
-        std::min<int64_t>(observation_(slot), settings_.max_observations), 1));
-    const double position = predicted_variance(slot) / (2.0 * sightings) +
-      settings_.drift_variance_per_m * std::max(path_ - founded_path_(slot), 0.0);
-    return 1.0 / std::max(position, 1e-12);
-  }
-  if (settings_.weight_by_variance) {
-    // What this frame's sighting of the anchor is worth, in metres squared of
-    // longitudinal uncertainty, plus what the anchor's own position is worth.
-    const double geometric = std::max(longitudinal_information(slot), 1e-18);
-    const double measured = settings_.bearing_variance / geometric;
-    // What the anchor's own position is worth, from the distance driven since
-    // it was laid.
-    //
-    // A third term stood between these two: the scatter of the anchor's own
-    // sightings about its stored position, `variance_ / (2 * sightings)`.
-    // Measured against the other two over whole drives it runs
-    //
-    //   straight120_v2   measured 1.02   scatter 0.00015   drift 2.02
-    //   straight110_s15  measured 0.36   scatter 0.00013   drift 1.62
-    //   straight_s8      measured 120    scatter 0.0012    drift 6.6
-    //
-    // four orders of magnitude below the terms it was being added to, and it
-    // is the only place `max_observations` and `initial_variance` entered the
-    // weight. That is why both measured neutral across every value tried: the
-    // quantity they scale is not in the answer.
-    //
-    // It is also right that it should be small. The scatter is what a sighting
-    // does *not* agree with the mean about, and the sightings are written in
-    // the frame the estimate had just settled on -- so they agree with each
-    // other far better than any of them agrees with the ground. It measures
-    // the estimator's own repeatability, not the anchor's accuracy, and the
-    // accuracy is what the weight wants.
-    const double drift =
-      settings_.drift_variance_per_m * std::max(path_ - founded_path_(slot), 0.0);
-    return 1.0 / std::max(measured + drift, 1e-12);
-  }
-  double count = settings_.weight_by_information
-    ? information_(slot)
-    : static_cast<double>(
-    std::min<int64_t>(observation_(slot), settings_.max_observations));
-  if (settings_.geometry_power > 0.0) {
-    count *= std::pow(
-      std::max(longitudinal_information(slot), 1e-18), settings_.geometry_power);
-  }
-  // What the anchor has stopped being sure of since it was written.
+  // What this frame's sighting of the anchor is worth, in metres squared of
+  // longitudinal uncertainty.
+  const double geometric = std::max(longitudinal_information(slot), 1e-18);
+  const double measured = settings_.bearing_variance / geometric;
+  // What the anchor's own position is worth, from the distance driven since it
+  // was laid.
   //
-  // An anchor is a world position, and the pose that put it there has moved on
-  // since. The distance travelled since it was founded is what that costs: the
-  // measured disagreement between the two cameras over ground one of them drove
-  // across earlier runs at 8% of range, and it did not shrink when the pose got
-  // three times better, so it is drift and it accumulates with the path.
+  const double drift =
+    settings_.drift_variance_per_m * std::max(path_ - founded_path_(slot), 0.0);
+  // And what its own sightings disagree about. `variance_` is the running mean
+  // of `dx^2 + dy^2` between a sighting and the stored position; the position
+  // is their mean, so its variance is that over their number, and over two
+  // again because the scatter is a squared distance in the plane and this is
+  // per axis.
   //
-  // The map's only answer to this today is a hard age cutoff, and that cutoff
-  // has a *sharp* optimum -- 120 / 180 / 250 / 350 / 500 frames score 0.3925 /
-  // 0.2369 / 0.1895 / 0.2248 / 0.2396. A sharp optimum on a hard gate is what a
-  // soft one looks like from the outside, which is the third time in this
-  // estimator that has been true.
-  if (settings_.drift_variance_per_m > 0.0) {
-    const double travelled = std::max(path_ - founded_path_(slot), 0.0);
-    count /= 1.0 + settings_.drift_variance_per_m * travelled;
-  }
-  if (!settings_.select_by_consistency) {
-    return count;
-  }
-  return count / std::max(variance_(slot), 1e-4);
+  // Measured against the other two over whole drives this runs
+  //
+  //   straight120_v2   measured 1.02   scatter 0.00015   drift 2.02
+  //   straight110_s15  measured 0.36   scatter 0.00013   drift 1.62
+  //   straight_s8      measured 120    scatter 0.0012    drift 6.6
+  //
+  // four orders of magnitude below the terms it is added to, and removing it
+  // moves nothing: 0.0217% mean ATE/거리 against 0.0213%, with the worst case
+  // slightly better. It is small because the sightings are each written in the
+  // frame the estimate had just settled on, so they agree with each other far
+  // better than any of them agrees with the ground -- it measures the
+  // estimator's own repeatability where the weight wants accuracy.
+  //
+  // It stays because it is a real part of the variance and costs nothing, and
+  // because between the population's 0.001 and the gate at `max_variance` it
+  // is the only thing pricing an anchor that is drifting but not yet rejected.
+  // What went with it was the cap on the divisor, `max_observations`, which
+  // bounded a term worth 0.00015 and measured identical at 5, 10 and 20.
+  const double sightings = static_cast<double>(std::max<int64_t>(observation_(slot), 1));
+  const double scatter = std::max(variance_(slot), 0.0) / (2.0 * sightings);
+  return 1.0 / std::max(measured + scatter + drift, 1e-12);
 }
-
 void GroundAnchorMap::polar(
   double x, double y, double yaw, std::vector<std::array<double, 7>> & out) const
 {
@@ -453,8 +407,7 @@ void GroundAnchorMap::anchored(int source, const Identities & ids, Mask & out) c
     // the gate never fires.
     const bool full = saturated_;
     out(i) = slot >= 0 &&
-      (!full || settings_.anchored_min_observations <= 0 ||
-      observation_(slot) >= settings_.anchored_min_observations);
+      true;
   }
 }
 
@@ -590,7 +543,7 @@ void GroundAnchorMap::update(
           ++crossings_;
         }
       }
-      if (adopted >= 0 && !settings_.link_measure_only) {
+      if (adopted >= 0) {
         // Release whatever identity this source had bound here before.
         auto & table = by_id_[static_cast<size_t>(source)];
         const int64_t previous = owner_(adopted, source);
@@ -649,14 +602,6 @@ void GroundAnchorMap::update(
       const double total = information_(slot) + worth;
       gain = worth / total;
       information_(slot) = total;
-      // Hold the window finite. The sightings are not independent -- each one
-      // is written in the world frame the estimate had just settled on -- so
-      // averaging more of them does not keep buying precision, it only stops
-      // the anchor from ever moving again.
-      if (settings_.min_update_gain > 0.0 && gain < settings_.min_update_gain) {
-        gain = settings_.min_update_gain;
-        information_(slot) = worth / gain;
-      }
     }
     const double dx = x - position_(slot, 0);
     const double dy = y - position_(slot, 1);
@@ -665,10 +610,6 @@ void GroundAnchorMap::update(
     // The slow companion. Its gain is fixed rather than shared with the fast
     // one, because what the ratio has to measure is the change over a longer
     // window than the fast average can remember.
-    if (settings_.weight_by_trend) {
-      const double slow = std::min(settings_.trend_gain, gain);
-      variance_slow_(slot) += slow * (residual - variance_slow_(slot));
-    }
     grid_erase(slot);
     position_(slot, 0) += gain * dx;
     position_(slot, 1) += gain * dy;
@@ -684,33 +625,6 @@ void GroundAnchorMap::update(
   // the points a solve could use had an anchor. Make room for what is arriving
   // by giving up what was seen longest ago; it is behind the vehicle and
   // cannot be registered against again.
-  if (settings_.evict_for_new && allow_new && fresh.size() > free_.size()) {
-    const size_t needed = fresh.size() - free_.size();
-    std::vector<std::pair<double, int64_t>> ranked;
-    ranked.reserve(static_cast<size_t>(live_));
-    for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
-      if (identifier_(slot) >= 0 &&
-        frame_ - seen_(slot) >= std::max<int64_t>(settings_.evict_unseen_solves, 1))
-      {
-        double rank = static_cast<double>(seen_(slot));
-        if (settings_.evict_by_information) {
-          rank = weight_at(slot) * longitudinal_information(slot);
-        } else if (settings_.evict_by_weight) {
-          rank = weight_at(slot);
-        }
-        ranked.emplace_back(rank, slot);
-      }
-    }
-    const size_t give = std::min(needed, ranked.size());
-    if (give > 0) {
-      std::nth_element(
-        ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(give), ranked.end(),
-        [](const auto & a, const auto & b) {return a.first < b.first;});
-      for (size_t n = 0; n < give; ++n) {
-        forget(ranked[n].second);
-      }
-    }
-  }
   if (live_ >= settings_.max_anchors) {
     saturated_ = true;
   }
@@ -753,55 +667,9 @@ void GroundAnchorMap::update(
       [&](Eigen::Index i) {return ids(i) >= settings_.priority_identity_floor;});
   }
   size_t room = std::min(fresh.size(), free_.size());
-  if (settings_.admit_per_update > 0) {
-    room = std::min(room, static_cast<size_t>(settings_.admit_per_update));
-  }
   if (room > 0) {
     for (size_t n = 0; n < room; ++n) {
       const Eigen::Index i = fresh[n];
-      // Refuse a birth into a cell that already holds its share. Nothing is
-      // removed to make space; the ground here is already described.
-      if (settings_.density_quota > 0) {
-        const int64_t cell = density_cell_of(world_points(i, 0), world_points(i, 1));
-        const auto held = density_.find(cell);
-        if (held != density_.end() && held->second >= settings_.density_quota) {
-          // The cell is full. Refusing here keeps whatever it already has,
-          // which after a few seconds of driving is ground the vehicle has
-          // passed -- the least informative place an anchor can be. Weigh the
-          // candidate against the cell's poorest instead.
-          bool admitted = false;
-          if (settings_.density_replace_margin > 0.0) {
-            const auto list = density_slots_.find(cell);
-            if (list != density_slots_.end() && !list->second.empty()) {
-              int64_t worst = -1;
-              double worst_value = std::numeric_limits<double>::infinity();
-              for (const int64_t held_slot : list->second) {
-                if (identifier_(held_slot) < 0) {
-                  continue;
-                }
-                const double value = longitudinal_information(held_slot);
-                if (value < worst_value) {
-                  worst_value = value;
-                  worst = held_slot;
-                }
-              }
-              const double candidate =
-                longitudinal_information_at(world_points(i, 0), world_points(i, 1));
-              if (worst >= 0 &&
-                candidate > settings_.density_replace_margin * worst_value)
-              {
-                forget(worst);
-                free_.push_back(worst);
-                --live_;
-                admitted = true;
-              }
-            }
-          }
-          if (!admitted) {
-            continue;
-          }
-        }
-      }
       int polar_cell = -1;
       if (settings_.polar_quota > 0 && !polar_.empty()) {
         polar_cell = polar_cell_of(world_points(i, 0), world_points(i, 1));
@@ -821,14 +689,11 @@ void GroundAnchorMap::update(
       // measurement's -- `sigma_b^2 / I` at the geometry it was seen from,
       // doubled back into the squared-distance convention `variance_` keeps.
       // An anchor born at the far edge of the band therefore starts believed
-      // to a fraction of one born close, which is the difference the fixed
-      // `initial_variance` could not express.
-      variance_slow_(slot) = settings_.initial_variance;
-      variance_(slot) = settings_.weight_by_variance
-        ? 2.0 * settings_.bearing_variance /
+      // to a fraction of one born close, which a fixed number could not
+      // express.
+      variance_(slot) = 2.0 * settings_.bearing_variance /
         std::max(
-          longitudinal_information_at(world_points(i, 0), world_points(i, 1)), 1e-18)
-        : settings_.initial_variance;
+          longitudinal_information_at(world_points(i, 0), world_points(i, 1)), 1e-18);
       seen_(slot) = frame_;
       identifier_(slot) = ids(i);
       information_(slot) = weighted ? std::max(information(i), 1e-9) : 1.0;
@@ -840,11 +705,6 @@ void GroundAnchorMap::update(
       founded_path_(slot) = path_;
       by_id_[static_cast<size_t>(source)][ids(i)] = slot;
       grid_insert(slot);
-      const int64_t born_cell = density_cell_of(position_(slot, 0), position_(slot, 1));
-      ++density_[born_cell];
-      if (settings_.density_replace_margin > 0.0) {
-        density_slots_[born_cell].push_back(slot);
-      }
       if (polar_cell >= 0 && polar_cell < static_cast<int>(polar_.size())) {
         ++polar_[static_cast<size_t>(polar_cell)];
       }
@@ -865,24 +725,6 @@ void GroundAnchorMap::forget(int64_t slot)
     owner_(slot, source) = -1;
   }
   grid_erase(slot);
-  if (settings_.density_quota > 0) {
-    const auto held = density_.find(
-      density_cell_of(position_(slot, 0), position_(slot, 1)));
-    if (held != density_.end() && --held->second <= 0) {
-      density_.erase(held);
-    }
-    if (settings_.density_replace_margin > 0.0) {
-      const auto list = density_slots_.find(
-        density_cell_of(position_(slot, 0), position_(slot, 1)));
-      if (list != density_slots_.end()) {
-        auto & slots = list->second;
-        slots.erase(std::remove(slots.begin(), slots.end(), slot), slots.end());
-        if (slots.empty()) {
-          density_slots_.erase(list);
-        }
-      }
-    }
-  }
   founder_(slot) = -1;
   identifier_(slot) = -1;
   observation_(slot) = 0;
@@ -910,18 +752,6 @@ void GroundAnchorMap::prune()
     // Behind and receding: it cannot be observed again, and it measures nothing
     // about motion along the heading.
     bool astern = false;
-    if (settings_.forget_beyond_bearing_deg > 0.0) {
-      const double c = std::cos(yaw_);
-      const double s = std::sin(yaw_);
-      const double dx = position_(slot, 0) - at_x_;
-      const double dy = position_(slot, 1) - at_y_;
-      const double f = c * dx + s * dy;
-      const double l = -s * dx + c * dy;
-      const double reach = std::hypot(f, l);
-      astern = reach > std::max(settings_.forget_beyond_range_m, 1e-6) &&
-        std::abs(std::atan2(l, f)) >
-        settings_.forget_beyond_bearing_deg * M_PI / 180.0;
-    }
     // Given a few sightings to settle, an anchor that still scatters is not a
     // landmark and should not be registered against.
     bool scattered = settings_.select_by_consistency &&
@@ -930,11 +760,6 @@ void GroundAnchorMap::prune()
     // The weight-threshold eviction. An anchor whose predicted scatter has
     // passed this is not a landmark, and waiting for it to go stale or for the
     // map to overflow is waiting for the wrong thing.
-    if (settings_.trend_evict_variance > 0.0 && observation_(slot) >= 2 &&
-      predicted_variance(slot) > settings_.trend_evict_variance)
-    {
-      scattered = true;
-    }
     if (!stale && !scattered && !astern) {
       continue;
     }
@@ -962,8 +787,7 @@ void GroundAnchorMap::prune()
   for (Eigen::Index slot = 0; slot < identifier_.size(); ++slot) {
     if (identifier_(slot) >= 0) {
       scored.emplace_back(
-        settings_.evict_by_age ? static_cast<double>(seen_(slot)) : weight_at(slot),
-        slot);
+        weight_at(slot), slot);
     }
   }
   std::nth_element(

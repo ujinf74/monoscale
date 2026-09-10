@@ -261,34 +261,14 @@ struct EstimatorSettings
   int max_ground_anchors = 4000;
   int anchor_max_age_frames = 120;
   double anchor_update_gain = 0.0;
-  int anchor_max_observations = 20;
-  // The anchor map's own quality gates. These existed in AnchorSettings from
-  // the start but were never forwarded, so no configuration could reach them
-  // and the hardcoded defaults were the only values ever measured.
-  double anchor_initial_variance = 0.04;
   double anchor_max_variance = 0.09;
   int anchor_trial_observations = 4;
-  double anchor_min_update_gain = 0.0;
-  bool anchor_evict_by_age = false;
-  bool anchor_evict_for_new = false;
-  // Evict the least trusted rather than the longest unseen.
-  bool anchor_evict_by_weight = false;
   // Solves an anchor must go unseen before it may be evicted.
   int anchor_evict_unseen_solves = 1;
-  // Rank eviction by history times the axis the anchor measures.
-  bool anchor_evict_by_information = false;
-  // Cap on new anchors per update; 0 leaves it unbounded.
-  int anchor_admit_per_update = 0;
-  // Sightings before the solve will register against an anchor.
-  int anchored_min_observations = 0;
-  // Forget anchors past this bearing off the heading, in degrees.
-  double anchor_forget_beyond_bearing_deg = 0.0;
   // Range past which an astern anchor may be forgotten; 0 uses the
   // solve band, which is the range at which it stops being reachable.
   double anchor_forget_beyond_range_m = 0.0;
   // Ground cell size in metres and how many anchors one cell may hold.
-  double anchor_density_cell_m = 0.0;
-  int anchor_density_quota = 0;
   // Admission quota on bearing-by-range cells in the vehicle's frame.
   double anchor_polar_sector_deg = 0.0;
   double anchor_polar_ring_m = 0.0;
@@ -305,92 +285,10 @@ struct EstimatorSettings
   // differentiating amplifies exactly the noise the gyro has most of. This
   // low-passes it; 0 takes the raw difference.
   double imu_angular_accel_tau_sec = 0.0;
-  // Throw the solve away when the two disagree by more than this many degrees.
-  // The bearing is too coarse to steer by, but a solve the off-ground
-  // structure flatly contradicts is a solve worth not having.
-  // How much of a camera's standing disagreement with the fused pose to take
-  // back out of the hop its map reports. 0 leaves the correction whole.
-  // What a camera counts for when its hop came off the anchor map, against
-  // one that fell back to comparing two frames.
-  //
-  // These are not the same quantity. The map path reports `placed - pose_`,
-  // which carries a correction for whatever error the pose had already
-  // accumulated; the fallback reports a plain displacement, which carries
-  // none. Averaging them as equals applies the correction at half strength and
-  // drags the camera that had no map. Measured, the drives split exactly in
-  // the stretches where one camera has the map and the other does not.
-  // Metres of hop to give back per radian of turn, and a flat scale on top.
-  //
-  // Measured per solve against truth: hops on a straight read 0.1 to 0.5% short
-  // while hops through a manoeuvre read 0.7 to 0.8% long, and the sign flips
-  // inside a single drive. That is about a percentage point per 0.15 rad/m of
-  // curvature. It is a common mode error -- both cameras share it -- which is
-  // the one kind this two-camera structure cannot cancel for itself.
-  // The same Gaussian the anchor alignment uses, for the two frame fallback.
-  // Extra metres of inlier gate per radian the vehicle turns over a hop.
-  //
-  // A ground point at range R sweeps R*dyaw when the vehicle rotates, so any
-  // error in its range or in the yaw is multiplied by the turn -- the votes
-  // spread wider through a manoeuvre than they ever do on a straight. A gate
-  // sized for the straight then throws away good points exactly when there are
-  // fewest of them. Measured, the curved drives want 0.16-0.24 m where the
-  // straight ones want 0.06-0.10.
-  // Move the pose by what the cameras solved, leaving the filter to run
-  // alongside without writing the hop. Diagnostic: it answers whether a drive's
-  // error is the vision's or the filter's, which nothing else can.
-  // How much of the lateral error the camera split predicts to take back out.
-  //
-  // Each camera's range scale error acts about its own lens, not about
-  // base_link, so a scale error eps on a camera mounted at x contributes
-  // eps * dyaw * x SIDEWAYS whenever the vehicle turns. The front lens sits at
-  // +3.694 and the rear at -0.82, and the two cameras' scale errors are equal
-  // and opposite -- so the along-track parts cancel, as they always have, and
-  // the lateral parts ADD. It is invisible on a straight and accumulates
-  // through a manoeuvre, which is exactly where this estimator is worst.
-  //
-  // Everything in it is observable: eps_i is how far camera i's hop reads
-  // against the fused one, x_i is the mount, and the weights are the fusion's
-  // own. 1.0 subtracts the whole prediction.
-  // Restrict the solve to a rectangle of the frame, in fractions of width and
-  // height. Diagnostic: if the projection from pixels to metres were exact,
-  // every region of the image would produce the same hop. Where they differ,
-  // the difference is a map of the model's error. x1 <= x0 leaves it off.
-  // How hard to discount a ground point for being far away.
-  //
-  // Measured on this rig: restricting the solve to a 1 m ring, the registration
-  // residual runs 0.0053 m at 1-2 m and 0.0379 m at 4-5 m -- a factor of seven
-  // -- and all four rings imply the same 1.5-2.2 mrad of bearing error, which
-  // at 640 px is half a pixel. So the residual is one pixel-level error
-  // amplified by range, exactly as (R^2 + h^2) / h says it should be, and the
-  // solve has been averaging near and far points alike. Weight is
-  // (R^2 + h^2)^-power: 0 is the old uniform behaviour, 2 is the inverse
-  // variance the geometry implies.
-  // What one road-warp point counts for against one corner.
-  //
-  // The tracker can carry a handful of points on a photometric fit of the road
-  // region instead of on per-corner flow, and marks them with identities at or
-  // above `kRoadIdentity`. Compared like for like -- 150 corners against 150
-  // corners plus the warp -- the warp's points register with a spread of
-  // 0.0026 m against the corners' 0.0083, so their inverse variance is about
-  // ten times higher. That ratio is the weight; the number of points is only
-  // what it takes to define the warp. Replicating a grid to buy weight instead
-  // would be forging it.
-  // Restore the old inverse-square weighting of anchor sightings, as a power
-  // on range. 0 uses the geometry instead, which is the default and the
-  // correct model -- see `update_anchors`.
-  // Weigh anchors in the registration by information rather than sightings.
-  bool anchor_weight_by_information = false;
   double anchor_lookahead_m = 0.0;
   double anchor_lookahead_sec = 0.0;
-  // Time constant of the heading the anchor weights are judged from. 0 uses the
-  // pose's own heading, which is what every measurement before this used.
-  double anchor_geometry_power = 0.0;
-  bool anchor_weight_by_variance = false;
   double anchor_bearing_variance = 3.6e-6;
-  bool anchor_weight_by_trend = false;
   double anchor_trend_gain = 0.05;
-  double anchor_trend_power = 0.0;
-  double anchor_trend_evict_variance = 0.0;
   // Let photometric road-grid points into the anchor map ahead of corners.
   bool anchor_road_priority = false;
   // Spend the map's scarce free slots on the most informative candidates.
@@ -609,9 +507,7 @@ struct EstimatorSettings
   // See `align_to_anchors`. 0 is off; the physical value is the bearing noise.
   double anchor_bearing_cell_rad = 0.0;
   double anchor_bearing_cell_rho = 1.0;
-  double anchor_density_replace_margin = 0.0;
   bool anchor_link_adopter_writes = false;
-  bool anchor_link_measure_only = false;
   double ground_plane_offset_m = 0.0;
   // A common ratio applied to every camera's range after the plane offset.
   double pair_scale_gain = 0.0;
