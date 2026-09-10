@@ -3578,6 +3578,33 @@ void Estimator::anchor_polar(std::vector<std::array<double, 7>> & out) const
   }
 }
 
+// What a revisit constraint is worth, measured against truth 2026-09-10.
+//
+// The pose graph built on these lost by 7 to 14x and the reading at the time
+// was that a loop edge's error is the association radius rather than a
+// measurement. Dumped with `--revisits` and compared to CARLA -- lengths only,
+// because the estimator's world frame is anchored at the first pose and truth
+// is in the map frame, which is what made the first attempt at this read 141%
+// on a drive spawned at 89.8 degrees -- that reading does not hold:
+//
+//   drive   n    gap     truth span   edge length error   p10..p90    >2%
+//   v2      43   3.13 s     5.80 m        +0.06%        -0.44..+0.51   2%
+//   s8     308   0.87       6.51          -0.32         -0.61..+0.04   3%
+//   cs20    61   3.07       5.66          -0.53         -1.08..+0.04   5%
+//
+// **These are measurements.** A few tenths of a per cent over a six-metre
+// baseline, with a tail of two to five per cent beyond 2% and two per cent
+// beyond 5%. Whatever sank the pose graph was in the use, not in the
+// constraint.
+//
+// Two things temper it. The edge is about as accurate as the odometry it would
+// correct -- the estimator's own displacement over the same interval reads
+// -0.11%, -0.30% and -0.48% -- so the gain is in decorrelating, not in
+// precision. And they are sparse where the vehicle is slow: 43 of them on 900
+// poses of straight120_v2 against 308 on 600 poses of straight_s8. Density,
+// not accuracy, is what a relative-constraint core would have to find, and
+// loosening the admission that produces them is what the held-out drives
+// refused this morning.
 std::vector<Estimator::RevisitAudit> Estimator::revisit_audit() const
 {
   std::vector<RevisitAudit> out;
