@@ -259,6 +259,30 @@ struct GroundModel
       r_cb * (r_b.t() * (translation_base_from_camera - hop) -
       translation_base_from_camera);
     const cv::Vec3d n = r_cb * cv::Vec3d(0.0, 0.0, 1.0);
+    // The height the whole ground scale rests on, and the estimator does not
+    // use this one.
+    //
+    // `ground_plane_offset_m` reduces the height by 5.5 mm for the estimator's
+    // ground projection -- the pair solve, and everything the anchor map is
+    // built from -- and appears nowhere in this file. The two paths measure the
+    // same road from heights 5.5 mm apart.
+    //
+    // What this path wants is 1.55 mm, not 5.5. Measured against truth with
+    // `monoscale_evaluation/photometric_bias.py`: displacing both optical
+    // centres 3.1 mm along their own viewing axes, which is 1.55 mm of height
+    // since both look down at 30 degrees, takes the straight-line length bias
+    // to zero at 1.4, 1.9 and 7.5 m/s together -- from +0.140, +0.162 and
+    // +0.148 per cent to within the instrument's 0.012% floor -- and with it
+    // `photometric_scale` stops wanting 0.9988 and wants 1.0. The sensitivity
+    // measures 0.0483% per millimetre of axis offset against the 0.048 a
+    // height change of half that predicts, so the mechanism is confirmed and
+    // not merely fitted.
+    //
+    // Not deployed. With the measurement made honest the trajectory over-runs
+    // by -0.035 to +0.088 per cent depending on the drive, where the fitted
+    // constant held it to 0.014: correcting this path stops it cancelling the
+    // other one's error and starts exposing it. One height for both is the
+    // repair -- two unbiased paths, not one biased pair that agrees.
     const double height = translation_base_from_camera[2];
     cv::Matx33d out = rot;
     if (std::abs(height) > 1e-6) {

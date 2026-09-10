@@ -505,6 +505,27 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.innovation_gate = settings.filter_innovation_gate;
     displacement_filter_ = std::make_unique<PlanarDisplacementFilter>(filter);
   }
+  // The two measurement paths do not share this, and that is a defect.
+  //
+  // This turns the offset into a range scale for the estimator's own ground
+  // projection -- the pair solve and everything the anchor map is built from.
+  // The tracker's photometric homography divides by the camera height directly
+  // and has no reference to `ground_plane_offset_m` anywhere in the file, so
+  // the two paths are measuring the same road from heights that differ by
+  // 5.5 mm: +0.62% of range at the front mount, +0.44% at the rear.
+  //
+  // Measured 2026-09-10 with `monoscale_evaluation/photometric_bias.py`, which
+  // compares the fit's step against truth with no estimator in between and
+  // repeats to 0.012%, the photometric path wants **1.55 mm** of height taken
+  // off, not 5.5. Displacing both optical centres 3.1 mm along their own
+  // viewing axes -- which is 1.55 mm of height, since both look down at 30
+  // degrees -- takes the straight-line bias to zero at three different speeds
+  // at once, and the measured sensitivity, 0.0483% per millimetre of axis
+  // offset, matches what a height change of half that predicts (0.056%/mm
+  // front, 0.040%/mm rear, 0.048 weighted) to better than one per cent.
+  //
+  // So the number this path uses and the number the other path needs disagree
+  // by 4 mm, and `photometric_scale` has been absorbing the difference.
   if (settings.ground_plane_offset_m != 0.0) {
     for (auto & camera : cameras_) {
       const double height = camera->model.translation_base_from_camera.z();
