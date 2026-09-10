@@ -1436,8 +1436,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // reach, which is what ground_max_distance_m is for.
   const double solve_band = settings_.solve_max_distance_m > 0.0
     ? settings_.solve_max_distance_m : std::numeric_limits<double>::infinity();
-  // Held when the map answered and its correction is to be scaled rather than
-  // taken whole.
   Eigen::Vector3d mount_in_frame = camera.model.translation_base_from_camera;
   if (settings_.level_frame_origin && tilt_moves_camera && tilt.has_value()) {
     const Eigen::Vector3d centre(settings_.pitch_centre_x_m, 0.0, 0.0);
