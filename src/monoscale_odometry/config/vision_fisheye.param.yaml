@@ -1274,7 +1274,19 @@
     # written in 1c3f002 and had never been in any sweep's axis list, and it
     # appears in every one of the top ten combinations.
     anchor_initial_variance: 0.09
-    anchor_link_rebind_grace: 60
+    # One frame, which is the rule this file argued for before it was widened.
+    #
+    # The gate exists so that a feature still being tracked does not have its
+    # anchor taken: an anchor a source wrote to *this frame* is spoken for.
+    # 60 frames widened "spoken for" to "touched recently", and the two gates
+    # together -- this one and `anchor_link_cross_source_only` -- made it
+    # impossible for a source to rebind an anchor it founded itself, which is
+    # exactly what a track that blinked out and was re-detected under a new
+    # identity needs in order to be reconnected to its own history.
+    #
+    # Neither moves the score alone. Together they take ATE/거리 최악 from
+    # 0.0375% to 0.0311% and the mean from 0.0226% to 0.0213%.
+    anchor_link_rebind_grace: 1
     anchor_weight_by_variance: true
     fusion_gain_mode: 0
     ground_height_from_tilt: false
@@ -1303,7 +1315,8 @@
     # association radius when it is loose, and a measurement only when it is
     # not.
     anchor_link_radius_m: 0.02
-    anchor_link_cross_source_only: true
+    # A source may rebind an anchor it founded. See `anchor_link_rebind_grace`.
+    anchor_link_cross_source_only: false
     anchor_link_adopter_writes: false
 
     # The point the body pitches about, ahead of base_link (the rear axle).
