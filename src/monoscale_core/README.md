@@ -57,6 +57,11 @@ zero the mapper is told there are none rather than being handed a null.
 
 ## Held to the Python it replaces
 
+The table below is a **port-equivalence check**, not a benchmark. It asks
+whether the C++ reproduces the Python it replaced, on a bag
+(`approach_hd60_tracks_w1280`) that is no longer in the benchmark set. For what
+this stack currently scores, and on what, see `src/monoscale_evaluation/README.md`.
+
 `monoscale_replay` reads a bag directly and drives this library in recorded
 order, which is what the Python's `offline_replay.py` did for it. On
 `approach_hd60_tracks_w1280`, with the same parameter file, before the Python

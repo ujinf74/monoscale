@@ -119,3 +119,6 @@ ros2 run monoscale_odometry monoscale_replay <bag> \
 bag을 직접 읽어 라이브러리를 녹화 순서대로 돌린다. 시계도 난수도 읽지 않으므로
 같은 bag은 데스크톱에서든 Orin에서든 같은 궤적을 낸다 — 회귀가 보이는 것은
 그 때문이다.
+
+현재 수치와 그것을 다시 만드는 절차, 튜닝에 쓰지 않는 held-out 세트는
+`src/monoscale_evaluation/README.md`에 있다.
