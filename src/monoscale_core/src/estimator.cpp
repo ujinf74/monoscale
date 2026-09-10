@@ -614,8 +614,33 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // zeroth-order term of a surface that has higher ones, and no value of a
   // zeroth-order term carries them.
   //
-  // One thing it does not explain: straight_s8 is on the flat road and its own
-  // requirement still moves with range -- 1.05, 0.54, 2.94, 5.99 mm at 5.8,
+  // The obvious next move is to add the term the surface needs -- a weight
+  // that falls off with range faster than the bearing noise does, its
+  // coefficient measured rather than tuned. It is not measurable. The
+  // alignment already dumps every residual with the range it was taken at
+  // (`MONOSCALE_ALIGN_RESIDUALS`), and regressing the radial part on range
+  // gives, over the whole of each drive:
+  //
+  //   drive   samples   linear only -> dh   with a quadratic: dh, tilt    R^2
+  //   v2      136,666       0.81 mm            0.00096, -0.0034 deg      0.000
+  //   s15     213,867       2.54               0.00125, +0.0175          0.005
+  //   s8        8,189      -0.81               0.00346, -0.0647          0.005
+  //   cs20    145,765       1.04              -0.00314, +0.0610          0.008
+  //
+  // Two things go wrong. `R` and `R^2` are nearly collinear over the 0.5 to
+  // 6 m the anchors span, so the split between them is not identified: adding
+  // the quadratic moves straight_s8's linear coefficient by a factor of four.
+  // And the heights it implies, -0.8 to +2.5 mm, are not the 0.9 to 6.8 mm the
+  // path actually requires -- so the radial lean of the alignment residual is
+  // not the channel the length error arrives through. It measures the mounting
+  // pitch, which is what it was built for and all it was ever shown to do.
+  //
+  // So the coefficient would have to be fitted, and a coefficient fitted to
+  // the score is the thing this file has spent the session removing. The term
+  // is not added.
+  //
+  // One thing the road's shape does not explain either: straight_s8 is on the
+  // flat road and its own requirement still moves with range -- 1.05, 0.54, 2.94, 5.99 mm at 5.8,
   // 4.0, 2.8 and 2.0 metres, and not monotonically. The road's shape is a
   // contributor of the right size and sign; it is not the whole of it.
   //
