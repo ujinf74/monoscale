@@ -259,7 +259,48 @@ bool GroundAnchorMap::usable_at(int64_t slot) const
   if (observation_(slot) < settings_.trial_observations) {
     return false;
   }
-  return !settings_.select_by_consistency || variance_(slot) <= settings_.max_variance;
+  return !settings_.select_by_consistency || consistent_at(slot);
+}
+
+// An anchor is inconsistent when it keeps landing further from its stored
+// position than a landmark should.
+//
+// The threshold is absolute -- m^2 of scatter, the same number for an anchor
+// seen at 1 m and one seen at 5 m -- and that looks wrong. Bearing noise
+// projects to the ground through the geometry, so the far anchor should be
+// allowed to scatter far more. Normalising by that prediction, `2*sigma_b^2/I`,
+// makes the gate dimensionless: how many times worse than predicted a sighting
+// may land, with a fresh anchor entering at exactly one.
+//
+// It was built and it loses, and the measurement says why. Running means of
+// the two quantities over whole drives:
+//
+//   drive                 measured scatter      geometric prediction
+//   straight120_v2  8 m/s     0.00099 m^2            2.14 m^2
+//   straight110_s15 1.5 m/s   0.00102                0.75
+//   straight_s8               0.00096               62.2
+//
+// The measured scatter is the same to six percent across three drives at
+// different speeds on different roads. The prediction spans a factor of
+// eighty. They are not measuring the same thing: what an anchor's sightings
+// actually scatter by is the pose error between the frames they were written
+// in, which moves every sighting equally whatever its range, and the bearing
+// noise the prediction is built from is two to five orders of magnitude below
+// it.
+//
+// So normalising divides a common-mode quantity by a geometric one, and the
+// gate becomes a function of range rather than of consistency -- backwards.
+// Its low tail is the anchors with the most longitudinal information, which
+// are the ones abreast holding 57% of it, and those are what it cuts:
+// ratio 4 measures 0.0410% mean ATE/거리 against the absolute gate's 0.0217%,
+// and even at its best, ratio 8, it is 0.0240%.
+//
+// An absolute threshold is the right instrument for a scatter that does not
+// depend on range. 0.09 m^2 against a measured 0.001 is ninety times the
+// typical anchor, so what it removes is a genuine tail and not a range.
+bool GroundAnchorMap::consistent_at(int64_t slot) const
+{
+  return variance_(slot) <= settings_.max_variance;
 }
 
 double GroundAnchorMap::weight_at(int64_t slot) const
@@ -876,7 +917,7 @@ void GroundAnchorMap::prune()
     // landmark and should not be registered against.
     bool scattered = settings_.select_by_consistency &&
       observation_(slot) >= settings_.trial_observations &&
-      variance_(slot) > settings_.max_variance;
+      !consistent_at(slot);
     // The weight-threshold eviction. An anchor whose predicted scatter has
     // passed this is not a landmark, and waiting for it to go stale or for the
     // map to overflow is waiting for the wrong thing.

@@ -41,6 +41,9 @@ struct AnchorSettings
   // on a slope, or simply mistracked keeps landing somewhere else, and counting
   // sightings cannot tell that apart from a good one seen often.
   double initial_variance = 0.04;
+  // How far an anchor's sightings may scatter about its stored position, m^2,
+  // before it is judged not to be a landmark. Absolute and not scaled by the
+  // geometry, for the reason `consistent_at` sets out.
   double max_variance = 0.09;
   int trial_observations = 4;
   // Off, an anchor is trusted for having been seen often, which was the
@@ -600,6 +603,8 @@ private:
   // Slot is live, past trial, and still agreeing with itself: what the solve
   // will actually register against.
   bool usable_at(int64_t slot) const;
+  // Whether its measured scatter stays inside `max_variance`.
+  bool consistent_at(int64_t slot) const;
   // The same, for a position that has no slot yet -- what a candidate birth
   // would be worth if it were admitted.
   double longitudinal_information_at(double x, double y) const;
