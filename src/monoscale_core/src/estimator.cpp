@@ -589,6 +589,36 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // 0.1777% -> 0.3883%. A sharp optimum flanked by two worse ones is what a
   // fitted point looks like from the outside.
   //
+  // Where the far ground's error comes from, as far as it has been chased.
+  //
+  // Read out of the truth poses, the two roads the bench uses are not equally
+  // flat. Over a hundred metres each:
+  //
+  //   road                       z range      local slope scatter
+  //   A  straight120 / 110      2.1-3.8 mm     0.038-0.099 deg
+  //   B  straight_s8, slaloms   0.0-1.3        0.0001-0.0043
+  //
+  // The grade is 0.0000 degrees on both and the truth pitch is 0.0005, so
+  // there is no hill and no vehicle attitude to blame. Road A undulates by
+  // three or four millimetres; road B is flat to the renderer's precision.
+  //
+  // That is the boundary the required offset splits on -- road A's drives want
+  // 5.9 to 6.8 mm at the deployed range and road B's straight wants 0.9 -- and
+  // the magnitude works: a ground point three metres out on a surface tilted
+  // 0.075 degrees from the plane through the camera sits 3.9 mm off it,
+  // against the 5.8 mm the two roads differ by.
+  //
+  // Which says what shape the parameter should have. The projection assumes
+  // one plane; the surface has a slope and a curvature as well, and their
+  // effect on a projected range grows with it. `ground_plane_offset_m` is the
+  // zeroth-order term of a surface that has higher ones, and no value of a
+  // zeroth-order term carries them.
+  //
+  // One thing it does not explain: straight_s8 is on the flat road and its own
+  // requirement still moves with range -- 1.05, 0.54, 2.94, 5.99 mm at 5.8,
+  // 4.0, 2.8 and 2.0 metres, and not monotonically. The road's shape is a
+  // contributor of the right size and sign; it is not the whole of it.
+  //
   // Which points where the architecture review already points: the pair
   // solve's length is not a competitive measurement, and the map hop is not a
   // displacement at all. The repair is not one height for both -- it is to
