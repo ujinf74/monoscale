@@ -526,6 +526,48 @@ Estimator::Estimator(const EstimatorSettings & settings)
   //
   // So the number this path uses and the number the other path needs disagree
   // by 4 mm, and `photometric_scale` has been absorbing the difference.
+  //
+  // Worse: **this path does not have one number.** Measured 2026-09-10 with
+  // the photometric step switched off, so the trajectory's length comes from
+  // the pair solve and the map alone, the offset that would take the path
+  // length to truth is
+  //
+  //   drive         offset 0   at 5.5 mm   at 11 mm     zero at
+  //   straight120_v2  +0.662%    +0.117%    -0.431%     6.68 mm
+  //   straight120_v3  +0.673     +0.126     -0.420      6.78
+  //   straight110_s15 +0.588     +0.038     -0.532      5.87
+  //   straight110_s4  +0.652     +0.115     -0.416      6.66
+  //   straight_s8     +0.089     -0.430     -0.947      0.90
+  //   curve_s05       +0.380     -0.182     -0.732      3.72
+  //   curve_s20       +0.379     -0.156     -0.721      3.85
+  //
+  // From 0.9 mm to 6.8 mm, a factor of seven, and it is not noise: v2 and v3
+  // are the same condition recorded twice and agree to 0.1 mm. The sensitivity
+  // is the same -0.10% per millimetre the photometric path shows, so the
+  // instrument is the same; what differs is that this path's requirement is
+  // not a constant.
+  //
+  // A height cannot represent that. `ground_plane_offset_m` is therefore not
+  // measuring a plane offset here -- it is a single number fitted to the
+  // average of a drive-varying length error, which is exactly the shape of
+  // thing this file has been removing all session.
+  //
+  // The photometric path's requirement, by contrast, is one number: 1.55 mm
+  // across 1.4, 1.9 and 7.5 m/s and across both roads, to 0.2 mm. So the two
+  // paths are not two views of one geometric error with a shared repair. One
+  // of them has a scale error that physics can name and remove; the other has
+  // a length that varies per drive, and giving it a better height will not fix
+  // that.
+  //
+  // Which points where the architecture review already points: the pair
+  // solve's length is not a competitive measurement, and the map hop is not a
+  // displacement at all. The repair is not one height for both -- it is to
+  // stop asking this path for a length.
+  //
+  // Held: with the photometric step on, it supplies the length on 57-92% of
+  // frames and this path supplies the rest, so what `photometric_scale` fits
+  // is that mixture. That is why one constant appeared to work and why it
+  // moves when the map's share moves.
   if (settings.ground_plane_offset_m != 0.0) {
     for (auto & camera : cameras_) {
       const double height = camera->model.translation_base_from_camera.z();
