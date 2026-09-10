@@ -279,22 +279,31 @@ double GroundAnchorMap::weight_at(int64_t slot) const
     // longitudinal uncertainty, plus what the anchor's own position is worth.
     const double geometric = std::max(longitudinal_information(slot), 1e-18);
     const double measured = settings_.bearing_variance / geometric;
-    // `variance_` is the running mean of `dx^2 + dy^2` between a sighting and
-    // the stored position -- the scatter of the sightings, not the variance of
-    // the position they average to. The position is a mean, so its variance is
-    // that over the number of sightings, and over two because the scatter is a
-    // squared distance in the plane and this is per axis.
+    // What the anchor's own position is worth, from the distance driven since
+    // it was laid.
     //
-    // `max_observations` is the right count to divide by and this is the first
-    // use that earns it: the sightings are not independent (each is written in
-    // the world frame the estimate had just settled on), so the window has to
-    // be finite, which is exactly what that setting bounds.
-    const double sightings = static_cast<double>(
-      std::max<int64_t>(
-        std::min<int64_t>(observation_(slot), settings_.max_observations), 1));
-    const double position = std::max(variance_(slot), 0.0) / (2.0 * sightings) +
+    // A third term stood between these two: the scatter of the anchor's own
+    // sightings about its stored position, `variance_ / (2 * sightings)`.
+    // Measured against the other two over whole drives it runs
+    //
+    //   straight120_v2   measured 1.02   scatter 0.00015   drift 2.02
+    //   straight110_s15  measured 0.36   scatter 0.00013   drift 1.62
+    //   straight_s8      measured 120    scatter 0.0012    drift 6.6
+    //
+    // four orders of magnitude below the terms it was being added to, and it
+    // is the only place `max_observations` and `initial_variance` entered the
+    // weight. That is why both measured neutral across every value tried: the
+    // quantity they scale is not in the answer.
+    //
+    // It is also right that it should be small. The scatter is what a sighting
+    // does *not* agree with the mean about, and the sightings are written in
+    // the frame the estimate had just settled on -- so they agree with each
+    // other far better than any of them agrees with the ground. It measures
+    // the estimator's own repeatability, not the anchor's accuracy, and the
+    // accuracy is what the weight wants.
+    const double drift =
       settings_.drift_variance_per_m * std::max(path_ - founded_path_(slot), 0.0);
-    return 1.0 / std::max(measured + position, 1e-12);
+    return 1.0 / std::max(measured + drift, 1e-12);
   }
   double count = settings_.weight_by_information
     ? information_(slot)

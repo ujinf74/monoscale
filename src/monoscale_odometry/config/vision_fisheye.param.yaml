@@ -1256,9 +1256,7 @@
     # rare corrector rather than the estimator, so capacity buys less than the
     # policy that fills it.
     max_ground_anchors: 2000
-    anchor_max_observations: 10
     anchor_trial_observations: 4
-    anchor_density_replace_margin: 1.0
     anchor_drift_variance_per_m: 0.10
 
     # The joint re-tune of 2026-09-04, run on the re-recorded bench set -- the
@@ -1273,7 +1271,6 @@
     # `anchor_weight_by_variance` is the one qualitatively new element: it was
     # written in 1c3f002 and had never been in any sweep's axis list, and it
     # appears in every one of the top ten combinations.
-    anchor_initial_variance: 0.09
     # One frame, which is the rule this file argued for before it was widened.
     #
     # The gate exists so that a feature still being tracked does not have its
