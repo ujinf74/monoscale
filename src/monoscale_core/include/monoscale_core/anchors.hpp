@@ -20,6 +20,7 @@
 #include <array>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -62,9 +63,6 @@ struct AnchorSettings
   // second sighting starts a second anchor carrying whatever pose error the
   // estimate had at that moment. 0 keeps each camera to its own anchors.
   double link_radius_m = 0.0;
-  // Frames an anchor must go untouched by a source before that source may
-  // rebind it to a different identity.
-  int64_t link_rebind_grace_frames = 1;
   // When full, evict whatever was seen longest ago rather than whatever is
   // least well observed.
   bool evict_by_age = false;
@@ -661,6 +659,10 @@ private:
   Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> best_body_;
   Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> best_weight_;
   Eigen::Matrix<int32_t, Eigen::Dynamic, 1> sight_count_;
+  // Identities this source is tracking in the frame being processed. Held
+  // across the `update` call so `adoptable` can ask whether an anchor's owner
+  // is still live rather than how long ago it was seen.
+  std::unordered_set<int64_t> live_ids_;
   int64_t remembered_ = 0;
   double rebuild_shift_ = 0.0;
   int64_t rebuild_slots_ = 0;

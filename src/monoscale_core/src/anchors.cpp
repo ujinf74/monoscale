@@ -158,18 +158,21 @@ int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
         if (identifier_(slot) < 0) {
           continue;
         }
-        // An anchor this camera already wrote to *this frame* is spoken for --
-        // taking it would fold two live features into one. One it owns from an
-        // earlier frame is a different matter: that track has since been lost
-        // and re-detected under a new identity, and rebinding is exactly what
-        // reconnects them. Refusing that was costing more than the
-        // cross-camera case it was written for.
-        // "Not seen this frame" is not the same as "gone". A feature that
-        // blinks out for a frame or two is still being tracked, and taking its
-        // anchor leaves it with none when it comes back. Only rebind an anchor
-        // this source has not touched for a while.
+        // An anchor whose owning feature is still being tracked is spoken for:
+        // taking it would fold two live features into one. One whose owner is
+        // gone is a different matter -- that track was lost and re-detected
+        // under a new identity, and rebinding is exactly what reconnects them.
+        //
+        // This asks the question directly. A frame count stood here, and a
+        // frame count is a speed-dependent stand-in for it: 60 frames is 16 m
+        // at 8 m/s, where the ground is long gone and the gate is pure
+        // obstruction, and 1 m at parking speed, where the feature really is
+        // still there. It also could not see within a frame -- with a grace of
+        // one, an identity appearing later in this frame's list had its anchor
+        // taken by one appearing earlier, which is the very folding the gate
+        // exists to prevent.
         if (owner_(slot, source) >= 0 &&
-          frame_ - seen_(slot) < settings_.link_rebind_grace_frames)
+          live_ids_.find(owner_(slot, source)) != live_ids_.end())
         {
           continue;
         }
@@ -552,6 +555,12 @@ void GroundAnchorMap::update(
 {
   const Eigen::Index count = ids.size();
   const bool weighted = information.size() == count;
+
+  // Which of this source's identities are alive this frame, for `adoptable`.
+  live_ids_.clear();
+  for (Eigen::Index i = 0; i < count; ++i) {
+    live_ids_.insert(ids(i));
+  }
 
   // Sightings first: every frame refines what it can see.
   std::vector<Eigen::Index> fresh;

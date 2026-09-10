@@ -435,7 +435,6 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.density_replace_margin = settings.anchor_density_replace_margin;
   anchor_settings.link_measure_only = settings.anchor_link_measure_only;
   anchor_settings.link_adopter_writes = settings.anchor_link_adopter_writes;
-  anchor_settings.link_rebind_grace_frames = settings.anchor_link_rebind_grace;
   anchor_settings.max_age_frames = settings.anchor_max_age_frames;
   anchor_settings.update_gain = settings.anchor_update_gain;
   anchor_settings.max_observations = settings.anchor_max_observations;

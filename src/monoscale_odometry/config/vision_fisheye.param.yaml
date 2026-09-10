@@ -1271,19 +1271,6 @@
     # `anchor_weight_by_variance` is the one qualitatively new element: it was
     # written in 1c3f002 and had never been in any sweep's axis list, and it
     # appears in every one of the top ten combinations.
-    # One frame, which is the rule this file argued for before it was widened.
-    #
-    # The gate exists so that a feature still being tracked does not have its
-    # anchor taken: an anchor a source wrote to *this frame* is spoken for.
-    # 60 frames widened "spoken for" to "touched recently", and the two gates
-    # together -- this one and `anchor_link_cross_source_only` -- made it
-    # impossible for a source to rebind an anchor it founded itself, which is
-    # exactly what a track that blinked out and was re-detected under a new
-    # identity needs in order to be reconnected to its own history.
-    #
-    # Neither moves the score alone. Together they take ATE/거리 최악 from
-    # 0.0375% to 0.0311% and the mean from 0.0226% to 0.0213%.
-    anchor_link_rebind_grace: 1
     anchor_weight_by_variance: true
     fusion_gain_mode: 0
     ground_height_from_tilt: false
@@ -1312,8 +1299,27 @@
     # association radius when it is loose, and a measurement only when it is
     # not.
     anchor_link_radius_m: 0.02
-    # A source may rebind an anchor it founded. See `anchor_link_rebind_grace`.
-    anchor_link_cross_source_only: false
+    # A source may not rebind an anchor it founded, only adopt another camera's.
+    #
+    # Allowing it wins on the nine bench drives -- worst ATE/거리 0.0376% ->
+    # 0.0306% -- and loses on the two held-out park manoeuvres, where the mean
+    # goes 0.1822% -> 0.2065% and the final error 0.1723% -> 0.2150%. The bench
+    # is nine forward drives at 1.5 to 8 m/s and the park drives are 13 and 30 m
+    # of slow manoeuvring with reversing, so what splits is the regime.
+    #
+    # The only evidence that a new identity is an old anchor's feature
+    # re-detected is that it lands within `anchor_link_radius_m`, two
+    # centimetres. Driving forward the vehicle passes over the ground once and
+    # that evidence is strong; manoeuvring it works the same patch over and over
+    # at walking pace and two centimetres holds several distinct features, and a
+    # wrong rebind fuses two points into an anchor that describes neither. That
+    # is a correctness failure, not a noisier measurement, so the held-out
+    # result decides it.
+    #
+    # Refusing ambiguous rebinds -- more than one adoptable anchor inside the
+    # radius -- was built to get both and earns nothing either way: 0.1858%
+    # against 0.1822% on park, 0.0371% against 0.0376% on the bench worst.
+    anchor_link_cross_source_only: true
     anchor_link_adopter_writes: false
 
     # The point the body pitches about, ahead of base_link (the rear axle).

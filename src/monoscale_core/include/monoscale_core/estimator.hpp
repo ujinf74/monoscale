@@ -611,7 +611,6 @@ struct EstimatorSettings
   double anchor_bearing_cell_rho = 1.0;
   double anchor_density_replace_margin = 0.0;
   bool anchor_link_adopter_writes = false;
-  int anchor_link_rebind_grace = 1;
   bool anchor_link_measure_only = false;
   double ground_plane_offset_m = 0.0;
   // A common ratio applied to every camera's range after the plane offset.

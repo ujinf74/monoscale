@@ -411,7 +411,6 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_double("anchor_density_replace_margin", 0.0);
   settings.anchor_link_adopter_writes =
     declare_bool("anchor_link_adopter_writes", false);
-  settings.anchor_link_rebind_grace = declare_int("anchor_link_rebind_grace", 1);
   settings.anchor_link_measure_only =
     declare_bool("anchor_link_measure_only", false);
   settings.ground_plane_offset_m =
