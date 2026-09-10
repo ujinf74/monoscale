@@ -278,6 +278,28 @@ struct GroundModel
     // height change of half that predicts, so the mechanism is confirmed and
     // not merely fitted.
     //
+    // The axis carries an along-track component too, and it is differential:
+    // the front mount goes forward while the rear goes back. It contributes
+    // nothing. Splitting an 8 mm axis offset into its two parts, on the
+    // trimmed band:
+    //
+    //   drive   as deployed   x only, +-6.93 mm   height only, -4 mm   both
+    //   v2         +0.162%        +0.161%             -0.224%        -0.224%
+    //   s8         +0.148         +0.148              -0.237         -0.237
+    //
+    // The height part alone reproduces the whole effect to the last digit and
+    // the differential x moves the answer by 0.001 and 0.000 per cent, a tenth
+    // of the instrument's floor. Which is what the algebra says: for a
+    // straight hop `R_b` is the identity, so
+    // `t = R_cb(R_b^T (T_bc - hop) - T_bc)` collapses to `-R_cb hop` and the
+    // mount position cancels entirely, common mode or differential. Only the
+    // height survives, as the divisor.
+    //
+    // So the two mount errors are orthogonal instruments: height is a
+    // straight-line scale and reads nothing about a turn, longitudinal x is a
+    // turn-only lever -- 0.14% on curve_s20 for half a metre -- and reads
+    // 0.004% on a straight.
+    //
     // Not deployed. With the measurement made honest the trajectory over-runs
     // by -0.035 to +0.088 per cent depending on the drive, where the fitted
     // constant held it to 0.014: correcting this path stops it cancelling the
