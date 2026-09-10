@@ -453,6 +453,38 @@ struct EstimatorSettings
   // instead of closing. Applied here the step is corrected where it is
   // measured and the map is left alone.
   double photometric_scale = 1.0;
+  // What 0.9988 is actually doing, measured 2026-09-10 against truth with the
+  // estimator taken out of the loop (`monoscale_evaluation/photometric_bias.py`,
+  // which repeats to 0.012%):
+  //
+  //   drive            condition        photometric bias   band-sensitive
+  //   straight120_v2   2 m/s straight        -0.025%       yes, 0.16% swing
+  //   straight110_s15  1.5 m/s straight      +0.076%
+  //   straight110_s4   4 m/s straight        +0.096%
+  //   straight_s8      8 m/s straight        +0.167%       no, 0.04%
+  //   curve_s05        slalom                +0.167%
+  //   curve_s20        slalom, harder        -0.229%       no, 0.02%
+  //
+  // Two things follow, and neither was what this constant looked like.
+  //
+  // The bias is not constant. It spans 0.4 per cent across the drives, and the
+  // instrument's own spread over three recordings of one condition is 0.012 --
+  // so every one of those differences is real. A single multiplier cannot be
+  // correcting it.
+  //
+  // And 0.9988 is not that number anyway. What it nulls is the *trajectory's*
+  // length: at 1.0 the estimate over-runs truth by +0.069 to +0.120 per cent on
+  // every drive, and at 0.9988 that falls to -0.012 to +0.029. It is a
+  // whole-path scale correction entering through the only multiplier available,
+  // on the 57-92 per cent of frames where the photometric step is applied at
+  // all. Setting it to 1.0 without finding what over-runs is not a repair.
+  //
+  // `curve_s20` is the drive nothing has explained, and it is now measured
+  // rather than inferred: it is the only one whose length bias is *negative*,
+  // while `curve_s05` -- the same manoeuvre, gentler -- is +0.167. Turning
+  // flips the sign. It is not the region of road being looked at: sweeping
+  // `road_step_roi_y0` from 0.50 to 0.80 moves it by 0.02 per cent while it
+  // moves straight120_v2 by 0.16.
   double photometric_step_gain = 0.0;
   // Frames whose road did not land on itself this well are not used. The
   // alignment reads 0.93 to 0.99 when it has the surface; the tail events that
