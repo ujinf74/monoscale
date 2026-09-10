@@ -705,6 +705,10 @@ struct AnchorAlignment
   Mask inliers;
   // RMS residual of the inlying votes: how precise this camera's answer was.
   double spread = 0.0;
+  // How many of those votes are independent, from their own mutual
+  // correlation. Equal to the inlier count only when they are uncorrelated,
+  // and they are not.
+  double effective_inliers = 0.0;
   double yaw = 0.0;
   // One standard deviation of that heading, or infinity when the fit was not
   // asked to solve for it.

@@ -277,6 +277,8 @@ struct Estimator::Solved
   std::optional<Pose2> placed;
   double placed_spread = 0.0;
   int placed_inliers = 0;
+  // The independent ones among them; see `AnchorAlignment::effective_inliers`.
+  double placed_effective = 0.0;
   // The banded, paired ground points this camera contributed, in base_link at
   // each of the two frames. Both cameras' points live in the same frame and
   // describe the same hop, so they can be solved together rather than solved
@@ -1774,6 +1776,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       solved.placed = placed;
       solved.placed_spread = aligned->spread;
       solved.placed_inliers = static_cast<int>(aligned->inliers.count());
+      solved.placed_effective = aligned->effective_inliers > 0.0
+        ? aligned->effective_inliers : static_cast<double>(solved.placed_inliers);
       camera.last_placed = placed;
       camera.placed_fresh = true;
       motion.inliers = static_cast<int>(aligned->inliers.count());
@@ -3182,15 +3186,11 @@ void Estimator::process_pair()
         }
         // The alignment's own scatter over the votes behind it: the standard
         // error of a mean, the same form the pair solve's variance takes.
-        // The alignment's own inlier count, uncorrected.
-        //
-        // Its residuals carry the same common component the pair solve's do,
-        // but they are not kept here, so there is nothing to measure it from.
-        // Borrowing the pair solve's ratio was tried and is not defensible:
-        // it drove the map sigma to 24 mm against a 4 mm innovation and the
-        // normalised innovation to 0.04, past one and out the other side. The
-        // ratio has to come from the alignment's own residuals or not at all.
-        const double n = std::max(static_cast<double>(entry->placed_inliers), 1.0);
+        // The independent anchors, measured by the alignment from its own
+        // residuals. Borrowing the pair solve's ratio was tried and is not
+        // defensible -- it took the map sigma to 24 mm against a 4 mm
+        // innovation -- so the alignment computes its own.
+        const double n = std::max(entry->placed_effective, 1.0);
         const double spread = entry->placed_spread > 0.0
           ? entry->placed_spread : settings_.map_factor_sigma_m;
         const double variance = std::max(spread * spread / n, 1e-12);

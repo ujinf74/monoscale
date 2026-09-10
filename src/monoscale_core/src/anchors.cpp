@@ -1435,6 +1435,58 @@ std::optional<AnchorAlignment> align_to_anchors(
   }
   result.translation = centre;
   result.spread = std::sqrt(squared / static_cast<double>(kept));
+
+  // The independent anchors among the inliers.
+  //
+  // `spread^2 / kept` treats every inlying anchor as its own sample. They are
+  // not: the pair solve's residuals carry a correlation floor that does not
+  // decay with separation -- 0.03 at 5 cm and 0.06 at 30 -- because a
+  // component of the error belongs to the solve rather than to the point, and
+  // the map's residuals are the same ground seen the same way. For a uniform
+  // correlation rho the count that matters is N / (1 + (N-1) rho), which tends
+  // to 1/rho however many anchors answer.
+  //
+  // Measured here from these residuals, over pairs far enough apart that a
+  // shared patch cannot explain them. Clamped at zero because a solve whose
+  // residuals anti-correlate has not thereby earned more information.
+  result.effective_inliers = static_cast<double>(kept);
+  if (kept > 32) {
+    std::vector<double> ax, ay, ex, ey;
+    ax.reserve(kept); ay.reserve(kept); ex.reserve(kept); ey.reserve(kept);
+    for (Eigen::Index i = 0; i < count; ++i) {
+      if (!result.inliers(i)) {continue;}
+      ax.push_back(body_points(i, 0));
+      ay.push_back(body_points(i, 1));
+      ex.push_back(
+        world_points(i, 0) - (c * body_points(i, 0) - s * body_points(i, 1)) - centre.x());
+      ey.push_back(
+        world_points(i, 1) - (s * body_points(i, 0) + c * body_points(i, 1)) - centre.y());
+    }
+    const int n = static_cast<int>(ax.size());
+    double mx = 0.0, my = 0.0, var = 0.0;
+    for (int i = 0; i < n; ++i) {mx += ex[i]; my += ey[i];}
+    mx /= n; my /= n;
+    for (int i = 0; i < n; ++i) {
+      var += (ex[i]-mx)*(ex[i]-mx) + (ey[i]-my)*(ey[i]-my);
+    }
+    var /= (2.0 * n);
+    if (var > 1e-18) {
+      double num = 0.0;
+      int64_t pairs = 0;
+      const int stride = std::max(n / 200, 1);
+      for (int i = 0; i < n; i += stride) {
+        for (int j = i + 1; j < n; j += stride) {
+          if (std::hypot(ax[i]-ax[j], ay[i]-ay[j]) < 0.10) {continue;}
+          num += 0.5 * ((ex[i]-mx)*(ex[j]-mx) + (ey[i]-my)*(ey[j]-my));
+          ++pairs;
+        }
+      }
+      if (pairs > 64) {
+        const double rho = std::clamp(num / (pairs * var), 0.0, 0.99);
+        result.effective_inliers = static_cast<double>(n) / (1.0 + (n - 1) * rho);
+      }
+    }
+  }
   result.yaw = yaw;
   result.yaw_sigma = applied;
 
