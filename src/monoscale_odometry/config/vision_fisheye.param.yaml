@@ -1134,7 +1134,6 @@
     #
     # Turning it off under parameters tuned with it on loses (0.0236% ->
     # 0.0253%), which is why it survived three earlier sweeps. Given the axes
-    # back -- `map_correction_gain` and `ground_min_inliers` in particular, and
     # reports:
     #
     #     filter on   ate% 0.0236  worst 0.0420  walk 1.17
@@ -1279,7 +1278,6 @@
     anchor_weight_by_variance: true
     fusion_gain_mode: 0
     ground_height_from_tilt: false
-    map_correction_gain: 1.0
 
     # Learn a range-dependent correction to the ground solve's scale.
     #
@@ -1289,7 +1287,6 @@
     # scale cannot answer that -- the sweep leaves `vision_scale` and
     # `photometric_scale` exactly where they were across 10,000 combinations --
     # and the filter was papering over it at the cost of correlating the hops.
-    map_solve_weight: 0.5
     # The regression's own slope, with no gain in front of it.
     #
     # 1.8 stood here and the sweep is flat across it: 1.0 through 2.6 move

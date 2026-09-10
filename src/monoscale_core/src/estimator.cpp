@@ -1439,7 +1439,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     ? settings_.solve_max_distance_m : std::numeric_limits<double>::infinity();
   // Held when the map answered and its correction is to be scaled rather than
   // taken whole. See `map_correction_gain`.
-  std::optional<PlanarMotion> map_motion;
   Eigen::Vector3d mount_in_frame = camera.model.translation_base_from_camera;
   if (settings_.level_frame_origin && tilt_moves_camera && tilt.has_value()) {
     const Eigen::Vector3d centre(settings_.pitch_centre_x_m, 0.0, 0.0);
@@ -1794,17 +1793,16 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         }
       }
       remember_solve_pixels(camera);
-      // At unit gain this is the whole answer and the pair solve is not worth
-      // its cost. Below or above it, the pair solve is needed as the other end
-      // of the blend, so fall through and take it.
-      if (settings_.map_correction_gain == 1.0 && !settings_.map_as_factor) {
-        return solved;
-      }
-      // As a factor the map does not supply the hop at all. The displacement
-      // is the pair solve's, as it is on every frame the map cannot answer,
-      // and the map is applied to the pose afterwards where it belongs.
-
-      map_motion = motion;
+      // The map answers this hop whole.
+      //
+      // A gain stood here, blending the map's displacement against the pair
+      // solve's so that only part of the map's standing disagreement with the
+      // fused pose was applied. It measures 0.0217% mean ATE/거리 at 0.7
+      // against 0.0226% at unity -- a real trend and a small one -- and what
+      // it is doing is discounting a correction that is correlated with the
+      // pose it corrects. That correlation is the thing to write down; a
+      // fitted fraction in front of it is not.
+      return solved;
     }
   }
 
@@ -1852,28 +1850,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     settings_.ground_min_inliers, softness_for(camera, settings_.ground_pair_softness_m),
     pair_weights,
     settings_.ground_pair_passes);
-  if (estimate.has_value() && map_motion.has_value()) {
-    // What the map path actually reports is a displacement with a correction
-    // folded into it: `relative_motion(pose_, placed)` is where this camera
-    // has moved *plus* this map's standing disagreement with the fused pose.
-    // The two-frame solve is the same displacement with no correction at all,
-    // so their difference is the correction alone and this scales that and
-    // nothing else. Unit gain is what the map path did before this existed;
-    // zero leaves the displacement with the correction removed.
-    //
-    // This is the knob `map_solve_weight` was mistaken for. That one moved how
-    // much of the *camera* the fusion listened to, which conflates correction
-    // strength with throwing away the other camera's measurement -- and it was
-    // being discarded anyway.
-    const double gain = settings_.map_as_factor ? 0.0 : settings_.map_correction_gain;
-    PlanarMotion blended = *map_motion;
-    blended.x = estimate->motion.x + gain * (map_motion->x - estimate->motion.x);
-    blended.y = estimate->motion.y + gain * (map_motion->y - estimate->motion.y);
-    solved.motion = blended;
-    // The map branch's spread and inlier mask stand: they describe the answer
-    // this hop is anchored on.
-    return solved;
-  }
   if (estimate.has_value()) {
     solved.motion = estimate->motion;
     // The road's own length for this interval, where the hop really is one.
@@ -2300,7 +2276,7 @@ void Estimator::process_pair()
 
   std::vector<double> fusion_weights;
   fusion_weights.reserve(motions.size());
-  bool weighted = settings_.map_solve_weight != 1.0;
+  bool weighted = false;
   for (size_t i = 0; i < solved.size(); ++i) {
     if (solved[i].has_value() && solved[i]->motion.has_value()) {
       double own = cameras_[i]->settings.fusion_weight;
@@ -2317,9 +2293,6 @@ void Estimator::process_pair()
       // before any of this existed.
       double weight = own > 0.0
         ? own : static_cast<double>(std::max(solved[i]->motion->inliers, 1));
-      if (solved[i]->anchored_from_map) {
-        weight *= settings_.map_solve_weight;
-      }
       fusion_weights.push_back(weight);
     }
   }
@@ -3092,182 +3065,38 @@ void Estimator::process_pair()
     update.applied_valid = true;
     pose_ = pose_.compose(*motion);
 
-    // Grow the pose's covariance by what the hop that was just applied is
-    // worth.
+    // The map is not an absolute measurement, and this is where that was
+    // learned.
     //
-    // Without this there is no scale to weigh the map against, and that is
-    // why the map has always been a branch rather than a factor: the estimator
-    // carries a pose but no uncertainty on it. `pose_covariance_` exists and
-    // is only ever written inside the inertial filter's block, which is off in
-    // deployment, so it sits at zero and every comparison against it degenerates.
+    // `z^M = x + n` was built here as a proper factor: grow `pose_covariance_`
+    // by the hop's own variance, offer the map's placement with a variance of
+    // its own, and combine them the way two statements about one quantity
+    // combine. It is the right algebra for a map. It measures 0.0340% mean
+    // ATE/거리 against 0.0226% for the branch, with the worst case at 0.0652%
+    // against 0.0373%, and its normalised innovation sits at 3.2-3.8 once both
+    // covariances have been made honest by their effective sample counts.
     //
-    // The hop's variance is the scatter of the votes behind it over their
-    // count -- the standard error of a mean, the same form the pair solve's
-    // own variance takes and needing no constant. Isotropic in the plane,
-    // which is a simplification: the solve is better along the travel than
-    // across it. Anisotropy would need the solve to report its own 2x2, which
-    // it does not yet.
-    if (settings_.map_as_factor) {
-      double weighted = 0.0;
-      double total = 0.0;
-      for (const auto & entry : solved) {
-        if (!entry.has_value() || !entry->motion.has_value()) {
-          continue;
-        }
-        const double n = std::max(static_cast<double>(entry->motion->inliers), 1.0);
-        weighted += entry->spread * n;
-        total += n;
-      }
-      if (total > 0.0) {
-        // The part of the hop's error that actually accumulates.
-        //
-        // Correcting `n` to the independent count makes each hop honestly
-        // uncertain -- 5.9 mm rather than 0.9 -- and then propagating that as
-        // a random walk is wrong twice over. The inflation came from a
-        // component *common* to the solve, and a common component does not
-        // random-walk: it points the same way every hop, so it appears in the
-        // trajectory as a scale error and not as growth. Adding it to the pose
-        // covariance every hop claimed 18 cm of drift over 900 hops where 3 cm
-        // is measured, and drove the map factor's normalised innovation from
-        // 3.6 to 0.04 -- past one and out the other side.
-        //
-        // So the walk grows by the independent part only, `spread^2 / n` on
-        // the raw count, and the common part is left where it belongs: it is a
-        // bias on the length, which is what `photometric_scale` and the scale
-        // learners are still standing in for.
-        const double spread = weighted / total;
-        const double hop_variance = std::max(spread * spread / total, 1e-12);
-        pose_covariance_(0, 0) += hop_variance;
-        pose_covariance_(1, 1) += hop_variance;
-      }
-    }
-
-    // The map as a factor on the pose rather than a hop folded into the
-    // displacement.
+    // A NIS of one is what an honest pair gives. Three to four is not noise
+    // that was mis-sized; it is a systematic disagreement, and the map's
+    // sighting span says where it comes from. Measured on the drives, an
+    // anchor's remembered sightings span **11.5 to 24.3 poses** -- under a
+    // second of driving. The map is rebuilt continuously in the estimator's
+    // own frame, so what it offers is the pose estimate of twenty-odd frames
+    // ago, low-pass filtered. It is not an independent statement about where
+    // the vehicle is; it is the estimator's own recent output handed back.
     //
-    // `z^L = x_k - x_{k-1} + v` is what a pair solve, a photometric step or an
-    // inertial propagation says. `z^M = x_k + n` is what the map says, and it
-    // is a different kind of statement: it does not accumulate, and it is the
-    // only thing here that bounds the random walk. The existing path converts
-    // it with `relative_motion(pose_, placed)` and composes it, which lands on
-    // exactly `pose_ = placed` -- an absolute update asserting the map has no
-    // error. That is why the rules about not rescaling a map hop, not
-    // overwriting it with a pair hop, and not blending it with a photometric
-    // length all have to be written down as branches: once it is a hop,
-    // nothing can tell it from one.
+    // Which is exactly the argument written below for the heading, where the
+    // same correction costs 13x at a gain of 0.1. It holds in every degree of
+    // freedom for the same reason, and the sighting span is the number that
+    // says how weakly: a map with no long baseline cannot pin anything.
     //
-    // Written as an update it needs no rules. The pose has just been
-    // propagated by the relative measurement and carries `pose_covariance_`;
-    // the map offers a position with a covariance of its own; the two combine
-    // the way two statements about the same quantity combine. Trusting the map
-    // completely is the special case R_M -> 0, which is where the branch
-    // version sits.
-    {
-      static int seen = 0;
-      if (seen < 3) { std::fprintf(stderr, "[probe] else-branch reached\n"); ++seen; }
-    }
-    if (const char * probe = std::getenv("MONOSCALE_MAP_PROBE")) {
-      static std::FILE * f = nullptr;
-      if (f == nullptr) { f = std::fopen(probe, "w"); }
-      if (f != nullptr) {
-        int placed_n = 0;
-        for (const auto & e : solved) { placed_n += (e.has_value() && e->placed.has_value()) ? 1 : 0; }
-        std::fprintf(f, "%d,%d\n", settings_.map_as_factor ? 1 : 0, placed_n);
-        std::fflush(f);
-      }
-    }
-    if (settings_.map_as_factor) {
-      Eigen::Vector2d weighted = Eigen::Vector2d::Zero();
-      double precision = 0.0;
-      for (const auto & entry : solved) {
-        if (!entry.has_value() || !entry->placed.has_value()) {
-          continue;
-        }
-        // The alignment's own scatter over the votes behind it: the standard
-        // error of a mean, the same form the pair solve's variance takes.
-        // The independent anchors, measured by the alignment from its own
-        // residuals. Borrowing the pair solve's ratio was tried and is not
-        // defensible -- it took the map sigma to 24 mm against a 4 mm
-        // innovation -- so the alignment computes its own.
-        const double n = std::max(entry->placed_effective, 1.0);
-        const double spread = entry->placed_spread > 0.0
-          ? entry->placed_spread : settings_.map_factor_sigma_m;
-        const double variance = std::max(spread * spread / n, 1e-12);
-        weighted += Eigen::Vector2d(entry->placed->x, entry->placed->y) / variance;
-        precision += 1.0 / variance;
-      }
-      if (const char * probe = std::getenv("MONOSCALE_MAP_PROBE")) {
-        static std::FILE * f = nullptr;
-        if (f == nullptr) { f = std::fopen(probe, "w"); }
-        if (f != nullptr) {
-          int placed_n = 0;
-          for (const auto & e : solved) { placed_n += (e.has_value() && e->placed.has_value()) ? 1 : 0; }
-          std::fprintf(f, "%d,%.9f,%.9f\n", placed_n, precision,
-            0.5 * (pose_covariance_(0, 0) + pose_covariance_(1, 1)));
-          std::fflush(f);
-        }
-      }
-      // The innovation is measured but not fed back, and the reason is
-      // algebraic rather than empirical.
-      //
-      // If the two covariances were honest, |z - x| would have variance
-      // own + map_variance and its normalised square would average one.
-      // Measured, it averages 3.2 to 3.8 across the drives, so the pair is
-      // jointly optimistic by that much -- which is worth knowing and is
-      // something the branch formulation could not even ask.
-      //
-      // It cannot be used to correct the gain. Inflating both by the learned
-      // factor k gives k*own / (k*own + k*map) = own / (own + map): the gain
-      // is invariant to a common scale, exactly as the inverse-variance
-      // weighting between the two cameras was. And inflating only one of them
-      // needs to know which, which the innovation cannot say: it is one
-      // equation, E|z - x|^2 = own + map, in two unknowns, while the gain
-      // wants their ratio.
-      //
-      // Separating them needs a second statistic that treats them differently.
-      // The innovation's autocorrelation is the one: a pose error is
-      // integrated and persists from frame to frame, a map measurement error
-      // does not. That is the next thing to build here, and until it exists
-      // the honest gain is the one the stated covariances give.
-      const double raw_variance = precision > 0.0 ? 1.0 / precision : 0.0;
-      if (precision > 0.0) {
-        const Eigen::Vector2d z = weighted / precision;
-        const double map_variance = raw_variance;
-        const double raw_own = std::max(
-          0.5 * (pose_covariance_(0, 0) + pose_covariance_(1, 1)), 0.0);
-        const double own = raw_own;
-        const double gain = own / (own + map_variance);
-        const double was_x = pose_.x;
-        const double was_y = pose_.y;
-        if (std::isfinite(gain) && gain >= 0.0 && gain <= 1.0) {
-          pose_.x += gain * (z.x() - pose_.x);
-          pose_.y += gain * (z.y() - pose_.y);
-          pose_covariance_.topLeftCorner<2, 2>() *= (1.0 - gain);
-          diagnostics_.map_factor_gain = gain;
-          {
-            const double innovation2 =
-              (z.x() - was_x) * (z.x() - was_x) + (z.y() - was_y) * (z.y() - was_y);
-            // Against the *uninflated* pair. Measuring it against the
-            // inflated one closes a loop on itself: a large NIS inflates the
-            // variance, which makes the next NIS larger still. It ran away to
-            // infinity in forty frames.
-            const double expected = 2.0 * (raw_own + raw_variance);
-            if (expected > 1e-12) {
-              const double nis = innovation2 / expected;
-              ++map_innovation_samples_;
-              map_innovation_nis_ += (nis - map_innovation_nis_) /
-                static_cast<double>(map_innovation_samples_);
-              diagnostics_.map_factor_nis = map_innovation_nis_;
-            }
-          }
-          diagnostics_.map_factor_innovation +=
-            std::hypot(z.x() - was_x, z.y() - was_y);
-          diagnostics_.map_factor_own += std::sqrt(std::max(own, 0.0));
-          diagnostics_.map_factor_sigma += std::sqrt(std::max(map_variance, 0.0));
-          ++diagnostics_.map_factor_updates;
-        }
-      }
-    }
+    // So the map keeps the standing it has -- it supplies the hop when it can
+    // answer, which is a relative measurement over its own short window, and
+    // it is never given the authority of a global reference. The routing rules
+    // that looked arbitrary are not: they are what correlation between the map
+    // and the pose looks like when it is written as branches. Writing it as
+    // correlation is the work that is left; asserting independence is what was
+    // tried here and it is measurably false.
     // The map's own reading of the heading, applied where there is no
     // instrument to hold it. Taken only from cameras whose anchors answered
     // this solve -- a carried-over value is the same measurement applied twice.

@@ -85,8 +85,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   topics.imu = declare_string("imu_topic", topics.imu);
   settings.use_imu_yaw = declare_bool("use_imu_yaw", true);
   settings.imu_yaw_from_gyro = declare_bool("imu_yaw_from_gyro", false);
-  settings.map_as_factor = declare_bool("map_as_factor", false);
-  settings.map_factor_sigma_m = declare_double("map_factor_sigma_m", 0.05);
   settings.photometric_null_tilt = declare_bool("photometric_null_tilt", false);
   settings.gyro_noise_sigma_rad_s = declare_double("gyro_noise_sigma_rad_s", 1.0e-3);
   settings.esm_attitude = declare_bool("esm_attitude", false);
@@ -431,8 +429,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_attitude_gain = declare_double("anchor_attitude_gain", 1.0);
   settings.attitude_slope_tau_sec = declare_double("attitude_slope_tau_sec", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
-  settings.map_solve_weight = declare_double("map_solve_weight", 1.0);
-  settings.map_correction_gain = declare_double("map_correction_gain", 1.0);
   settings.imu_translation_base_from_imu = vector_of(
     node.declare_parameter<std::vector<double>>(
       "imu_translation_base_from_imu", std::vector<double>{0.0, 0.0, 0.0}));

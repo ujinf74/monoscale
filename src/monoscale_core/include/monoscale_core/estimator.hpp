@@ -100,9 +100,7 @@ struct EstimatorSettings
   bool imu_yaw_from_gyro = false;
   // Take the map's answer as a statement about where the vehicle is, with a
   // covariance, instead of as a hop folded into the displacement.
-  bool map_as_factor = false;
   // Fallback spread for an alignment that reported none, in metres.
-  double map_factor_sigma_m = 0.05;
   // Weight the two cameras' photometric lengths so the tilt they report
   // cancels, instead of averaging them evenly.
   bool photometric_null_tilt = false;
@@ -660,7 +658,6 @@ struct EstimatorSettings
   double anchor_attitude_gain = 1.0;
   double attitude_slope_tau_sec = 0.0;
   double vision_scale = 1.0;
-  double map_solve_weight = 1.0;
 
   // How much of the map's correction to apply. The map path reports
   // `relative_motion(pose_, placed)`, which is a displacement with this map's
@@ -672,7 +669,6 @@ struct EstimatorSettings
   // 1.0 is what the map path has always done and costs nothing extra (the pair
   // solve is skipped). 0.0 keeps the map's inlier selection and drops its
   // correction. Above 1.0 over-applies it.
-  double map_correction_gain = 1.0;
   bool anchor_select_by_consistency = true;
   double anchor_seed_travel_m = 0.0;
 
@@ -1086,12 +1082,6 @@ struct Diagnostics
   // last such weight.
   int64_t photometric_nulled = 0;
   double photometric_null_weight = 0.0;
-  int64_t map_factor_updates = 0;
-  double map_factor_innovation = 0.0;
-  double map_factor_own = 0.0;
-  double map_factor_sigma = 0.0;
-  double map_factor_nis = 0.0;
-  double map_factor_gain = 0.0;
   int64_t esm_covariance_frames = 0;
   int64_t esm_frames = 0;
   std::array<int64_t, kConsumerCount> consumer_armed{};
@@ -1268,8 +1258,6 @@ private:
   // not there costs 14x.
   // How far the map factor's two covariances are out, learned from the
   // innovation. One if they are honest.
-  double map_innovation_nis_ = 1.0;
-  int64_t map_innovation_samples_ = 0;
   double gyro_yaw_ = 0.0;
   std::optional<double> gyro_yaw_stamp_;
   struct AccelerationSample
