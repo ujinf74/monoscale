@@ -290,7 +290,6 @@ struct Estimator::Solved
   // The inliers that are actually independent, from the residuals' own mutual
   // correlation. Equal to the inlier count only if they are uncorrelated,
   // which they are not.
-  double effective_pairs = 1.0;
   // How well this camera pinned the heading down, when it was asked to solve
   // for one. Infinite when it was not.
   double yaw_sigma = std::numeric_limits<double>::infinity();
@@ -2121,68 +2120,13 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     }
     solved.spread = kept > 0 ? std::sqrt(squared / kept) : 0.0;
 
-    // The independent samples among those inliers, not the inliers.
-    //
-    // `spread^2 / n` treats each pair as its own sample. Measured, the
-    // residuals carry a floor of mutual correlation that does not decay with
-    // separation on the ground -- 0.032 at under 5 cm, 0.079 at 10-15 cm,
-    // 0.055 at 25-30 -- which is the signature of a component common to the
-    // whole solve rather than of neighbours agreeing with neighbours. For a
-    // uniform correlation rho the effective count is
-    //
-    //   N_eff = N / (1 + (N - 1) rho)   ->   1 / rho
-    //
-    // so 906 inliers at rho = 0.06 are worth about seventeen. That is the same
-    // order as the 645-buy-three this stack measured a different way, and it
-    // is what makes `spread^2 / n` optimistic by two orders.
-    //
-    // The correlation is estimated from this frame's own residuals, over pairs
-    // far enough apart that a shared feature patch cannot explain them, and
-    // clamped at zero so a solve whose residuals happen to anti-correlate
-    // cannot claim more information than it has.
-    solved.effective_pairs = static_cast<double>(std::max(kept, 1));
-    if (kept > 32) {
-      double mx = 0.0, my = 0.0, var = 0.0;
-      std::vector<double> px, py, rex, rey;
-      px.reserve(kept); py.reserve(kept); rex.reserve(kept); rey.reserve(kept);
-      for (Eigen::Index i = 0; i < paired; ++i) {
-        if (!estimate->inliers(i)) {continue;}
-        const double ox = previous_ground(i, 0) -
-          (c * current_ground(i, 0) - s * current_ground(i, 1));
-        const double oy = previous_ground(i, 1) -
-          (s * current_ground(i, 0) + c * current_ground(i, 1));
-        px.push_back(previous_ground(i, 0));
-        py.push_back(previous_ground(i, 1));
-        rex.push_back(ox - estimate->motion.x);
-        rey.push_back(oy - estimate->motion.y);
-      }
-      const int n = static_cast<int>(px.size());
-      for (int i = 0; i < n; ++i) {mx += rex[i]; my += rey[i];}
-      mx /= n; my /= n;
-      for (int i = 0; i < n; ++i) {
-        var += (rex[i]-mx)*(rex[i]-mx) + (rey[i]-my)*(rey[i]-my);
-      }
-      var /= (2.0 * n);
-      if (var > 1e-18) {
-        // Every pair beyond one decimetre, which is well past any patch the
-        // tracker follows, so what is left is common to the solve.
-        double num = 0.0;
-        int64_t count = 0;
-        const int stride = std::max(n / 200, 1);
-        for (int i = 0; i < n; i += stride) {
-          for (int j = i + 1; j < n; j += stride) {
-            if (std::hypot(px[i]-px[j], py[i]-py[j]) < 0.10) {continue;}
-            num += 0.5 * ((rex[i]-mx)*(rex[j]-mx) + (rey[i]-my)*(rey[j]-my));
-            ++count;
-          }
-        }
-        if (count > 64) {
-          const double rho = std::clamp(num / (count * var), 0.0, 0.99);
-          solved.effective_pairs =
-            static_cast<double>(n) / (1.0 + (n - 1) * rho);
-        }
-      }
-    }
+    // The independent count among the pair solve's votes was computed here,
+    // from the correlation between residuals far enough apart that a shared
+    // feature patch cannot explain them. It measured rho 0.03-0.08, flat with
+    // separation -- N/17 rather than N -- which is a real and useful number and
+    // was never spent: nothing read `effective_pairs`. The finding is in
+    // and the arithmetic is not worth carrying on every solve to reach a
+    // variable no consumer has.
 
     // How correlated those residuals are with each other, by separation on the
     // ground. `spread^2 / n` treats every inlier as an independent sample, and
@@ -2381,11 +2325,27 @@ void Estimator::process_pair()
   if (settings_.remember_sighting_poses) {
     diagnostics_.remembered_sightings = anchors_->remembered();
     diagnostics_.pose_history = static_cast<int64_t>(pose_history_.size());
+    diagnostics_.sighting_span = anchors_->sighting_span();
+    // This is not the no-op it looks like, and it is not only for the pose
+    // graph.
+    //
+    // It replaces every anchor's running average with the weighted mean of the
+    // sightings it remembers, re-projected through the current poses. With the
+    // poses unchanged those two should be the same number and `rebuild_shift`
+    // reports 0.0000 m, which reads as pure cost -- 0.24-0.39 ms against the
+    // anchor stage's 0.63 and the estimator's 1.8. It is not: that figure is
+    // printed to four decimals and everything this estimator argues about lives
+    // between one and six millimetres.
+    //
+    // Gated on the pose graph, the nine drives go 0.0226% to 0.0232% mean
+    // ATE/거리 and the two held-out park drives go 0.1880% to 0.2054% with the
+    // final error 0.1777% to 0.1894%. The running average and the remembered
+    // mean differ below the fourth decimal and the difference is worth nine per
+    // cent of the held-out score.
     const auto start = std::chrono::steady_clock::now();
     anchors_->clear_rebuild_shift();
     anchors_->rebuild(pose_history_);
     diagnostics_.rebuild_shift_m = anchors_->rebuild_shift();
-    diagnostics_.sighting_span = anchors_->sighting_span();
     diagnostics_.rebuild_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start).count();
   }

@@ -1513,7 +1513,7 @@ int main(int argc, char ** argv)
       "관측별 포즈: %ld개 기억, 앵커 %ld, 포즈 이력 %ld, 저장 %.1f MB, 재구성 %.2f ms\n",
       diagnostics.remembered_sightings, diagnostics.anchors,
       diagnostics.pose_history, bytes / 1048576.0, diagnostics.rebuild_ms);
-    std::printf("  재구성이 앵커를 옮기는 거리 평균 %.4f m, 관측 포즈 폭 %.1f\n",
+    std::printf("  재구성이 앵커를 옮기는 거리 평균 %.7f m, 관측 포즈 폭 %.1f\n",
       diagnostics.rebuild_shift_m, diagnostics.sighting_span);
     std::printf("  광도 step: 적용 %ld / 기회 %ld, 맵없음 %ld\n",
       diagnostics.photometric_uses, diagnostics.photometric_chances,
