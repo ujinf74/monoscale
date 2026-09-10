@@ -673,7 +673,28 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // 0.086 and 0.130. The four road-A straights agree; road B does not, and
   // road B is the flat one.
   //
-  // The term is still not added, for the same reason as before: an angle that
+  // So the correct form is an angle. It cannot be applied through the tilt this
+  // projection already takes, and that is measured too.
+  //
+  // `camera_tilt` turns the plane's normal and `pixels_to_ground` holds the
+  // height nominal, which is the right model for a road that is not level --
+  // the vehicle rides on it, so the height under the camera does not change.
+  // Adding a constant pitch there removes 0.197% from the 0-2 m band and
+  // 0.207% from the 2.0-3.5 m band: **range-flat**, where the error it has to
+  // cancel doubles between them. Adding the other half of a plane that pivots
+  // about the contact patch -- the camera's distance to it becomes
+  // `h cos t - x sin t`, a constant per camera and opposite in sign between the
+  // two mounts -- gives 0.766% and 0.677%, a ratio of 0.88. With the anchor
+  // attitude switched off so nothing re-estimates around it, 0.691% and
+  // 0.569%, ratio 0.82.
+  //
+  // None of the three is the 1.93 the range ratio calls for. The error is
+  // linear in range and every tilt this projection can express is not, so the
+  // correction does not live in `camera_tilt`. Built, measured, removed;
+  // `solve_min_distance_m` stays because it is the instrument that found the
+  // law and is neutral at its default.
+  //
+  // The term is still not added, for the second reason as well: an angle that
   // four drives agree on and three contradict would be fitted, not measured.
   //
   // One thing the road's shape does not explain either: straight_s8 is on the
