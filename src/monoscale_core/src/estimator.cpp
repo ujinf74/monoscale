@@ -559,6 +559,36 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // a length that varies per drive, and giving it a better height will not fix
   // that.
   //
+  // It is also the wrong *shape* of parameter, and that is measurable. An
+  // offset is a property of the plane and cannot depend on how far along it
+  // one looks. This one does. Capping the range the pair solve and the map may
+  // use, with the photometric step off so the length is theirs alone:
+  //
+  //   max range   straight-drive path-length spread   what v2 then wants
+  //     5.8 m                0.58%                         6.71 mm
+  //     4.0                  0.63                          6.64
+  //     2.8                  0.33                          6.19
+  //     2.0                  0.15                          5.04
+  //
+  // At 2.0 m the five straights agree -- +0.487, +0.493, +0.485, +0.636,
+  // +0.512 per cent at zero offset, one number to 0.08 -- where at the
+  // deployed range they run +0.089 to +0.673. The drive-to-drive variation is
+  // in the far ground, and what the near ground says is a constant. So there
+  // is a single quantity here after all; a scalar offset is just not it,
+  // because the requirement grows with range and an offset cannot.
+  //
+  // Two candidate repairs measured and refused. Taking the attitude from the
+  // ESM fit rather than the anchors -- the instrument that gets the length
+  // right, on the theory that a plane tilt is what grows with range -- widens
+  // the spread from 0.58% to 0.98% and takes straight_s8 from +0.089% to
+  // +1.287%. And capping `anchor_max_range_m` at 2.8, which reads as the
+  // bench's best point at 0.0214% mean and 0.0303% worst ATE/거리 against
+  // 0.0226/0.0375, is a fit: its neighbours at 2.4 and 3.4 both measure
+  // 0.0285%, the final error is worse at every capped value, and the two
+  // held-out park drives go 0.1880% -> 0.2414% mean with the final error
+  // 0.1777% -> 0.3883%. A sharp optimum flanked by two worse ones is what a
+  // fitted point looks like from the outside.
+  //
   // Which points where the architecture review already points: the pair
   // solve's length is not a competitive measurement, and the map hop is not a
   // displacement at all. The repair is not one height for both -- it is to
