@@ -2565,6 +2565,47 @@ void Estimator::process_pair()
   if (!any_from_map) {
     ++diagnostics_.photometric_mapless;
   }
+  // The turn term, measured 2026-09-10 as a law rather than inferred from ATE.
+  //
+  // `monoscale_evaluation/photometric_bias.py` compares the road fit's step
+  // against CARLA truth with no estimator in between, and repeats to 0.012%.
+  // Binned by the turn the fit was handed, on the three slaloms:
+  //
+  //   drive   |turn| rad/frame   bias at turn 0   bias at plateau   difference
+  //   cs05        0.001261           +0.246%          +0.158%         -0.088%
+  //   cs10        0.002488           +0.227%          +0.036%         -0.191%
+  //   cs20        0.004881           +0.228%          -0.362%         -0.589%
+  //
+  // Two things fall out. The zero-turn bias is +0.246, +0.227 and +0.228 --
+  // one number, shared by all three drives, which is the straight-line term.
+  // And what turning adds sits on top of it and is **even in turn**: fitting
+  // the signed yaw, an odd term explains R^2 = 0.000 of the per-hop scatter
+  // while an even one explains what there is. A slalom's turn averages to zero
+  // and this does not average away, which is the same statement.
+  //
+  // Its size, in per cent with `t` the turn per frame in radians:
+  //
+  //   f(t) ~= -52 t - 14000 t^2
+  //
+  // Linear and quadratic parts comparable at cs20's rate, reproducing the
+  // three measurements to 13%. At cs20 it reaches -0.59%, which is larger than
+  // every other systematic in this stack put together.
+  //
+  // What it is not: the arc. `road_step_arc` supplies the `step * turn / 2`
+  // the chord model omits, and switching it on moves cs20's length bias from
+  // -0.229% to -0.260% -- the wrong way, and by a tenth of the effect. That
+  // term corrects the yaw the hop is read as, which is what it was measured to
+  // do; the length is a different defect. Nor is it the band: sweeping
+  // `road_step_roi_y0` across 0.50 to 0.80 moves cs20 by 0.02% while it moves
+  // straight120_v2 by 0.16%.
+  //
+  // What has not been separated: all three slaloms run at the same speed, so
+  // `t` per frame, the turn rate in rad/s and the curvature in rad/m are
+  // proportional here and this cannot say which of them the law is in. One
+  // recording of the same slalom at a different speed would settle it.
+  //
+  // The older notes, kept because they rule things out:
+  //
   // A turn term nobody has found yet, recorded so the next attempt does not
   // start from zero.
   //
