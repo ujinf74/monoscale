@@ -1437,7 +1437,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   const double solve_band = settings_.solve_max_distance_m > 0.0
     ? settings_.solve_max_distance_m : std::numeric_limits<double>::infinity();
   // Held when the map answered and its correction is to be scaled rather than
-  // taken whole. See `map_correction_gain`.
+  // taken whole.
   Eigen::Vector3d mount_in_frame = camera.model.translation_base_from_camera;
   if (settings_.level_frame_origin && tilt_moves_camera && tilt.has_value()) {
     const Eigen::Vector3d centre(settings_.pitch_centre_x_m, 0.0, 0.0);
@@ -1857,12 +1857,27 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       camera.photometric_since_solve > 0.0)
     {
       const double length = std::hypot(solved.motion->x, solved.motion->y);
-      if (length > 1e-6) {
+      // The same bound the fused path puts on the same quantity.
+      //
+      // A photometric length that disagrees with the solve by more than
+      // `max_scale_error` is not a measurement -- it is the search having
+      // missed its peak, and what it then reports is unbounded: the failures
+      // reach 3.8x and 32x, and two consecutive frames of the latter took
+      // str_4.0 from 0.079 to 1.347. The fused path has always rejected these.
+      // This one never did, and unguarded it measures 0.8304% mean ATE/거리
+      // against the deployed 0.0224%, which is not a worse blend but a handful
+      // of frames destroying whole drives.
+      const double disagreement =
+        length > 1e-6 ? std::abs(camera.photometric_since_solve / length - 1.0) : 0.0;
+      if (settings_.max_scale_error > 0.0 && disagreement > settings_.max_scale_error) {
+        ++diagnostics_.photometric_rejected;
+      } else if (length > 1e-6) {
         const double blended = length + settings_.photometric_step_gain *
           (camera.photometric_since_solve - length);
         const double ratio = blended / length;
         solved.motion->x *= ratio;
         solved.motion->y *= ratio;
+        ++diagnostics_.photometric_uses;
       }
     }
     for (Eigen::Index i = 0; i < paired; ++i) {
@@ -2682,6 +2697,34 @@ void Estimator::process_pair()
         // is not a competitive measurement. The cameras set the direction and
         // the map binding; the road sets the scale, alone.
         const double gain = settings_.photometric_step_gain;
+        // Applied to the fused hop, and only where the map is silent.
+        //
+        // Where the map answers, the hop is a displacement with a pose
+        // correction added to it, so forcing the whole thing to the road's
+        // length does not scale the correction -- it deletes the part of it
+        // that points along travel, which is the part the length constraint
+        // spends itself on and the only part that bounds longitudinal drift.
+        // That is what `photometric_when_mapless` is protecting: switched off
+        // it takes RPE 5m from 0.133% to 0.112%, because the hop's length
+        // really is measured better, while ATE/거리 goes 0.0224% to 0.0522%.
+        //
+        // Separating the two so the length lands on the displacement alone was
+        // built and does not work, and the reason is the same one that sank the
+        // map-as-absolute-factor. The displacement inside a map hop would be
+        // the motion between this camera's own two placements, where the map's
+        // standing offset stands at both ends and cancels -- but the map is
+        // rebuilt every frame in the estimator's own frame, so that frame moves
+        // too and the difference is not a clean displacement either. Taking it
+        // as the hop outright doubles the error, which is the note in the map
+        // branch; using it to define the correction inherits the same defect.
+        // Measured: 0.0781% mean ATE/거리 weighting the correction by the
+        // fusing camera's share, 0.1340% at full strength, against 0.0522% for
+        // not separating them at all.
+        //
+        // There is no displacement inside a map hop to give a length to. The
+        // switch is not standing in for a correlation; it is standing on the
+        // fact that on these frames the quantity the road measures is not the
+        // quantity the hop reports.
         const double blended = length + gain * (measured - length);
         const double ratio = blended / length;
         motion->x *= ratio;
