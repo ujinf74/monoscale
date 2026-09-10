@@ -243,7 +243,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.imu_scale_gain = declare_double("imu_scale_gain", 0.0);
   settings.imu_scale_min_hop_m = declare_double("imu_scale_min_hop_m", 0.05);
   settings.inertial_gate_m = declare_double("inertial_gate_m", 0.0);
-  settings.range_scale_gain = declare_double("range_scale_gain", 0.0);
   settings.align_seed_from_last_hop = declare_bool("align_seed_from_last_hop", false);
   settings.align_restarts = declare_int("align_restarts", 1);
   settings.ground_min_inliers = declare_int("ground_min_inliers", 24);

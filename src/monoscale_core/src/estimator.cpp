@@ -1742,15 +1742,14 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         ++camera.radial_samples;
         // Positive residual means the ground read further away than the map
         // says, which is a camera believed to sit higher than it does.
-        if (settings_.range_scale_gain != 0.0) {
-          const double relative = aligned->radial_linear / aligned->radial_reference;
-          if (std::isfinite(relative)) {
-            const double step = std::clamp(
-              settings_.range_scale_gain * relative, -0.01, 0.01);
-            camera.range_scale_learned = std::clamp(
-              camera.range_scale_learned * (1.0 + step), 0.9, 1.1);
-          }
-        }
+        // A second scale learner stood here, driving `range_scale_learned`
+        // from the alignment's radial residual while `pair_scale_gain` drove
+        // the same state from the pair solve's regression. Two paths, one
+        // quantity, and they were partly cancelling each other: removing the
+        // pair one alone takes the worst ATE/거리 from 0.0361% to 0.1345%,
+        // while removing this one takes the mean from 0.0254% to 0.0239% and
+        // RPE5 from 0.133% to 0.130%. Correcting the same error twice through
+        // different observations is how a stack ends up needing both.
       }
       // With the MSCKF the heading the ground settled on is what the filter is
       // being told; without it the heading handed in stands, which is what

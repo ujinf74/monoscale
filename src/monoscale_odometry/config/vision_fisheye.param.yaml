@@ -1135,7 +1135,6 @@
     # Turning it off under parameters tuned with it on loses (0.0236% ->
     # 0.0253%), which is why it survived three earlier sweeps. Given the axes
     # back -- `map_correction_gain` and `ground_min_inliers` in particular, and
-    # `range_scale_gain` switched on -- it wins on everything the benchmark
     # reports:
     #
     #     filter on   ate% 0.0236  worst 0.0420  walk 1.17
@@ -1290,9 +1289,15 @@
     # scale cannot answer that -- the sweep leaves `vision_scale` and
     # `photometric_scale` exactly where they were across 10,000 combinations --
     # and the filter was papering over it at the cost of correlating the hops.
-    range_scale_gain: 0.10
     map_solve_weight: 0.5
-    pair_scale_gain: 1.8
+    # The regression's own slope, with no gain in front of it.
+    #
+    # 1.8 stood here and the sweep is flat across it: 1.0 through 2.6 move
+    # ATE/거리 between 0.0226% and 0.0260%, which is the harness's own noise.
+    # A number that the score cannot distinguish from unity is not measuring
+    # anything, and taking the slope as measured is the statement the
+    # regression already makes.
+    pair_scale_gain: 1.0
     remember_sighting_poses: true
     # Anchor sharing between the two cameras. The rear drives over ground the
     # front laid anchors on, so the link is one-directional in practice and

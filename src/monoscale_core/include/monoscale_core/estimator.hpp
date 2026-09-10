@@ -192,7 +192,6 @@ struct EstimatorSettings
   // How far a translation may sit from what inertial propagation expects.
   double inertial_gate_m = 0.0;
   // How fast the per-camera range scale follows the measured radial residual.
-  double range_scale_gain = 0.0;
   // Seed the anchor alignment with the previous hop instead of the median vote.
   bool align_seed_from_last_hop = false;
   int align_restarts = 1;
