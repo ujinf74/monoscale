@@ -180,6 +180,9 @@ struct EstimatorSettings
   double ground_align_softness_m = 0.0;
   // Far limit for points entering the pose solve. 0 uses ground_max_distance_m.
   double solve_max_distance_m = 0.0;
+  // Near edge of the solve's band. 0 in deployment; it exists so one annulus of
+  // ground can be asked what it requires on its own, which a cap cannot do.
+  double solve_min_distance_m = 0.0;
   // Far limit for sightings that may enter the anchor map. 0 means no limit
   // beyond the ground band itself.
   double anchor_max_range_m = 0.0;

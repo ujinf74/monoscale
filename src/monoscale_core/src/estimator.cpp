@@ -635,9 +635,46 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // not the channel the length error arrives through. It measures the mounting
   // pitch, which is what it was built for and all it was ever shown to do.
   //
-  // So the coefficient would have to be fitted, and a coefficient fitted to
-  // the score is the thing this file has spent the session removing. The term
-  // is not added.
+  // The residuals cannot say it, but disjoint annuli can, and they do.
+  //
+  // A cap alone cannot separate a height from a tilt because every capped run
+  // contains all the ground inside it. `solve_min_distance_m` exists so a band
+  // can be asked on its own. Reading each band's height requirement against
+  // truth, with the photometric step off and the offset at zero:
+  //
+  //   drive     0-2.0 m (R~1.4)   2.0-3.5 m (R~2.7)   ratio
+  //   v2            5.04 mm            10.08 mm        2.00
+  //   v3            5.10                9.77           1.92
+  //   s15           5.02                8.23           1.64
+  //   s4            6.58                9.34           1.42
+  //
+  // The range ratio is 1.93, so on the first two -- one condition recorded
+  // twice, agreeing to 0.3 mm -- **the requirement is linear in range**. A
+  // height error is not: `dR/R = dh/h` has no range in it at all, which is why
+  // an offset came out different on every drive.
+  //
+  // Linear in range is a **plane tilt**. A surface tilted by theta sits
+  // `theta*R` off the assumed plane, so the relative range error is
+  // `theta*R/h`. Solving it on each band separately gives 0.214 and 0.223
+  // degrees -- one angle, from two disjoint pieces of ground.
+  //
+  // It is not a camera pitch, and that is measured rather than assumed. A
+  // pitch error moves the ray, giving `dR/R = (R/h + h/R) delta`, which over
+  // these two bands grows by 1.41. Injecting 0.50 degrees of mount pitch
+  // removes 0.373% from the near band and 0.536% from the far one, a ratio of
+  // 1.44 -- the prediction, so the mechanism is real -- against the 2.00 the
+  // error itself has. One pitch cannot null both bands: at 0.50 degrees the
+  // near band is at +0.114% and the far one still at +0.438%.
+  //
+  // So the parameter's correct form is a **tilt of the assumed ground plane**,
+  // near 0.22 degrees, not an offset of it. What is missing before that can be
+  // deployed is the other three drives: straight_s8 gives 0.226 degrees on the
+  // near band and a negative requirement on the far one, and the slaloms give
+  // 0.086 and 0.130. The four road-A straights agree; road B does not, and
+  // road B is the flat one.
+  //
+  // The term is still not added, for the same reason as before: an angle that
+  // four drives agree on and three contradict would be fitted, not measured.
   //
   // One thing the road's shape does not explain either: straight_s8 is on the
   // flat road and its own requirement still moves with range -- 1.05, 0.54, 2.94, 5.99 mm at 5.8,
@@ -1562,6 +1599,13 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // reach, which is what ground_max_distance_m is for.
   const double solve_band = settings_.solve_max_distance_m > 0.0
     ? settings_.solve_max_distance_m : std::numeric_limits<double>::infinity();
+  // The near edge of the same band, for asking what one annulus of ground says
+  // on its own. Zero in deployment, and the reason it exists is that a cap
+  // alone cannot answer the question: every capped run contains all the ground
+  // inside it, so the height a run requires is an average over everything from
+  // the mount out to the cap, and `R` and `R^2` come out collinear. Disjoint
+  // annuli are not.
+  const double solve_floor = std::max(settings_.solve_min_distance_m, 0.0);
   Eigen::Vector3d mount_in_frame = camera.model.translation_base_from_camera;
   if (settings_.level_frame_origin && tilt_moves_camera && tilt.has_value()) {
     const Eigen::Vector3d centre(settings_.pitch_centre_x_m, 0.0, 0.0);
@@ -1667,7 +1711,9 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       const double dy = solved.current_ground(i, 1) - lens.y();
       const double px = solved.previous_ground(i, 0) - lens.x();
       const double py = solved.previous_ground(i, 1) - lens.y();
-      if (std::hypot(dx, dy) > solve_band || std::hypot(px, py) > solve_band) {
+      if (std::hypot(dx, dy) > solve_band || std::hypot(px, py) > solve_band ||
+        std::hypot(dx, dy) < solve_floor || std::hypot(px, py) < solve_floor)
+      {
         continue;
       }
     }
@@ -1945,7 +1991,9 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       const double dy = solved.current_ground(i, 1) - lens.y();
       const double px = solved.previous_ground(i, 0) - lens.x();
       const double py = solved.previous_ground(i, 1) - lens.y();
-      if (std::hypot(dx, dy) > solve_band || std::hypot(px, py) > solve_band) {
+      if (std::hypot(dx, dy) > solve_band || std::hypot(px, py) > solve_band ||
+        std::hypot(dx, dy) < solve_floor || std::hypot(px, py) < solve_floor)
+      {
         continue;
       }
     }
