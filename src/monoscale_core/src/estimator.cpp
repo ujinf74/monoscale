@@ -2801,10 +2801,32 @@ void Estimator::process_pair()
         // fusing camera's share, 0.1340% at full strength, against 0.0522% for
         // not separating them at all.
         //
-        // There is no displacement inside a map hop to give a length to. The
-        // switch is not standing in for a correlation; it is standing on the
-        // fact that on these frames the quantity the road measures is not the
-        // quantity the hop reports.
+        // There is no displacement inside a map hop to give a length to, and
+        // the reason is algebraic rather than a run of bad luck.
+        //
+        // Any split needs a displacement estimate `d`. What it then reports is
+        //
+        //   m_new = (m - d) + (road / |d|) d  =  m + (road/|d| - 1) d
+        //
+        // -- the map hop, plus the disagreement between the road's length and
+        // `d`'s, laid along `d`. It never adds information; it adds whatever
+        // `d` got wrong. Three choices of `d` and all three fail for that one
+        // reason:
+        //
+        //   the map's own two placements   0.0781%   the map frame moves too
+        //   the two-frame pair solve       0.0931%   0.3-1.2% error per hop
+        //   the heading times the road     identity  d is defined as the answer
+        //
+        // against 0.0522% for not splitting and 0.0226% for the switch. The
+        // pair solve is the interesting failure: its per-hop error, 0.3-1.2%,
+        // is smaller than the correction being protected, 1.1-2.4%, and it
+        // still loses -- because the correction is systematic and what the
+        // split injects is a fresh random walk on every map-answered frame.
+        //
+        // So the switch is not standing in for a correlation and not standing
+        // in for a missing decomposition. On these frames the quantity the
+        // road measures is not the quantity the hop reports, and nothing
+        // available measures the difference better than leaving it alone.
         const double blended = length + gain * (measured - length);
         const double ratio = blended / length;
         motion->x *= ratio;
