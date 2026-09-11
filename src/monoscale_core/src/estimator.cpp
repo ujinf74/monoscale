@@ -2882,9 +2882,34 @@ void Estimator::process_pair()
   //   would need 4.9e-3 rad of yaw error -- the whole turn -- and the yaw
   //   reproduces truth with correlation +1.0000. Three orders too small.
   //
-  // What is left is the surface under the patch on a curving path, uniform
-  // across the band, invisible to the fit, and proportional to how sharply the
-  // path bends rather than to how fast it is bent.
+  // - **A height change with the turn.** A height error is the loudest column
+  //   there is -- the Jacobian gives 10 mm of it as +1.111% of the front
+  //   camera's step -- so -0.614% would need 5.5 mm. curve_s20's truth z spans
+  //   0.02 mm. Two hundred and seventy-five times short.
+  // - **The camera model.** The fisheye is synthesised, so its projection can
+  //   be read rather than calibrated: `build_maps` takes each output pixel's
+  //   radius, sets `theta = r / focal`, and builds the ray
+  //   `(x sin(theta)/r, y sin(theta)/r, cos theta)`. That is equidistant by
+  //   construction, and `hypot(1280,720)/2 / (rad(160)/2) = 525.9` is the 1051.81
+  //   at 2560 the deployed intrinsics carry. Model and synthesis are the same
+  //   expression. (The synthetic pair cannot say this -- it builds and fits
+  //   through the same model, so a model error would cancel in it.)
+  //
+  // What is left is one candidate, and it is a property of the recording rather
+  // than of the estimator. The fisheye is assembled by resampling two
+  // rectilinear tiles through `cv2.remap` with **INTER_LINEAR**. Bilinear's
+  // transfer depends on the sub-pixel phase in x and y separately, so the
+  // attenuation it applies is anisotropic: content sliding radially through the
+  // frame, which is what a forward step does, is not filtered like content
+  // sliding sideways, which is what a turn adds. That is a sub-pixel effect and
+  // the term is 0.055 to 0.19 px.
+  //
+  // It cannot be tested from the recorded bags -- the resampling already
+  // happened when they were written. The assembler takes an `interpolation`
+  // parameter, defaulting to `linear`, so the test is one re-recording at
+  // `cubic` with everything else held, scored with
+  // `monoscale_evaluation/photometric_bias.py` against the same drive at
+  // `linear`.
   //
   // The older notes, kept because they rule things out:
   //
