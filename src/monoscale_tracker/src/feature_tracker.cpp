@@ -243,6 +243,39 @@ struct GroundModel
     // At `turn` = 0 both factors reduce to (1, 0) exactly, so a straight hop is
     // the hop this always used and `road_step_arc` off is bit for bit the old
     // path.
+    //
+    // What this arc still assumes is that the vehicle travels along its own
+    // axis, and a real one does not. Measured against CARLA truth 2026-09-10,
+    // the angle between the course and the heading:
+    //
+    //   drive   speed    |yaw rate|   |sideslip| median
+    //   v2      1.85 m/s   0.00 deg/s    0.019 deg
+    //   s8      7.51       0.00          0.006
+    //   cs05    1.85       2.17          1.521
+    //   cs10    1.85       4.27          3.052
+    //   cs20    1.86       8.38          6.051
+    //
+    // Zero on a straight and **six degrees** on the hard slalom, and the ratio
+    // to the yaw rate is a constant 0.70, 0.71, 0.72 seconds. That is the
+    // kinematic relation `beta = omega * L_r / v`, so it is predictable from
+    // the gyro and the length alone -- `beta = turn * L_r / step` -- with
+    // `L_r = beta*v/omega = 0.71 * 1.855 = 1.32 m` read straight off the truth.
+    //
+    // It matters at the size of everything else here put together. Building a
+    // hop from the gyro's turn and the photometric length and scoring it
+    // against truth, the error is 0.12-0.18% on the straights and **2.7% and
+    // 10.7%** on cs05 and cs20 -- all of it lateral, with the longitudinal part
+    // holding at 0.21-0.23%. Rotating the hop by the kinematic sideslip takes
+    // those to 0.26% and 0.60%, a factor of ten and eighteen, and leaves the
+    // straights untouched because the term is zero there. The lever that does
+    // it, 1.30 m, is where the truth's own sideslip put it before the hop error
+    // was consulted.
+    //
+    // Not applied here. This homography describes what the *camera* sees of the
+    // ground between two frames, and that is the vehicle's actual displacement,
+    // sideslip included -- it is measured, not assumed. The note is here because
+    // this is where the constant-curvature hop is written, and any core built
+    // on `turn` and `step` alone owes the road a sideslip term.
     double along = step;
     double across = 0.0;
     if (arc_hop && std::abs(turn) > 1e-9) {
