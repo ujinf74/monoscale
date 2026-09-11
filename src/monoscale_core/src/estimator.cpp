@@ -1773,20 +1773,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     usable.push_back(i);
   }
 
-  if (settings_.fuse_camera_points) {
-    const Eigen::Index kept = static_cast<Eigen::Index>(usable.size());
-    solved.pair_previous.resize(kept, 2);
-    solved.pair_current.resize(kept, 2);
-    solved.pair_ids.resize(kept);
-    for (Eigen::Index i = 0; i < kept; ++i) {
-      const Eigen::Index at = usable[static_cast<size_t>(i)];
-      solved.pair_previous(i, 0) = solved.previous_ground(at, 0);
-      solved.pair_previous(i, 1) = solved.previous_ground(at, 1);
-      solved.pair_current(i, 0) = solved.current_ground(at, 0);
-      solved.pair_current(i, 1) = solved.current_ground(at, 1);
-      solved.pair_ids(i) = track_ids(at);
-    }
-  }
 
   if (settings_.equalise_reach && std::isfinite(reach_target_) && usable.size() > 2) {
     // Farthest first, dropped until the mean reach matches. Exact, and it needs
@@ -2517,41 +2503,10 @@ void Estimator::process_pair()
   for (const auto & entry : solved) {
     any_anchored = any_anchored || (entry.has_value() && entry->anchored_from_map);
   }
-  if (settings_.fuse_camera_points && !any_anchored &&
-    yaw_delta.has_value() && motion.has_value())
-  {
-    Eigen::Index total = 0;
-    for (const auto & entry : solved) {
-      if (entry.has_value()) {
-        total += entry->pair_previous.rows();
-      }
-    }
-    if (total >= settings_.ground_min_inliers) {
-      Points2 pooled_previous(total, 2);
-      Points2 pooled_current(total, 2);
-      Eigen::Index at = 0;
-      for (const auto & entry : solved) {
-        if (!entry.has_value() || entry->pair_previous.rows() == 0) {
-          continue;
-        }
-        const Eigen::Index rows = entry->pair_previous.rows();
-        pooled_previous.block(at, 0, rows, 2) = entry->pair_previous;
-        pooled_current.block(at, 0, rows, 2) = entry->pair_current;
-        at += rows;
-      }
-      const double pooled_gate = settings_.ground_ransac_threshold_m +
-        settings_.ground_rotation_threshold_m * std::abs(*yaw_delta);
-      const auto pooled = estimate_planar_motion_with_yaw(
-        pooled_previous, pooled_current, *yaw_delta, pooled_gate,
-        settings_.ground_min_inliers, settings_.ground_pair_softness_m, Weights(),
-        settings_.ground_pair_passes);
-      if (pooled.has_value()) {
-        motion->x = pooled->motion.x;
-        motion->y = pooled->motion.y;
-        motion->inliers = pooled->motion.inliers;
-      }
-    }
-  }
+  // Pooling both cameras' ground points into one solve instead of averaging
+  // their two answers stood here. Deployed false, and measured neutral on the
+  // map path -- the map answers most frames and a pooled pair solve never
+  // reaches them. Removed with the pose graph it kept company with.
   if (settings_.fuse_cameras_by_spread && all_have_spread &&
     precision_inputs.size() == motions.size() && motion.has_value())
   {
@@ -3895,100 +3850,6 @@ std::vector<Estimator::RevisitAudit> Estimator::revisit_audit() const
   return out;
 }
 
-void Estimator::solve_pose_graph()
-{
-  const int64_t held = static_cast<int64_t>(pose_history_.size());
-  const int64_t window = std::min<int64_t>(settings_.pose_graph_window, held);
-  if (window < 8) {
-    return;
-  }
-  const int64_t first = held - window;
-  const auto loops = anchors_->revisits();
-  std::vector<std::array<double, 7>> edges;   // from, to, dx, dy (relative index)
-  std::vector<double> weight;
-  for (const auto & loop : loops) {
-    if (loop.from < first || loop.to < first || loop.from == loop.to) {
-      continue;
-    }
-    const auto & a = pose_history_[static_cast<size_t>(loop.from)];
-    const auto & b = pose_history_[static_cast<size_t>(loop.to)];
-    const double ca = std::cos(a[2]);
-    const double sa = std::sin(a[2]);
-    const double cb = std::cos(b[2]);
-    const double sb = std::sin(b[2]);
-    // Both saw the same world point, so the separation the two poses must have
-    // is the difference of where each put it in its own body frame.
-    edges.push_back(
-      {static_cast<double>(loop.from - first), static_cast<double>(loop.to - first),
-        (ca * loop.bx_from - sa * loop.by_from) - (cb * loop.bx_to - sb * loop.by_to),
-        (sa * loop.bx_from + ca * loop.by_from) - (sb * loop.bx_to + cb * loop.by_to)});
-    weight.push_back(std::max(loop.weight, 1e-9) * settings_.pose_graph_loop_weight);
-  }
-  diagnostics_.pose_graph_loops = static_cast<int64_t>(edges.size());
-  if (edges.empty()) {
-    return;
-  }
-  // Normal equations for a chain plus a few loops, solved by Gauss-Seidel. The
-  // matrix is diagonally dominant and the chain is stiff, so it converges in a
-  // handful of sweeps and needs no factorisation.
-  const int n = static_cast<int>(window);
-  std::vector<double> x(n);
-  std::vector<double> y(n);
-  for (int k = 0; k < n; ++k) {
-    x[static_cast<size_t>(k)] = pose_history_[static_cast<size_t>(first + k)][0];
-    y[static_cast<size_t>(k)] = pose_history_[static_cast<size_t>(first + k)][1];
-  }
-  const std::vector<double> x0 = x;
-  const std::vector<double> y0 = y;
-  for (int sweep = 0; sweep < settings_.pose_graph_sweeps; ++sweep) {
-    for (int k = 1; k < n; ++k) {
-      double wx = 0.0;
-      double wy = 0.0;
-      double total = 0.0;
-      // Odometry, both sides.
-      wx += (x[static_cast<size_t>(k - 1)] + (x0[static_cast<size_t>(k)] -
-        x0[static_cast<size_t>(k - 1)]));
-      wy += (y[static_cast<size_t>(k - 1)] + (y0[static_cast<size_t>(k)] -
-        y0[static_cast<size_t>(k - 1)]));
-      total += 1.0;
-      if (k + 1 < n) {
-        wx += (x[static_cast<size_t>(k + 1)] - (x0[static_cast<size_t>(k + 1)] -
-          x0[static_cast<size_t>(k)]));
-        wy += (y[static_cast<size_t>(k + 1)] - (y0[static_cast<size_t>(k + 1)] -
-          y0[static_cast<size_t>(k)]));
-        total += 1.0;
-      }
-      for (size_t e = 0; e < edges.size(); ++e) {
-        const int from = static_cast<int>(edges[e][0]);
-        const int to = static_cast<int>(edges[e][1]);
-        const double w = weight[e];
-        if (to == k) {
-          wx += w * (x[static_cast<size_t>(from)] + edges[e][2]);
-          wy += w * (y[static_cast<size_t>(from)] + edges[e][3]);
-          total += w;
-        } else if (from == k) {
-          wx += w * (x[static_cast<size_t>(to)] - edges[e][2]);
-          wy += w * (y[static_cast<size_t>(to)] - edges[e][3]);
-          total += w;
-        }
-      }
-      if (total > 0.0) {
-        x[static_cast<size_t>(k)] = wx / total;
-        y[static_cast<size_t>(k)] = wy / total;
-      }
-    }
-  }
-  double moved = 0.0;
-  for (int k = 0; k < n; ++k) {
-    moved += std::hypot(
-      x[static_cast<size_t>(k)] - x0[static_cast<size_t>(k)],
-      y[static_cast<size_t>(k)] - y0[static_cast<size_t>(k)]);
-    pose_history_[static_cast<size_t>(first + k)][0] = x[static_cast<size_t>(k)];
-    pose_history_[static_cast<size_t>(first + k)][1] = y[static_cast<size_t>(k)];
-  }
-  diagnostics_.pose_graph_shift_m = moved / static_cast<double>(n);
-  anchors_->rebuild(pose_history_);
-}
 
 void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved)
 {
@@ -4024,9 +3885,14 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
     pose_.x, pose_.y,
     cameras_.empty() ? 0.0
     : cameras_.front()->model.translation_base_from_camera.z());
-  if (settings_.pose_graph_window > 0) {
-    solve_pose_graph();
-  }
+  // A pose graph over the recent poses stood here, weighting the revisit
+  // constraints against the odometry chain. Measured 2026-09-10 against truth,
+  // it cannot win: over the same six-metre intervals a revisit edge's spread is
+  // four to eight times the odometry's and their medians agree, so it carries
+  // the same systematic with more noise. It would only begin to pay where the
+  // walk has grown past the edge -- 78 to 458 m -- and the longest revisit this
+  // map makes spans 9 to 11. `revisits()` and `revisit_audit()` stay: they are
+  // the measurement, and `--revisits` is how that was found.
 
   for (size_t i = 0; i < solved.size(); ++i) {
     if (!solved[i].has_value()) {

@@ -355,7 +355,6 @@ struct EstimatorSettings
   // Solve both cameras' ground points together instead of solving each camera
   // apart and averaging the two answers. Their points are already in base_link
   // and describe the same hop, so this is the fusion the geometry allows.
-  bool fuse_camera_points = false;
 
 
   // How much an anchor's weight decays per metre driven since it was founded.
@@ -537,9 +536,6 @@ struct EstimatorSettings
   // move. Where the map is silent the hop really is a displacement, and a
   // length is exactly what it needs.
   bool photometric_when_mapless = false;
-  int pose_graph_window = 0;
-  double pose_graph_loop_weight = 1.0;
-  int pose_graph_sweeps = 8;
   bool rebuild_measure_only = false;
   double anchor_link_radius_m = 0.0;
   bool anchor_link_cross_source_only = false;
@@ -1110,7 +1106,6 @@ private:
   std::optional<double> imu_yaw_at(double stamp) const;
   bool imu_still_arriving(double stamp) const;
   void update_anchors(const std::vector<std::optional<Solved>> & solved);
-  void solve_pose_graph();
 
 public:
   // The revisit constraints as they stand, each paired with the odometry the

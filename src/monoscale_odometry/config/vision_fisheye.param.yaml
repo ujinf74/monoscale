@@ -1049,7 +1049,6 @@
     # metrics come out bit-identical, because the map path takes every frame
     # this would have served. Left as it is rather than removed, so that the
     # next person to reach for it reads this instead of measuring it again.
-    fuse_camera_points: false
     # 1.0 was set against 20 Hz frames, where it caps the vehicle at 20 m/s.
     # The solve is triggered by accumulated parallax rather than by frame, so
     # at 60 Hz one solve closes several frames and the interval it covers is

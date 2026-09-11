@@ -346,7 +346,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.ground_pair_passes = declare_int("ground_pair_passes", 1);
   settings.ground_pair_softness_m = declare_double("ground_pair_softness_m", 0.0);
   settings.softness_from_residual = declare_double("softness_from_residual", 0.0);
-  settings.fuse_camera_points = declare_bool("fuse_camera_points", false);
   settings.anchor_drift_variance_per_m =
     declare_double("anchor_drift_variance_per_m", 0.0);
   settings.solve_max_pixel_flow = declare_double("solve_max_pixel_flow", 0.0);
@@ -371,10 +370,6 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_bool("photometric_align_prior", false);
   settings.photometric_when_mapless =
     declare_bool("photometric_when_mapless", false);
-  settings.pose_graph_window = declare_int("pose_graph_window", 0);
-  settings.pose_graph_loop_weight =
-    declare_double("pose_graph_loop_weight", 1.0);
-  settings.pose_graph_sweeps = declare_int("pose_graph_sweeps", 8);
   settings.anchor_link_radius_m = declare_double("anchor_link_radius_m", 0.0);
   settings.anchor_link_cross_source_only =
     declare_bool("anchor_link_cross_source_only", false);
