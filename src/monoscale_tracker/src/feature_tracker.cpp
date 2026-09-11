@@ -3562,15 +3562,24 @@ private:
     // of them is eight warps against the one the trial step needs, and that
     // ratio is the whole cost of this routine.
     //
-    // The three angles are not consumed anywhere: `esm_attitude` and
-    // `esm_yaw_source` are both false by default and neither is set in the
-    // deployed file, so yaw, pitch and roll are solved for, published, ingested
-    // and accumulated by the estimator, and then discarded. Only `step` leaves
-    // this function into the answer. That does NOT make them free to drop --
-    // they may be absorbing model error the step would otherwise take as scale
-    // -- so this is a switch to be measured, not a cleanup. 1 solves the step
-    // alone at a quarter of the Jacobian; 4 is what every recorded number came
-    // from.
+    // The yaw IS consumed: `esm_yaw_sigma_rad` and `esm_yaw_sigma_rate` arm the
+    // heading observation, and it is what took curve_s20 from 2.5560 to 0.0791.
+    // Pitch and roll are published, ingested, accumulated and then discarded --
+    // `esm_attitude` and `esm_yaw_source` are both false and neither is set in
+    // the deployed file. That does NOT make them free to drop: they absorb
+    // model error the step would otherwise take as scale, and this was measured
+    // 2026-09-11 rather than argued.
+    //
+    // **Roll is free, pitch is not.** 3 is a wash on the bench and better on
+    // held-out (-2.8% ATE, -18.0% worst final error) while cutting warps 24.8%;
+    // 2 costs **2.8x**. Deployed at 3, and the reasoning that says otherwise is
+    // worth recording because it is wrong: the truth pitch is -0.0002 deg on
+    // every drive, and `corr_step_pitch` is 0.93, so freeing pitch looks like
+    // estimating nothing and pushing its noise onto the step. It is instead the
+    // family's only outlet for what the plane model cannot express -- which is
+    // why the photometric length's bias splits by road surface with pitch free
+    // and is one number across both surfaces with it fixed. The split is the
+    // outlet working, not a defect.
     const int freedom = std::min(std::max(road_step_esm_dof_, 1), 4);
     // How far the fit may travel from where the search left it. The search's
     // own bracket is 35% of the step, and an answer outside it is not a

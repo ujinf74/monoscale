@@ -69,6 +69,36 @@
     # esm-only extraction scores 0.0229% / 0.0389%, matching the set that
     # carries both.
     road_step_esm: true
+    # How many of the fit's four parameters it may move, in the order
+    # (step, yaw, pitch, roll). 4 is what every recorded number came from until
+    # 2026-09-11; 3 drops the roll.
+    #
+    # Roll is free to drop and pitch is not, which is the opposite of what the
+    # geometry suggests. The truth pitch is -0.0002 to -0.0005 deg on every
+    # drive -- zero -- so freeing it looks like estimating a quantity that is
+    # not there, and the band's own covariance says step and pitch are 0.93
+    # correlated, so whatever it estimates lands on the step. Measured:
+    #
+    #   dof   bench ATE/거리     held-out ATE       held-out 끝오차
+    #   4     0.0234% / 0.0402%  0.1833% / 0.2893%  0.1582% / 0.2361%
+    #   3     0.0237% / 0.0391%  0.1781% / 0.2659%  0.1461% / 0.1937%
+    #   2     0.0647% / 0.0971%  0.2077% / 0.3382%  0.2749% / 0.4695%
+    #
+    # Dropping pitch as well costs **2.8x**. The note in feature_tracker.cpp
+    # anticipated exactly this and it is right: the angles are not consumed as
+    # angles, but they absorb model error the step would otherwise take as
+    # scale. A truth pitch of zero does not make a fitted pitch useless -- it is
+    # the family's only outlet for whatever the plane model cannot express, and
+    # that is why the photometric length's bias splits by road surface with it
+    # free and does not with it fixed.
+    #
+    # 3 is taken on the held-out set: -2.8% and -8.1% on ATE, -7.6% and -18.0%
+    # on the final error, with the bench a wash inside its 1.05x repeat floor
+    # and its worst drive 2.7% better. It is also cheaper, measured on
+    # straight120_v2: warps 99102 -> 74557 (-24.8%), warps per solve 27.5 ->
+    # 20.7, the road stage 8.49 -> 7.09 ms at the front mount and 8.68 -> 7.72
+    # at the rear.
+    road_step_esm_dof: 3
     # The hop follows the arc the body actually travels, not the chord.
     #
     # A vehicle turning by `psi` while advancing `s` displaces by
