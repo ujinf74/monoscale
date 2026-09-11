@@ -271,6 +271,32 @@ struct GroundModel
     // it, 1.30 m, is where the truth's own sideslip put it before the hop error
     // was consulted.
     //
+    // What is left once the sideslip is in is not slip at all. At the joint
+    // lever, 1.36 m, the composed hop's error decomposes as
+    //
+    //   drive       |longitudinal|   |lateral|
+    //   straights      0.12-0.17      0.004-0.086
+    //   cs05           0.184          0.080
+    //   cs20           0.325          0.062
+    //
+    // -- the lateral residual is down at the straights' level on both slaloms,
+    // so the direction is finished. The remainder is longitudinal, and binned
+    // by the turn it is the length's own turn term and nothing else:
+    //
+    //   cs20 at |turn| ~ 0        +0.204%      (the photometric bias reads +0.228)
+    //   cs20 at the plateau       -0.351..-0.374   (it reads -0.362)
+    //   cs05 at |turn| ~ 0        +0.228        (+0.246)
+    //   cs05 at the plateau       +0.159..+0.168 (+0.158)
+    //
+    // Same law, same numbers, and the lateral is flat across every bin.
+    //
+    // So a core of gyro turn, photometric length and this kinematic sideslip
+    // carries exactly one error -- the photometric length's, straight term and
+    // turn term -- and the two-frame pair solve repairs neither: its own length
+    // runs 0.3-1.2% where the photometric runs 0.08, and the deployed stack
+    // already overwrites the fused length with the photometric one on 57-92% of
+    // frames, so the turn term is in the shipped answer either way.
+    //
     // Not applied here. This homography describes what the *camera* sees of the
     // ground between two frames, and that is the vehicle's actual displacement,
     // sideslip included -- it is measured, not assumed. The note is here because
