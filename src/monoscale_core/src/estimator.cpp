@@ -2830,10 +2830,31 @@ void Estimator::process_pair()
   //
   // A geometric term, then, and not a temporal one: exposure-time rotation, IMU
   // interpolation lag and inter-frame blur are all ruled out with it, because
-  // every one of them lives in rad/s. What is left is the road's shape under
-  // the patch -- the arc the vehicle follows against the plane the warp
-  // assumes, the curvature within the band, the way the band sweeps across a
-  // curving path.
+  // every one of them lives in rad/s.
+  //
+  // What it is has not been found, and these are eliminated:
+  //
+  // - **The chord-for-arc omission.** `road_step_arc` off leaves out the hop's
+  //   lateral half-step, `s^2 c / 2`, which against the step is `s c / 2` --
+  //   half the turn *per frame*, not the curvature. Wrong variable, and
+  //   switching the arc on measures curve_s20 from -0.229% to -0.260%.
+  // - **Where in the band.** Sweeping the far edge, `road_step_roi_y0`, from
+  //   0.50 to 0.80 moves curve_s20 by 0.02%. Sweeping the lateral extent moves
+  //   it by less than the deployed value is already worth: 0.25-0.75 gives
+  //   -0.229%, narrowing to 0.42-0.58 gives -0.363% and widening to 0.15-0.85
+  //   gives -0.266%. The term is spread evenly over the band rather than living
+  //   in a part of it.
+  // - **The fit noticing.** On the pair that separates the variable the fit
+  //   reports itself identically healthy: sigma_step 8.4e-5 against 7.5e-5,
+  //   score 0.945 against 0.949, step-pitch correlation 0.938 against 0.935,
+  //   tilt leak 0.214 against 0.191 -- while the turn term differs by 40%.
+  //   Nothing it computes about itself sees this.
+  // - **Road camber.** The slalom road's truth z spans 0.0 mm over a hundred
+  //   metres, so there is no crown to traverse.
+  //
+  // What is left is the surface under the patch on a curving path, uniform
+  // across the band, invisible to the fit, and proportional to how sharply the
+  // path bends rather than to how fast it is bent.
   //
   // The older notes, kept because they rule things out:
   //
