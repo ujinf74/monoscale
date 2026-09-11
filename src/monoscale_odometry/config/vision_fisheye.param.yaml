@@ -1252,10 +1252,43 @@
     #
     # Four drives pay a little (str_4.0, curve_s20, and both parks, 2-27%).
     # A value that follows speed would take those back; a single number cannot.
+    # ------------------------------------------------------------------
+    # Measured inert, 2026-09-12. Coordinate descent over the nine-drive bench
+    # on the deployed configuration: each of these was moved to both ends of a
+    # range at least twice its value and the scored output came back **bit
+    # identical** -- ATE, final error and RPE to every digit.
+    #
+    #   ground_align_softness_m      0.010 .. 0.026
+    #   ground_pair_softness_m       0.020 .. 0.090   (0.02 moves 0.0004%)
+    #   ground_max_distance_m        6.0 .. 10.0
+    #   attitude_tau_sec             4.0 .. 9.0
+    #   attitude_bias_tau_sec        4.0 .. 16.0
+    #   twist_lowpass_tau            0.02 .. 0.15
+    #   single_camera_variance       0.1 .. 2.0
+    #   max_translation_per_frame_m  1.0 .. 2.0   (0.4 does bite: it is a cap)
+    #   filter_acceleration_noise    2.0 .. 30.0
+    #   filter_reference_inliers     100 .. 900
+    #   filter_innovation_gate       5.0 .. 16.0
+    #   max_scale_error              0.02 .. 0.08  (±1%, under the noise floor)
+    #
+    # Twelve of the forty-seven numeric estimator axes this file carries. They
+    # are not tuned values and must not be read as any: something tighter binds
+    # first (`solve_max_distance_m` 5.8 and `anchor_max_range_m` 5.7 bound
+    # `ground_max_distance_m` 8.0), or a gate never trips, or the path is not
+    # reached -- `use_inertial_prediction` is false, so the whole velocity
+    # filter is constructed and never run, and `anchor_attitude` is true, so the
+    # attitude filter's tilt never reaches the ground projection.
+    #
+    # The code stays. They are wired and masked rather than dead, and a change
+    # elsewhere can make any of them live again; that is exactly why they are
+    # listed with the date and the configuration they were inert under.
+    #
+    # `filter_vision_noise` is gone from this file: it reaches only the velocity
+    # filter, so it is inert by construction rather than by measurement.
     filter_acceleration_noise: 8.0
-    filter_vision_noise: 0.25
     filter_reference_inliers: 300.0
     filter_innovation_gate: 9.0
+    # ------------------------------------------------------------------
 
     # Anchor memory is a fixed-gain filter, so its time constant is counted in
     # frames rather than seconds: 0.35 is roughly three frames of history,
