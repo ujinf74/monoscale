@@ -2895,6 +2895,16 @@ void Estimator::process_pair()
   //   removes the lattice interpolation entirely, moves curve_s20 from -0.229%
   //   to -0.210%. Cubic against linear moves it 0.044%, which is the
   //   straight-line term that fix was for.
+  // - **The fisheye's tiles disagreeing in time.** Each fisheye frame is
+  //   assembled from two rectilinear tiles paired by nearest stamp within a
+  //   tolerance rather than by equality, which would put a yaw-rate-sized error
+  //   straight into the image. The assembler reports the skew it actually
+  //   pairs at, and on both the bench slaloms and the new ones it is
+  //   **0.0 ms with nothing dropped**. The tiles share their instant.
+  // - **Rotation during the exposure.** The sensor kit sets
+  //   `motion_blur_intensity: 0.0` with `shutter_speed: 200.0`, so the renderer
+  //   takes an instant. A 1/200 s exposure at curve_s20's 0.147 rad/s would be
+  //   0.7 mrad, 15% of the frame's turn, and none of it is rendered.
   // - **Yaw leaking into step through the fit.** An absolute error set by the
   //   turn is what a yaw-to-step cross-term looks like, so the fit's covariance
   //   was asked: the step-yaw correlation runs 0.012 to 0.039 on the slaloms
