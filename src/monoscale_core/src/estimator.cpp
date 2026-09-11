@@ -3662,8 +3662,41 @@ void Estimator::anchor_polar(std::vector<std::array<double, 7>> & out) const
 // What is missing is a consumer. Widening the radius moves the deployed score
 // by nothing -- 0.0226%, 0.0228%, 0.0226%, 0.0230% at 0.02, 0.03, 0.04 and
 // 0.06, inside the 1.05x repeat spread -- because `pose_graph_window` is 0 and
-// nothing reads a revisit. The constraints are measurements, the density is
-// available at a defensible cost, and the estimator can spend neither.
+// nothing reads a revisit.
+//
+// **And there is nothing for a consumer to do.** The same dump carries what the
+// odometry did over the identical interval, so the two can be compared directly
+// against truth:
+//
+//   drive   n    span    edge median / sd    odometry median / sd    sd ratio
+//   v2      43   5.80 m   +3.3 / 47.4 mm      -6.4 / 12.9 mm           3.7
+//   s8     308   6.51    -21.1 / 86.8        -19.7 / 10.4             8.4
+//   cs20    61   5.66    -30.0 / 55.3        -27.4 / 13.4             4.1
+//
+// Two things, and either alone is fatal. The **medians agree** -- both are built
+// from ground points through the same projection, so the edge shares the
+// odometry's systematic and cannot correct it. And the **spread is four to
+// eight times worse**, so weighting them honestly at 1/sigma^2 gives the edge a
+// sixteenth to a seventieth of the say, which is `pose_graph_window: 0` with
+// extra steps.
+//
+// A revisit would begin to pay only where the odometry's random walk has grown
+// past the edge's noise, which is at
+//
+//   drive   longest revisit span   odometry reaches the edge's sd at
+//   v2           9.25 m                        78 m
+//   s8          11.01                         458
+//   cs20         9.44                          96
+//
+// -- eight to fifty times further than the longest constraint the map can make.
+// Which is also why the pose graph lost 7-14x: it was handing a chain that was
+// already better a measurement four to eight times noisier.
+//
+// So the relative-constraint architecture is not blocked by the estimator. It
+// is blocked by the span, and the span is capped by how long a track lives:
+// `sighting_span()` reads 11.5-24.3 poses because LK identities die, and the
+// revisits inherit that. Making those constraints worth consuming is a tracker
+// problem.
 std::vector<Estimator::RevisitAudit> Estimator::revisit_audit() const
 {
   std::vector<RevisitAudit> out;
