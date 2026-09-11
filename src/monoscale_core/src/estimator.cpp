@@ -687,9 +687,42 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // attitude switched off so nothing re-estimates around it, 0.691% and
   // 0.569%, ratio 0.82.
   //
-  // None of the three is the 1.93 the range ratio calls for. The error is
-  // linear in range and every tilt this projection can express is not, so the
-  // correction does not live in `camera_tilt`. Built, measured, removed;
+  // None of the three is the 1.93 the range ratio calls for -- but the
+  // projection is not what is wrong, and that is now checked rather than
+  // inferred. Driving `pixels_to_ground` directly with the front mount's
+  // geometry and a plane tilt of 1e-3 rad:
+  //
+  //   R      dR/R per rad    against the first row
+  //   1.0      -1.1232            1.0000
+  //   1.4      -1.5709            1.3986
+  //   2.0      -2.2421            1.9962
+  //   2.7      -3.0242            2.6925
+  //   4.0      -4.4737            3.9831
+  //   5.5      -6.1412            5.4676
+  //
+  // Proportional to `R` within 0.6%, which is `dR/R = -(R/h) theta` exactly.
+  // The tilt reaches the ground points correctly.
+  //
+  // **The weighting is what flattens it.** The alignment residuals carry each
+  // anchor's range and the weight it was given:
+  //
+  //   drive   anchors   median range   p90    weighted-mean   far half's share
+  //   v2      136,666      3.42 m      4.63      1.95 m            3.4%
+  //   s8        8,189      3.16        4.86      2.07              5.2%
+  //   cs20    145,765      3.53        4.99      1.83              2.4%
+  //
+  // The anchors reach past four metres and the half beyond the median carries
+  // two to five per cent of the weight, because `w` falls as `(R^2+h^2)^-2`.
+  // The solve sits at about 1.95 m whatever the cap, so a tilt applied to the
+  // whole projection moves the trajectory by its effect at one fixed range --
+  // which is the flat response, and which says a plane tilt fitted to the
+  // deployed score would be nearly inert. It is also why capping the range
+  // moved the spread across drives and not the mean: the weight was already
+  // where the cap was putting it.
+  //
+  // The linearity the annuli found is real and the deployed solve does not see
+  // it. Any repair has to reach the far anchors that carry the variation while
+  // holding 2-5% of the say. Built, measured, removed;
   // `solve_min_distance_m` stays because it is the instrument that found the
   // law and is neutral at its default.
   //
