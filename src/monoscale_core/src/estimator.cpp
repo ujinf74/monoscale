@@ -2880,65 +2880,56 @@ void Estimator::process_pair()
       } else if (settings_.hop_from_turn && yaw_delta.has_value() &&
         std::isfinite(*yaw_delta))
       {
-      // The hop from the turn and the length, with the direction the kinematics
-      // give rather than the one the pair solve measured.
+      // The hop from the turn and the length, with the direction the arc gives
+      // rather than the one the pair solve measured.
       //
       // On these frames the road's length already replaces the fused one
       // outright, so what the pair solve still supplies is the *direction*. The
-      // gyro has the turn, and a vehicle's course follows from it: over a hop of
-      // `s` at a turn of `psi` the body advances along the arc,
+      // gyro has the turn -- `yaw_delta` reproduces the truth turn over the
+      // hop's own interval with correlation +1.0000 and 100% sign agreement --
+      // and the course follows: over a hop of `s` at a turn of `psi`,
       //
       //   dx = s sin(psi)/psi,   dy = s (1 - cos psi)/psi
       //
-      // and then slips, because a real vehicle does not travel along its own
-      // axis. Measured against truth the sideslip is 0.02 degrees on a straight
-      // and 6.05 on curve_s20, and its ratio to the yaw rate is a constant
-      // 0.70-0.72 s across the three slaloms -- the kinematic
-      // `beta = omega L_r / v`, which per hop is `psi L_r / s`.
+      // Measured, that costs nothing: the nine drives read 0.0241% / 0.0363%
+      // mean and worst ATE/거리 against the deployed 0.0226% / 0.0375%, inside
+      // the 1.05x repeat spread. A RANSAC over hundreds of ground points is
+      // replaced by two trigonometric terms.
       //
-      // Scored against truth as a hop this reads 0.12-0.18% on the straights and
-      // 0.22-0.34% on the slaloms, against 2.7% and 10.7% with the sideslip left
-      // out. What remains is longitudinal and is the road length's own turn term,
-      // which the pair solve does not repair either -- its length runs 0.3-1.2%
-      // where the road's runs 0.08.
+      // **There is no sideslip term here, and the attempt to add one is a
+      // warning.** Compared to the truth pose, the vehicle's course leads its
+      // heading by 6.05 degrees on curve_s20, and the ratio to the yaw rate is
+      // a constant 0.70-0.72 s across the three slaloms -- the exact signature
+      // of a kinematic `beta = omega L_r / v` with `L_r` near 1.33 m. Rotating
+      // the hop by it takes the hop's own error from 10.7% to 0.44% and the
+      // trajectory's from 0.0241% to 0.1987%.
       //
-      // **The direction transfers and the sideslip does not, and the reason is
-      // an interval mismatch that is not fixed here.** With `sideslip_lever_m`
-      // at zero -- the arc alone, no slip -- the nine drives read 0.0241% and
-      // 0.0363% mean and worst ATE/거리 against the deployed 0.0226% and
-      // 0.0375%, inside the 1.05x repeat spread. Replacing the pair solve's
-      // direction with the gyro's arc costs nothing, and the direction is the
-      // whole of what the pair solve still supplied on these frames.
+      // It is not slip. The pair solve's lateral component over the same hops
+      // has a median of **0.15 mm** against the 13.8 mm that rotation applies:
+      // the camera watches the ground leave along the body axis, so the vehicle
+      // is not sliding. The 6 degrees is the truth pose's report point. CARLA
+      // puts the actor origin 1.3992 m ahead of the rear axle and base_link is
+      // the rear axle -- the same 1.399 m the frame-tree audit found and the
+      // note beside `pitch_centre_x_m` reads out of the vehicle definition. A
+      // point that far ahead of the rotation centre has a course leading the
+      // heading by `atan(omega L / v)`, which is the whole of the measured
+      // 1.33 m.
       //
-      // Switching the sideslip on costs a factor of eight in either sign:
-      // 0.1987% at +1.36 m and 0.1789% at -1.36 against 0.0241% at zero, with
-      // curve_s20's cross-track going 36 mm to 796. The term itself is right --
-      // open loop it takes cs20's lateral error from 10.7% of a hop to 0.06% --
-      // so the inputs are wrong. Probed in place on curve_s20, `measured`
-      // averages 0.1234 m where a frame of that drive is 0.0617, while
-      // `yaw_delta` averages 0.00497 rad where a frame is 0.00488: the length
-      // spans two frames and the turn spans one. `beta = psi L_r / s` is wrong
-      // by that ratio, and the in-place sideslip reads 3.1-4.5 degrees against
-      // the truth's 6.05. At `L_r = 0` only the arc's lateral term carries the
-      // mismatch and that is 0.15 mm, which is why it does not show.
+      // So the hop matched truth better because it had been rotated to follow a
+      // point 1.4 m ahead of where the estimator's pose lives, and the
+      // trajectory got worse for exactly that reason. The benchmark shifts the
+      // truth to the right point; a raw comparison against the truth topic does
+      // not, and that is what this measured.
       //
-      // So zero is the default, the arc is what ships when this is on, and the
-      // two intervals have to be made one before the slip term is worth
-      // anything.
-      //
-      // And it is off, because the held-out drives find the other thing the
-      // pair solve was supplying: **the sign**. On the bench this costs
-      // nothing, 0.0241% against 0.0226%. On the two park manoeuvres the final
-      // error goes 0.1777% to 0.3005% and its worst 0.2611% to 0.5065%,
-      // because those drives reverse and the road's length is unsigned --
-      // `road_step_reverse` is unreachable in deployment, so `measured` is a
-      // magnitude. `dx = s` then points the wrong way every time the vehicle
-      // backs up, where the two-frame solve simply measures which way the
-      // ground went.
-      //
-      // A core of turn and length needs a sign from somewhere before it can
-      // replace the pair solve, and that is a third measurement, not a
-      // parameter.
+      // And the held-out drives find the other thing the pair solve supplied:
+      // **the sign**. On the bench this costs nothing. On the two park
+      // manoeuvres the final error goes 0.1777% to 0.3005% and its worst
+      // 0.2611% to 0.5065%, because those drives reverse and the road's length
+      // is unsigned -- `road_step_reverse` is unreachable in deployment, so
+      // `measured` is a magnitude and `dx = s` points the wrong way every time
+      // the vehicle backs up. The two-frame solve simply measures which way the
+      // ground went. A core of turn and length needs a sign from somewhere, and
+      // that is a third measurement rather than a parameter.
         const double psi = *yaw_delta;
         double dx = measured;
         double dy = 0.0;
@@ -2947,11 +2938,8 @@ void Estimator::process_pair()
           dx = measured * std::sin(psi) / psi;
           dy = measured * 2.0 * half * half / psi;
         }
-        const double beta = psi * settings_.sideslip_lever_m / measured;
-        const double cb = std::cos(beta);
-        const double sb = std::sin(beta);
-        motion->x = cb * dx - sb * dy;
-        motion->y = sb * dx + cb * dy;
+        motion->x = dx;
+        motion->y = dy;
         diagnostics_.photometric_ratio = 1.0;
         ++diagnostics_.photometric_uses;
         ++diagnostics_.hop_from_turn_uses;

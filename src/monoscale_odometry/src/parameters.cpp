@@ -367,7 +367,6 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.photometric_on_pairs =
     declare_bool("photometric_on_pairs", false);
   settings.hop_from_turn = declare_bool("hop_from_turn", false);
-  settings.sideslip_lever_m = declare_double("sideslip_lever_m", 0.0);
   settings.photometric_align_prior =
     declare_bool("photometric_align_prior", false);
   settings.photometric_when_mapless =

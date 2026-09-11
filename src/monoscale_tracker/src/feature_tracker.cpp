@@ -244,75 +244,25 @@ struct GroundModel
     // the hop this always used and `road_step_arc` off is bit for bit the old
     // path.
     //
-    // What this arc still assumes is that the vehicle travels along its own
-    // axis, and a real one does not. Measured against CARLA truth 2026-09-10,
-    // the angle between the course and the heading:
+    // What this arc assumes is that the vehicle travels along its own axis,
+    // and on these recordings it does. Measured against the truth pose the
+    // course leads the heading by 6.05 degrees on curve_s20, with the ratio to
+    // the yaw rate a constant 0.70-0.72 s across the three slaloms -- which
+    // reads exactly like a kinematic sideslip `beta = omega L_r / v` with
+    // `L_r` near 1.33 m, and is not one.
     //
-    //   drive   speed    |yaw rate|   |sideslip| median
-    //   v2      1.85 m/s   0.00 deg/s    0.019 deg
-    //   s8      7.51       0.00          0.006
-    //   cs05    1.85       2.17          1.521
-    //   cs10    1.85       4.27          3.052
-    //   cs20    1.86       8.38          6.051
+    // The pair solve's own lateral component over the same hops has a median of
+    // 0.15 mm, against the 13.8 mm such a rotation would apply. The camera
+    // watches the ground leave along the body axis: there is no slip to model.
+    // The 6 degrees is the truth pose's report point -- CARLA puts the actor
+    // origin 1.3992 m ahead of the rear axle, base_link is the rear axle, and a
+    // point that far ahead of the rotation centre has a course leading the
+    // heading by `atan(omega L / v)`. The benchmark shifts the truth to the
+    // right point; a raw comparison against the truth topic does not.
     //
-    // Zero on a straight and **six degrees** on the hard slalom, and the ratio
-    // to the yaw rate is a constant 0.70, 0.71, 0.72 seconds. That is the
-    // kinematic relation `beta = omega * L_r / v`, so it is predictable from
-    // the gyro and the length alone -- `beta = turn * L_r / step` -- with
-    // `L_r = beta*v/omega = 0.71 * 1.855 = 1.32 m` read straight off the truth.
-    //
-    // It matters at the size of everything else here put together. Building a
-    // hop from the gyro's turn and the photometric length and scoring it
-    // against truth, the error is 0.12-0.18% on the straights and **2.7% and
-    // 10.7%** on cs05 and cs20 -- all of it lateral, with the longitudinal part
-    // holding at 0.21-0.23%. Rotating the hop by the kinematic sideslip takes
-    // those to 0.26% and 0.60%, a factor of ten and eighteen, and leaves the
-    // straights untouched because the term is zero there. The lever that does
-    // it, 1.30 m, is where the truth's own sideslip put it before the hop error
-    // was consulted.
-    //
-    // What is left once the sideslip is in is not slip at all. At the joint
-    // lever, 1.36 m, the composed hop's error decomposes as
-    //
-    //   drive       |longitudinal|   |lateral|
-    //   straights      0.12-0.17      0.004-0.086
-    //   cs05           0.184          0.080
-    //   cs20           0.325          0.062
-    //
-    // -- the lateral residual is down at the straights' level on both slaloms,
-    // so the direction is finished. The remainder is longitudinal, and binned
-    // by the turn it is the length's own turn term and nothing else:
-    //
-    //   cs20 at |turn| ~ 0        +0.204%      (the photometric bias reads +0.228)
-    //   cs20 at the plateau       -0.351..-0.374   (it reads -0.362)
-    //   cs05 at |turn| ~ 0        +0.228        (+0.246)
-    //   cs05 at the plateau       +0.159..+0.168 (+0.158)
-    //
-    // Same law, same numbers, and the lateral is flat across every bin.
-    //
-    // So a core of gyro turn, photometric length and this kinematic sideslip
-    // carries exactly one error -- the photometric length's, straight term and
-    // turn term -- and the two-frame pair solve repairs neither: its own length
-    // runs 0.3-1.2% where the photometric runs 0.08, and the deployed stack
-    // already overwrites the fused length with the photometric one on 57-92% of
-    // frames, so the turn term is in the shipped answer either way.
-    //
-    // Not applied here. This homography describes what the *camera* sees of the
-    // ground between two frames, and that is the vehicle's actual displacement,
-    // sideslip included -- it is measured, not assumed. The note is here because
-    // this is where the constant-curvature hop is written, and any core built
-    // on `turn` and `step` alone owes the road a sideslip term.
-    double along = step;
-    double across = 0.0;
-    if (arc_hop && std::abs(turn) > 1e-9) {
-      // Haversine rather than `(1 - cos turn) / turn`: near zero that
-      // difference is two nearly equal doubles and loses about twelve digits,
-      // and this fit is measurably sensitive to perturbations at 1e-13.
-      // `2 sin^2(turn/2) / turn` is the same number with no cancellation.
-      const double half = std::sin(0.5 * turn);
-      along = step * s / turn;
-      across = step * 2.0 * half * half / turn;
-    }
+    // So this stays as it is, and the warning is for whoever measures a
+    // sideslip here next: check it against what the cameras see before
+    // modelling it.
     const cv::Vec3d hop(along, across, 0.0);
     const cv::Vec3d t =
       r_cb * (r_b.t() * (translation_base_from_camera - hop) -
