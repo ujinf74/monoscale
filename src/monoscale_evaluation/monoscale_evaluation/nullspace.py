@@ -2,6 +2,26 @@
 says: what is observable, what is indistinguishable, what the pair cancels, and
 which manoeuvre separates what.
 
+## The direction two cameras cannot see
+
+Two cameras give two rows against three calibration directions that matter on a
+straight -- height, mount pitch, focal -- so exactly one combination is invisible.
+Solved from the columns below:
+
+    height +1.000 mm  +  mount pitch -0.0254 deg  +  focal +0.327 %    (2 m/s)
+    height +1.000 mm  +  mount pitch -0.0756 deg  +  focal +0.402 %    (8 m/s)
+
+Move the calibration along that and neither camera's answer changes. It is why
+naming any one of the three is a claim the measurement does not support: what
+the pair observes is two combinations, and `ground_plane_offset_m`,
+`photometric_scale` and the focal length are three labels competing for them.
+
+**And the direction turns with speed.** The 2 m/s null is not the 8 m/s null --
+the pitch component nearly triples -- so a set recorded at one speed sees a
+degeneracy that a mixed-speed set does not. Three of the nine bench drives sit
+at 1.4-2 m/s and two at 4 and 7.5, which is what makes the pair identifiable at
+all across the set even though it is degenerate on any one drive.
+
 Run it. The table it prints is the answer to five things this project kept
 rediscovering one at a time.
 
