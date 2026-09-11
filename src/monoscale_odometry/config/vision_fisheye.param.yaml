@@ -69,6 +69,38 @@
     # esm-only extraction scores 0.0229% / 0.0389%, matching the set that
     # carries both.
     road_step_esm: true
+    # The hop follows the arc the body actually travels, not the chord.
+    #
+    # A vehicle turning by `psi` while advancing `s` displaces by
+    # `(s sin psi / psi, s (1 - cos psi) / psi)` in the starting body frame, and
+    # the chord form left the lateral half-step out entirely. The derivation and
+    # the yaw error it explains are in feature_tracker.cpp; this key is the
+    # deployment decision, which waited on an eleven-drive judgement that the
+    # code default (false) was holding open.
+    #
+    # Judged 2026-09-11, only this key moved. Bench nine: ATE/거리 0.0226% ->
+    # 0.0224% mean, 0.0375% -> 0.0379% worst -- a wash, both inside the 1.05x
+    # repeat floor. Held-out park: 0.1880% -> 0.1875% mean and 0.2915% ->
+    # 0.2905% worst, 끝오차/거리 0.1777% -> 0.1750% and 0.2611% -> 0.2557%;
+    # slightly better on every metric and worse on none.
+    #
+    # What decides it is not the error. First it is the correct geometry, and
+    # at `psi` = 0 both forms reduce to `(1, 0)` exactly, so a straight hop is
+    # bit for bit what it always was -- nothing the straights established is at
+    # risk. Second it measures more: the road fit returns a step on **4.4% more
+    # frames** on the turning drives (curve_s20 1692 -> 1766, curve_s27_low
+    # 2490 -> 2600 on the front camera) against +0.3% on straight120_v2, which
+    # is that comparison's own churn floor (37 frames gained, 31 lost). The
+    # chord mismatches the true flow through a turn, the correlation peak
+    # degrades, and the search fails; the arc matches it and the search lands.
+    #
+    # The length is untouched: measured against truth with photometric_bias.py,
+    # curve_s20 +0.206% -> +0.197%, curve_s27_low +0.115% -> +0.118%,
+    # straight120_v2 -0.025% -> -0.026%, all inside the 0.033% three-recording
+    # spread. The earlier note here arguing the arc moved the length "the wrong
+    # way" was measured before that instrument was corrected for the truth
+    # pose's report point, and it was noise on a bent baseline.
+    road_step_arc: true
     # Interpolate the warp map cubically, on a stride-4 lattice.
     #
     # The map is the fisheye composed with the homography and it is curved over
