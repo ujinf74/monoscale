@@ -2809,10 +2809,31 @@ void Estimator::process_pair()
   // `road_step_roi_y0` across 0.50 to 0.80 moves cs20 by 0.02% while it moves
   // straight120_v2 by 0.16%.
   //
-  // What has not been separated: all three slaloms run at the same speed, so
-  // `t` per frame, the turn rate in rad/s and the curvature in rad/m are
-  // proportional here and this cannot say which of them the law is in. One
-  // recording of the same slalom at a different speed would settle it.
+  // **It is curvature, not yaw rate.** Separated 2026-09-10 by recording a
+  // fourth slalom inside the fit's working range at a different speed, with the
+  // steer raised to hold the yaw rate: `curve_s27_low`, steer 0.265 at 1.4 m/s
+  // against curve_s20's 0.20 at 1.86.
+  //
+  //   drive         step    |turn| plateau   curvature    turn term
+  //   curve_s20    0.0620      0.004881     0.0787 rad/m    -0.589%
+  //   curve_s27    0.0435      0.004537     0.1042          -0.826%
+  //
+  // 93% of the yaw rate and 132% of the curvature, and the term comes out 40%
+  // *larger*. Fitted on the three bench slaloms and extrapolated:
+  //
+  //   law in turn per frame, -52t - 14000t^2      predicts -0.524%   58% out
+  //   law in curvature,      -3.2c - 54c^2        predicts -0.925%   11% out
+  //
+  // against a measured -0.826% and an instrument floor of 0.012%. The two
+  // hypotheses differ by 0.4 percentage points here, thirty times the floor, so
+  // this is not a close call.
+  //
+  // A geometric term, then, and not a temporal one: exposure-time rotation, IMU
+  // interpolation lag and inter-frame blur are all ruled out with it, because
+  // every one of them lives in rad/s. What is left is the road's shape under
+  // the patch -- the arc the vehicle follows against the plane the warp
+  // assumes, the curvature within the band, the way the band sweeps across a
+  // curving path.
   //
   // The older notes, kept because they rule things out:
   //
