@@ -219,7 +219,7 @@ struct GroundModel
   // `step`, which is the honest place for something the image cannot separate.
   cv::Matx33d homography(
     double step, double turn, double pitch = 0.0, double roll = 0.0,
-    bool arc_hop = false) const
+    bool arc_hop = false, double slide = 0.0) const
   {
     const cv::Matx33d r_cb = rotation_base_from_camera.t();
     const double c = std::cos(turn);
@@ -290,7 +290,10 @@ struct GroundModel
       along = step * s / turn;
       across = step * 2.0 * half * half / turn;
     }
-    const cv::Vec3d hop(along, across, 0.0);
+    // A lateral translation the four-parameter family cannot describe. 0 in
+    // every path but the synthetic probe, which uses it to calibrate how much
+    // of an unmodelled sideways motion arrives as step.
+    const cv::Vec3d hop(along, across + slide, 0.0);
     const cv::Vec3d t =
       r_cb * (r_b.t() * (translation_base_from_camera - hop) -
       translation_base_from_camera);
@@ -1551,8 +1554,10 @@ private:
         const double truth = std::atof(synthetic);
         const char * spin = std::getenv("MONOSCALE_SYNTHETIC_TURN");
         const double truth_turn = spin != nullptr ? std::atof(spin) : 0.0;
+        const char * sideways = std::getenv("MONOSCALE_SYNTHETIC_SLIDE");
+        const double truth_slide = sideways != nullptr ? std::atof(sideways) : 0.0;
         const cv::Matx33d forward =
-          found->second.homography(truth, truth_turn, 0.0, 0.0, arc_hop_);
+          found->second.homography(truth, truth_turn, 0.0, 0.0, arc_hop_, truth_slide);
         cv::Mat mx(gray.rows, gray.cols, CV_32F);
         cv::Mat my(gray.rows, gray.cols, CV_32F);
         for (int y = 0; y < gray.rows; ++y) {

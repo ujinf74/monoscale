@@ -2860,6 +2860,20 @@ void Estimator::process_pair()
   //   `motion_blur_intensity: 0.0` with `shutter_speed: 200.0`, so the renderer
   //   takes an instant. A 1/200 s exposure at curve_s20's 0.147 rad/s would be
   //   0.7 mrad, 15% of the frame's turn, and none of it is rendered.
+  // - **An unmodelled lateral translation.** The family fixes `dy` from
+  //   `(step, turn)` -- zero with the chord, `s(1-cos psi)/psi` with the arc --
+  //   so a sideways motion it cannot describe has to arrive as something else.
+  //   Calibrated with the synthetic pair, injecting a slide the fit has no
+  //   parameter for: the front camera's step moves -0.111 and -0.117 mm per
+  //   millimetre of slide across 0, 0.5 and 2.0 mm, so the leak is about -0.11.
+  //   Making -0.36 mm of step would need **3.3 mm** of unmodelled slide per
+  //   frame, where what the chord model actually omits is `s psi / 2` = 0.15 mm.
+  //   Twenty-two times short, which is also why switching the arc on moves so
+  //   little.
+  // - **A mounting asymmetry.** Split by camera the term is common mode:
+  //   -0.381 and -0.342 mm on curve_s20's front and rear, -0.336 and -0.363 on
+  //   curve_s27_low. Nothing like the equal-and-opposite signature a pitch or a
+  //   lever error leaves.
   // - **Yaw leaking into step through the fit.** An absolute error set by the
   //   turn is what a yaw-to-step cross-term looks like, so the fit's covariance
   //   was asked: the step-yaw correlation runs 0.012 to 0.039 on the slaloms
