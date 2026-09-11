@@ -73,6 +73,20 @@ python3 $M/src/monoscale_evaluation/monoscale_evaluation/benchmark.py \
   str_v2=<out_v2> str_v3=<out_v3> ... curve_s20=<out_cs20>
 ```
 
+**CARLA는 `-quality-level=Low`로 띄운다.** 새 bag을 녹화할 때의 이야기이고,
+이것이 어긋나면 그 bag은 벤치 세트와 비교할 수 없다. 측정 2026-09-10: 같은
+직진 1.4 m/s를 `-quality-level=Epic -RenderOffScreen`으로 띄운 서버에서 찍으면
+광도 길이가 진값 대비 **−6.826%**, `-quality-level=Low`로 찍으면 **+0.111%**로
+09-02의 s15(+0.076%)와 같은 범위다. 62배 차이가 실행 인자 하나다.
+
+광도 정합은 노면 질감 위에서 동작하고 품질 레벨이 그 질감·그림자·후처리를
+바꾼다. `record_run.sh`는 태양 각도를 "비교 가능성 때문에" 고정하면서 렌더링
+품질은 서버를 띄우는 사람에게 맡겨 두었다.
+
+```bash
+cd /home/i/CARLA_0.9.16 && ./CarlaUE4.sh -quality-level=Low
+```
+
 **추출은 파라미터 파일 단독으로 한다.** 그것이 `odometry.launch.py`가 하는 것과
 같기 때문이고, 여기서 어긋나면 벤치가 배포되지 않는 설정을 재게 된다. 2026-09-08
 까지 추출 스크립트가 `road_step_esm:=true`를 얹고 있었고 yaml에는 없었다 —
