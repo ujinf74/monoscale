@@ -2730,223 +2730,99 @@ void Estimator::process_pair()
   if (!any_from_map) {
     ++diagnostics_.photometric_mapless;
   }
-  // The turn term, measured 2026-09-10 as a law rather than inferred from ATE.
+  // The turn term was the instrument. Closed 2026-09-11.
   //
-  // `monoscale_evaluation/photometric_bias.py` compares the road fit's step
-  // against CARLA truth with no estimator in between, and repeats to 0.012%.
-  // Binned by the turn the fit was handed, on the three slaloms:
+  // For weeks the road fit read short whenever the vehicle turned, and only
+  // then: an absolute error, a few tenths of a millimetre a frame, growing with
+  // the turn and common mode between the two mounts. Thirteen mechanisms were
+  // measured and excluded one at a time. It was none of them, because the error
+  // was never in the fit.
   //
-  //   drive   |turn| rad/frame   bias at turn 0   bias at plateau   difference
-  //   cs05        0.001261           +0.246%          +0.158%         -0.088%
-  //   cs10        0.002488           +0.227%          +0.036%         -0.191%
-  //   cs20        0.004881           +0.228%          -0.362%         -0.589%
+  // `photometric_bias.py` compared the fit's step against the displacement of
+  // CARLA's truth pose, and CARLA reports that pose at the actor origin, which
+  // is 1.399 m ahead of the rear axle that `base_link` names. Along a straight
+  // the offset cancels in a displacement and nothing shows. Through a turn the
+  // forward point swings wide and traces the longer path, and the excess over
+  // the reference point's is second order in the turn and inverse in the step:
   //
-  // Two things fall out. The zero-turn bias is +0.246, +0.227 and +0.228 --
-  // one number, shared by all three drives, which is the straight-line term.
-  // And what turning adds sits on top of it and is **even in turn**: fitting
-  // the signed yaw, an odd term explains R^2 = 0.000 of the per-hop scatter
-  // while an even one explains what there is. A slalom's turn averages to zero
-  // and this does not average away, which is the same statement.
+  //   excess = (L psi)^2 / 2s,   L = 1.399 m
   //
-  // Its size, in per cent with `t` the turn per frame in radians:
+  // That is the whole law, and it is geometry with nothing fitted. Against the
+  // four drives, predicted from L against measured:
   //
-  //   f(t) ~= -52 t - 14000 t^2
+  //   drive      psi/frame   step     predicted    measured
+  //   curve_s05   0.00126   61.8 mm   -0.0251 mm   -0.0510 mm
+  //   curve_s10   0.00249   61.8      -0.0982      -0.1246
+  //   curve_s20   0.00488   62.0      -0.3760      -0.3706
+  //   curve_s27   0.00453   43.5      -0.4618      -0.4581
   //
-  // Linear and quadratic parts comparable at cs20's rate, reproducing the
-  // three measurements to 13%. At cs20 it reaches -0.59%, which is larger than
-  // every other systematic in this stack put together.
+  // Moving the truth track back to `base_link` before differencing collapses
+  // it. The turn term, measured as plateau minus zero within each drive:
   //
-  // What it is not: the arc. `road_step_arc` supplies the `step * turn / 2`
-  // the chord model omits, and switching it on moves cs20's length bias from
-  // -0.229% to -0.260% -- the wrong way, and by a tenth of the effect. That
-  // term corrects the yaw the hop is read as, which is what it was measured to
-  // do; the length is a different defect. Nor is it the band: sweeping
-  // `road_step_roi_y0` across 0.50 to 0.80 moves cs20 by 0.02% while it moves
-  // straight120_v2 by 0.16%.
+  //   drive        before      after
+  //   curve_s05   -0.0510 mm  -0.0263 mm
+  //   curve_s10   -0.1246     -0.0326
+  //   curve_s20   -0.3706     -0.0143
+  //   curve_s27   -0.4581     -0.0105   (three recordings: -0.0105/-0.0108/-0.0269)
   //
-  // **It is curvature, not yaw rate.** Separated 2026-09-10 by recording a
-  // fourth slalom inside the fit's working range at a different speed, with the
-  // steer raised to hold the yaw rate: `curve_s27_low`, steer 0.265 at 1.4 m/s
-  // against curve_s20's 0.20 at 1.86.
+  // A factor of nine across psi becomes no trend at all, inside the 0.016 mm
+  // the three repeats of one condition spread. 96% of it at curve_s20 and 98%
+  // at curve_s27. Swept as a free offset the residual minimises at 1.399 m --
+  // the number the frame-tree audit read and `replay.cpp` already carried for
+  // the trajectory -- so the fit's step refers to `base_link`, as intended.
   //
-  //   drive         step    |turn| plateau   curvature    turn term
-  //   curve_s20    0.0620      0.004881     0.0787 rad/m    -0.589%
-  //   curve_s27    0.0435      0.004537     0.1042          -0.826%
+  // The straights are untouched by the correction, which is the control: an
+  // offset along the heading cannot change a straight-line displacement, and
+  // straight120_v2 and _v3 read -0.025% and -0.033% before and after, to the
+  // digit. Every conclusion this instrument reached about the straight-line
+  // term -- the 1.55 mm of height above -- stands unchanged.
   //
-  // 93% of the yaw rate and 132% of the curvature, and the term comes out 40%
-  // *larger*.
+  // Two things that were said here and are now withdrawn. That the term is
+  // "larger than every other systematic in this stack put together": it was an
+  // artefact of the comparison and the stack never carried it. And that on the
+  // slaloms "the fit aligns better and answers worse, so what it aligns is not
+  // the plane the geometry assumes": the fit aligned better and answered fine.
   //
-  // **Read as an absolute length it is simpler than that.** The two drives'
-  // steps differ by 30% and their turns by 7%, so multiplying the relative term
-  // back out:
+  // What the hunt established along the way, kept because each is an
+  // independent fact about the rig and none depended on the artefact:
   //
-  //   drive        psi/frame   step      relative    absolute
-  //   curve_s05    0.001261    0.0619 m   -0.088%    -0.0545 mm
-  //   curve_s10    0.002487    0.0619     -0.191     -0.1182
-  //   curve_s20    0.004881    0.0620     -0.589     -0.3652
-  //   curve_s27    0.004537    0.0435     -0.826     -0.3593
+  // - **The fit is unbiased given data in its family.** The synthetic pair --
+  //   the previous frame built by warping the current one through a known
+  //   homography -- returns -0.005% and +0.002% at curve_s20's plateau, with no
+  //   growth in the turn. The search, the ESM, the warp and its lattice are
+  //   exonerated.
+  // - **The tiles share their instant.** The assembler pairs by nearest stamp
+  //   within a tolerance rather than by equality, which would put a
+  //   yaw-rate-sized error into the image; measured, the skew is 0.0 ms with
+  //   nothing dropped.
+  // - **Nothing is rendered during the exposure.** `motion_blur_intensity: 0.0`
+  //   with `shutter_speed: 200.0`; the renderer takes an instant.
+  // - **The camera model is the synthesis.** `build_maps` sets
+  //   `theta = r / focal` and builds `(x sin(theta)/r, y sin(theta)/r, cos
+  //   theta)` -- equidistant by construction, and `hypot(1280,720)/2 /
+  //   (rad(160)/2) = 525.9` is the 1051.81 at 2560 the intrinsics carry.
+  // - **The resampling kernel does nothing measurable.** Bilinear against
+  //   bicubic, recorded as a matched pair on the same day with only the
+  //   assembler's `interpolation` changed: -0.4060 mm against -0.4030 and
+  //   -0.4033, a difference of 0.0029 +- 0.0065 mm. 0.4 sigma, and 2 sigma
+  //   bounds the kernel at 3% of the term. (Which the assembler's own note
+  //   predicts: remap is a point sampler, and the pre-filter is the lever the
+  //   kernel is not.)
+  // - **Body roll follows lateral acceleration and is not a length term.**
+  //   0.0044, 0.0086 and 0.0168 degrees against yaw rates of 2.17, 4.27 and
+  //   8.38 deg/s is a constant 0.00201 deg per deg/s; curve_s20 and
+  //   curve_s27_low differ by 35% in roll and 1.6% in the error.
+  // - **The road is flat and the height is steady.** Truth z spans 0.0 mm over
+  //   a hundred metres of slalom, and 0.02 mm within curve_s20 against the
+  //   5.5 mm a height mechanism would have needed.
+  // - **Yaw does not leak into step.** Step-yaw correlation 0.012 to 0.039
+  //   against step-pitch 0.93; the implied leak would need the whole turn as
+  //   yaw error, and the yaw reproduces truth at correlation +1.0000.
   //
-  // The last two sit 1.6% apart in absolute millimetres while their steps are
-  // 30% apart. **The error is a length the turn sets, and the distance
-  // travelled does not enter it.** Divided by the step that reads as curvature,
-  // which is why a set recorded at one speed could not tell the two apart.
-  //
-  // Fitted on the three bench slaloms and extrapolated:
-  //
-  //   relative, in turn per frame  -52t - 14000t^2    -0.524%   58% out
-  //   relative, in curvature       -2.4c - 64c^2      -0.949%   15% out
-  //   absolute, in turn per frame  -24.2psi - 10335psi^2   -0.322 mm   10% out
-  //
-  // against a measured -0.826% / -0.359 mm and an instrument floor of 0.012%.
-  // The first is 58% out and the other two are 10-15%, so what is excluded is
-  // the *relative* reading in turn per frame -- the form the three same-speed
-  // slaloms suggested -- and what survives is one quantity seen two ways.
-  //
-  // The absolute reading puts the term on `psi`, and at a fixed 30 Hz `psi` is
-  // the yaw rate, so this does **not** exclude the temporal mechanisms --
-  // rotation during the exposure, the fisheye's tiles disagreeing in time,
-  // anything that scales with how fast the scene turns. An earlier note here
-  // said it did, on the strength of the relative reading in curvature; that was
-  // the same measurement divided by the step and the exclusion did not follow
-  // from it.
-  //
-  // What it is has not been found, and these are eliminated:
-  //
-  // - **The chord-for-arc omission.** `road_step_arc` off leaves out the hop's
-  //   lateral half-step, `s^2 c / 2`, which against the step is `s c / 2` --
-  //   half the turn *per frame*, not the curvature. Wrong variable, and
-  //   switching the arc on measures curve_s20 from -0.229% to -0.260%.
-  // - **Where in the band.** Sweeping the far edge, `road_step_roi_y0`, from
-  //   0.50 to 0.80 moves curve_s20 by 0.02%. Sweeping the lateral extent moves
-  //   it by less than the deployed value is already worth: 0.25-0.75 gives
-  //   -0.229%, narrowing to 0.42-0.58 gives -0.363% and widening to 0.15-0.85
-  //   gives -0.266%. The term is spread evenly over the band rather than living
-  //   in a part of it.
-  // - **The fit noticing.** On the pair that separates the variable the fit
-  //   reports itself identically healthy: sigma_step 8.4e-5 against 7.5e-5,
-  //   score 0.945 against 0.949, step-pitch correlation 0.938 against 0.935,
-  //   tilt leak 0.214 against 0.191 -- while the turn term differs by 40%.
-  //   Nothing it computes about itself sees this.
-  // - **Road camber.** The slalom road's truth z spans 0.0 mm over a hundred
-  //   metres, so there is no crown to traverse.
-  // - **Body roll.** An absolute error set by the turn could be the camera
-  //   rolling on its lever as the body leans. The truth roll is real and
-  //   behaves: 0.0044, 0.0086 and 0.0168 degrees on the three bench slaloms
-  //   against yaw rates of 2.17, 4.27 and 8.38 deg/s, a constant 0.00201
-  //   deg per deg/s, and curve_s27_low's 0.0110 against 0.00141 is exactly its
-  //   lower lateral acceleration -- 1.30 m/s times 0.1360 rad/s against 1.86
-  //   times 0.1463, a ratio of 0.65 against the roll's 0.655. It is not the
-  //   mechanism: curve_s20 and curve_s27_low differ by **35% in roll** and 1.6%
-  //   in the error.
-  // - **The fit itself.** The synthetic pair -- the previous frame built by
-  //   warping the current one through a known homography, so the truth is exact
-  //   and inside the four-parameter family -- returns a step biased by +0.060%
-  //   and -0.086% at zero turn, +0.092% and +0.040% at 0.00244, and **-0.005%
-  //   and +0.002% at 0.00488**, which is curve_s20's plateau. The bias does not
-  //   grow with the turn at all. The search, the ESM, the warp and its lattice
-  //   are all exonerated: given data that matches the model family the fit
-  //   recovers the truth at every turn, so the term is in the data.
-  // - **The warp lattice.** Measured separately anyway: stride 4 to 1, which
-  //   removes the lattice interpolation entirely, moves curve_s20 from -0.229%
-  //   to -0.210%. Cubic against linear moves it 0.044%, which is the
-  //   straight-line term that fix was for.
-  // - **The fisheye's tiles disagreeing in time.** Each fisheye frame is
-  //   assembled from two rectilinear tiles paired by nearest stamp within a
-  //   tolerance rather than by equality, which would put a yaw-rate-sized error
-  //   straight into the image. The assembler reports the skew it actually
-  //   pairs at, and on both the bench slaloms and the new ones it is
-  //   **0.0 ms with nothing dropped**. The tiles share their instant.
-  // - **Rotation during the exposure.** The sensor kit sets
-  //   `motion_blur_intensity: 0.0` with `shutter_speed: 200.0`, so the renderer
-  //   takes an instant. A 1/200 s exposure at curve_s20's 0.147 rad/s would be
-  //   0.7 mrad, 15% of the frame's turn, and none of it is rendered.
-  // - **An unmodelled lateral translation.** The family fixes `dy` from
-  //   `(step, turn)` -- zero with the chord, `s(1-cos psi)/psi` with the arc --
-  //   so a sideways motion it cannot describe has to arrive as something else.
-  //   Calibrated with the synthetic pair, injecting a slide the fit has no
-  //   parameter for: the front camera's step moves -0.111 and -0.117 mm per
-  //   millimetre of slide across 0, 0.5 and 2.0 mm, so the leak is about -0.11.
-  //   Making -0.36 mm of step would need **3.3 mm** of unmodelled slide per
-  //   frame, where what the chord model actually omits is `s psi / 2` = 0.15 mm.
-  //   Twenty-two times short, which is also why switching the arc on moves so
-  //   little.
-  // - **A mounting asymmetry.** Split by camera the term is common mode:
-  //   -0.381 and -0.342 mm on curve_s20's front and rear, -0.336 and -0.363 on
-  //   curve_s27_low. Nothing like the equal-and-opposite signature a pitch or a
-  //   lever error leaves.
-  // - **Yaw leaking into step through the fit.** An absolute error set by the
-  //   turn is what a yaw-to-step cross-term looks like, so the fit's covariance
-  //   was asked: the step-yaw correlation runs 0.012 to 0.039 on the slaloms
-  //   against a step-pitch correlation of 0.93. The leak coefficient that
-  //   implies, `rho sigma_step / sigma_yaw`, is 0.074, so -0.36 mm of step
-  //   would need 4.9e-3 rad of yaw error -- the whole turn -- and the yaw
-  //   reproduces truth with correlation +1.0000. Three orders too small.
-  //
-  // - **A height change with the turn.** A height error is the loudest column
-  //   there is -- the Jacobian gives 10 mm of it as +1.111% of the front
-  //   camera's step -- so -0.614% would need 5.5 mm. curve_s20's truth z spans
-  //   0.02 mm. Two hundred and seventy-five times short.
-  // - **The camera model.** The fisheye is synthesised, so its projection can
-  //   be read rather than calibrated: `build_maps` takes each output pixel's
-  //   radius, sets `theta = r / focal`, and builds the ray
-  //   `(x sin(theta)/r, y sin(theta)/r, cos theta)`. That is equidistant by
-  //   construction, and `hypot(1280,720)/2 / (rad(160)/2) = 525.9` is the 1051.81
-  //   at 2560 the deployed intrinsics carry. Model and synthesis are the same
-  //   expression. (The synthetic pair cannot say this -- it builds and fits
-  //   through the same model, so a model error would cancel in it.)
-  //
-  // What is left is one candidate, and it is a property of the recording rather
-  // than of the estimator. The fisheye is assembled by resampling two
-  // rectilinear tiles through `cv2.remap` with **INTER_LINEAR**. Bilinear's
-  // transfer depends on the sub-pixel phase in x and y separately, so the
-  // attenuation it applies is anisotropic: content sliding radially through the
-  // frame, which is what a forward step does, is not filtered like content
-  // sliding sideways, which is what a turn adds. That is a sub-pixel effect and
-  // the term is 0.055 to 0.19 px.
-  //
-  // It cannot be tested from the recorded bags -- the resampling already
-  // happened when they were written. The assembler takes an `interpolation`
-  // parameter, defaulting to `linear`, so the test is one re-recording at
-  // `cubic` with everything else held, scored with
-  // `monoscale_evaluation/photometric_bias.py` against the same drive at
-  // `linear`.
-  //
-  // The older notes, kept because they rule things out:
-  //
-  // A turn term nobody has found yet, recorded so the next attempt does not
-  // start from zero.
-  //
-  // Against truth the photometric length carries a common bias that is small
-  // and positive on every drive that goes straight and -0.29% on the sharpest
-  // slalom. It is the largest single piece of the 0.481 percentage points the
-  // residual spans, against a 0.004 point noise floor.
-  //
-  // What it is not, each ruled out by a measurement that could have shown it:
-  //
-  //  - the model failing to represent an arc. Fitting the four-parameter model
-  //    to an exactly-computed arc flow, analytically and with no tracker, the
-  //    step comes back to 0.0003% -- a thousandth of what is seen.
-  //  - the arc not being an arc. Truth yaw rate changes by 0.00000 degrees
-  //    within a hop on every slalom: the curvature is constant, so there is no
-  //    clothoid term.
-  //  - the aligner. A synthetic pair warped by a *known* turn of 0.28 degrees
-  //    a hop reads 0.01-0.02%, twenty times smaller.
-  //  - the road. The slaloms share their road with str_8.0, which starts at
-  //    the same place on the same heading and turns 0.0 degrees; its bias is
-  //    +0.174% against curve_s20's -0.288%. Turning is the variable, not the
-  //    surface.
-  //  - off-plane content entering the region. Narrowing the band from
-  //    0.25-0.75 to 0.35-0.65 leaves it at -0.316%; an intrusion arrives at
-  //    the edges and would shrink.
-  //  - accumulation. Binned by total turn so far it is +0.216% over the first
-  //    3 degrees and -0.31% to -0.38% flat for the remaining 280. It switches
-  //    on when the vehicle starts turning and does not grow.
-  //
-  // What is known: on the slaloms the fit reports a *better* alignment than on
-  // the straights -- ZNCC 0.945 against 0.877, sigma_step 0.044 mm against
-  // 0.048, step-pitch correlation 0.935 against 0.966 -- while its answer is
-  // ten times further from truth. Aligning better and answering worse means
-  // what it aligns is not the plane the geometry assumes.
+  // The lesson is the cheap one and it is worth the space: an instrument that
+  // repeats to 0.012% is precise, and precision says nothing about where it is
+  // pointed. Three drives at one speed agreed with each other for weeks about a
+  // number that came from neither the estimator nor the road.
   last_photometric_distance_ = road_mean;
   last_fused_length_ = motion.has_value()
     ? std::hypot(motion->x, motion->y) : std::numeric_limits<double>::quiet_NaN();

@@ -36,9 +36,25 @@ import sys
 
 DEFAULT_FRONT_WEIGHT = 0.514
 
+# CARLA reports the truth pose at the actor origin, 1.399 m ahead of the rear
+# axle, and base_link is the rear axle. Along a straight that offset cancels in
+# a displacement, so it stayed invisible; through a turn the forward point
+# swings wide and traces the longer path, and the excess over the reference
+# point's is (L*psi)^2 / 2s -- second order in the turn and inversely in the
+# step. Left uncompensated it reads as a length bias that only appears when
+# turning: -0.371 mm at psi 0.00488 and a 62 mm step, which is 96% of the whole
+# turn term this instrument used to report. `replay.cpp` already carries the
+# same 1.399 for the trajectory; this is the same correction for the fit.
+TRUTH_REPORT_OFFSET_M = 1.399
 
-def truth_track(bag):
-    """Ground-truth positions out of a bag, as (stamps, xs, ys)."""
+
+def truth_track(bag, offset=TRUTH_REPORT_OFFSET_M):
+    """Ground-truth positions out of a bag, as (stamps, xs, ys).
+
+    Moved back along the heading to the point base_link names, so that a
+    displacement between two stamps is the reference point's and not the
+    actor origin's. Pass 0.0 to read the poses as CARLA reports them.
+    """
     import sqlite3
     from geometry_msgs.msg import PoseWithCovarianceStamped
     from rclpy.serialization import deserialize_message
@@ -52,8 +68,11 @@ def truth_track(bag):
             "select data from messages where topic_id=? order by timestamp", (topic,)):
         message = deserialize_message(bytes(blob), PoseWithCovarianceStamped)
         stamps.append(message.header.stamp.sec + 1e-9 * message.header.stamp.nanosec)
-        xs.append(message.pose.pose.position.x)
-        ys.append(message.pose.pose.position.y)
+        q = message.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        xs.append(message.pose.pose.position.x - offset * math.cos(yaw))
+        ys.append(message.pose.pose.position.y - offset * math.sin(yaw))
     return stamps, xs, ys
 
 
