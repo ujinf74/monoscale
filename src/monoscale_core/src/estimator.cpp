@@ -2847,9 +2847,13 @@ void Estimator::process_pair()
   // the *relative* reading in turn per frame -- the form the three same-speed
   // slaloms suggested -- and what survives is one quantity seen two ways.
   //
-  // A geometric term, then, and not a temporal one: exposure-time rotation, IMU
-  // interpolation lag and inter-frame blur are all ruled out with it, because
-  // every one of them lives in rad/s.
+  // The absolute reading puts the term on `psi`, and at a fixed 30 Hz `psi` is
+  // the yaw rate, so this does **not** exclude the temporal mechanisms --
+  // rotation during the exposure, the fisheye's tiles disagreeing in time,
+  // anything that scales with how fast the scene turns. An earlier note here
+  // said it did, on the strength of the relative reading in curvature; that was
+  // the same measurement divided by the step and the exclusion did not follow
+  // from it.
   //
   // What it is has not been found, and these are eliminated:
   //
@@ -2870,6 +2874,27 @@ void Estimator::process_pair()
   //   Nothing it computes about itself sees this.
   // - **Road camber.** The slalom road's truth z spans 0.0 mm over a hundred
   //   metres, so there is no crown to traverse.
+  // - **Body roll.** An absolute error set by the turn could be the camera
+  //   rolling on its lever as the body leans. The truth roll is real and
+  //   behaves: 0.0044, 0.0086 and 0.0168 degrees on the three bench slaloms
+  //   against yaw rates of 2.17, 4.27 and 8.38 deg/s, a constant 0.00201
+  //   deg per deg/s, and curve_s27_low's 0.0110 against 0.00141 is exactly its
+  //   lower lateral acceleration -- 1.30 m/s times 0.1360 rad/s against 1.86
+  //   times 0.1463, a ratio of 0.65 against the roll's 0.655. It is not the
+  //   mechanism: curve_s20 and curve_s27_low differ by **35% in roll** and 1.6%
+  //   in the error.
+  // - **The fit itself.** The synthetic pair -- the previous frame built by
+  //   warping the current one through a known homography, so the truth is exact
+  //   and inside the four-parameter family -- returns a step biased by +0.060%
+  //   and -0.086% at zero turn, +0.092% and +0.040% at 0.00244, and **-0.005%
+  //   and +0.002% at 0.00488**, which is curve_s20's plateau. The bias does not
+  //   grow with the turn at all. The search, the ESM, the warp and its lattice
+  //   are all exonerated: given data that matches the model family the fit
+  //   recovers the truth at every turn, so the term is in the data.
+  // - **The warp lattice.** Measured separately anyway: stride 4 to 1, which
+  //   removes the lattice interpolation entirely, moves curve_s20 from -0.229%
+  //   to -0.210%. Cubic against linear moves it 0.044%, which is the
+  //   straight-line term that fix was for.
   // - **Yaw leaking into step through the fit.** An absolute error set by the
   //   turn is what a yaw-to-step cross-term looks like, so the fit's covariance
   //   was asked: the step-yaw correlation runs 0.012 to 0.039 on the slaloms
