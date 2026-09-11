@@ -197,14 +197,14 @@
     # the accelerometer is held at noise 1.55, i.e. barely consulted, so the
     # correction buys less than the gyro differentiation it costs.
     #
-    # Set it to [1.35, 0.0, 0.3772] on a rig whose accelerometer is actually
+    # Set it to [1.35, 0.0, 0.37635] on a rig whose accelerometer is actually
     # trusted. The physics does not stop being right here.
     #
     # 0.3772, not the 0.34 the sensor kit lists: that file measures z from the
-    # CARLA actor origin, which sits actor_origin_height_m = 0.0372 off the
+    # CARLA actor origin, which sits actor_origin_height_m = 0.03635 off the
     # road, while base_link here is on the road -- which is exactly why the
-    # camera heights below read 0.89 and 1.26 rather than the kit's 0.8528 and
-    # 1.2228. The cameras got that correction and the arm did not. It barely
+    # camera heights below read 0.88915 and 1.25915 rather than the kit's 0.8528
+    # and 1.2228. The cameras got that correction and the arm did not. It barely
     # matters for a road vehicle: the rotation is nearly all yaw, and both
     # alpha x r and omega x (omega x r) drop the z component of r under a
     # z-axis rotation, so this is correctness rather than accuracy.
@@ -361,11 +361,22 @@
       # sensor_kit_loader, so neither file carries the offset.
       #
       # Height above the road, which is what the ground plane solve scales
-      # with -- not the offset the sensor is attached at, which is 0.0372 less
-      # because CARLA holds the actor origin off the ground. The kit now picks
-      # its offset so this lands on the IONIQ's own 0.89 m; it used to land on
-      # 0.9272, 4.2% high. test_sensor_kit_consistency holds the two together.
-      translation_base_from_camera: [3.694, 0.0, 0.89]
+      # with -- not the offset the sensor is attached at, which is 0.03635 less
+      # because CARLA holds the actor origin off the ground.
+      # test_sensor_kit_consistency holds this and the kit together.
+      #
+      # 0.88915, not the 0.89 this carried until 2026-09-11. The kit's
+      # `actor_origin_height_m` was 0.0372 against a truth-pose measurement of
+      # 0.036354, and its own note said so and left it: the millimetre sat in a
+      # joint optimum with `ground_plane_offset_m`. That optimum was measured
+      # with `photometric_scale` absorbing length and before the ESM's pitch
+      # freedom was known to leak into the step.
+      #
+      # Predicted before it was measured, from delta/h alone: the photometric
+      # length bias falls 0.275% -> 0.180% here and 0.231% -> 0.164% at the
+      # rear. Measured +0.179% and +0.164%. Bench nine ATE/거리 0.0523% ->
+      # 0.0257%, held-out 0.1903% -> 0.1883%, better on every metric of both.
+      translation_base_from_camera: [3.694, 0.0, 0.88915]
     rear:
       horizontal_fov_deg: 139.470
       k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
@@ -375,7 +386,7 @@
       calibration_height: 1440
       # CARLA sensor kit pose pitch -30 deg, yaw 180 deg.
       rotation_base_from_camera: [0.0, 0.5, -0.8660254, 1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
-      translation_base_from_camera: [-0.82, 0.0, 1.26]
+      translation_base_from_camera: [-0.82, 0.0, 1.25915]
 
     # Run the tracker at 640x360 while keeping the 960x540 calibration scale.
     # 2560 -- the fisheye's own size, with no downsampling at all. The fisheye carries 18.36 px per
