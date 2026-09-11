@@ -3602,9 +3602,35 @@ void Estimator::anchor_polar(std::vector<std::array<double, 7>> & out) const
 // -0.11%, -0.30% and -0.48% -- so the gain is in decorrelating, not in
 // precision. And they are sparse where the vehicle is slow: 43 of them on 900
 // poses of straight120_v2 against 308 on 600 poses of straight_s8. Density,
-// not accuracy, is what a relative-constraint core would have to find, and
-// loosening the admission that produces them is what the held-out drives
-// refused this morning.
+// not accuracy, is what a relative-constraint core would have to find.
+//
+// It can be found, and the instrument that says so reads density and accuracy
+// together, which ATE cannot. Sweeping `anchor_link_radius_m`, with n and the
+// error quantiles measured against truth on the same runs:
+//
+//   radius   v2 n   v2 p10..p90   >2%   s15 n   s8 n   cs20 n   cs20 >2%
+//    0.02      43   -0.44..+0.51    2%     70    308       61        5%
+//    0.04     106   -0.70..+0.64    4%    157    760      162       10%
+//    0.08     160   -1.17..+1.10    6%    219   1202      264       14%
+//
+// The medians barely move -- +0.04, +0.08, +0.11 on v2 -- so what a wider
+// radius admits is not systematically wrong, only noisier. At 0.04 that is
+// **2.5x the density for 1.4x the spread**, and sqrt(2.5) beats 1.4.
+//
+// The same instrument separates two things that had been conflated.
+// `anchor_link_cross_source_only: false` -- what the held-out park drives
+// refused -- changes the revisit count and its quantiles by nothing at all:
+// 43 to 41, 70 to 70, 308 to 324, spreads identical. It does not admit
+// constraints. It lets a source rebind its own anchor, fusing two physical
+// points into one and corrupting the map's *positions*, which is what held-out
+// saw. So the radius is the density lever and that refutation does not reach
+// it.
+//
+// What is missing is a consumer. Widening the radius moves the deployed score
+// by nothing -- 0.0226%, 0.0228%, 0.0226%, 0.0230% at 0.02, 0.03, 0.04 and
+// 0.06, inside the 1.05x repeat spread -- because `pose_graph_window` is 0 and
+// nothing reads a revisit. The constraints are measurements, the density is
+// available at a defensible cost, and the estimator can spend neither.
 std::vector<Estimator::RevisitAudit> Estimator::revisit_audit() const
 {
   std::vector<RevisitAudit> out;
