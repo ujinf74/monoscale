@@ -263,6 +263,17 @@ struct GroundModel
     // So this stays as it is, and the warning is for whoever measures a
     // sideslip here next: check it against what the cameras see before
     // modelling it.
+    double along = step;
+    double across = 0.0;
+    if (arc_hop && std::abs(turn) > 1e-9) {
+      // Haversine rather than `(1 - cos turn) / turn`: near zero that
+      // difference is two nearly equal doubles and loses about twelve digits,
+      // and this fit is measurably sensitive to perturbations at 1e-13.
+      // `2 sin^2(turn/2) / turn` is the same number with no cancellation.
+      const double half = std::sin(0.5 * turn);
+      along = step * s / turn;
+      across = step * 2.0 * half * half / turn;
+    }
     const cv::Vec3d hop(along, across, 0.0);
     const cv::Vec3d t =
       r_cb * (r_b.t() * (translation_base_from_camera - hop) -
