@@ -442,51 +442,49 @@ struct EstimatorSettings
   // carries no map and cannot replace that. What it does carry is scale, at
   // 0.011-0.077% per hop against the corner path's 1.06-1.62% -- so this
   // splits the two along the axis where each is better.
-  // A ratio applied to the road region's own step, and to nothing else.
+  // `photometric_scale` was here: a constant multiplier on the road region's
+  // own step, and the last fitted multiplier in this stack. Removed 2026-09-11.
   //
-  // Measured against truth on three straights the photometric step reads long
-  // by +0.262 / +0.271 / +0.325 per cent, front, and +0.237 / +0.255 / +0.289
-  // rear -- a ratio of 1.10 between the cameras, which is a common *fraction*
-  // rather than a common length (an offset would give 1.42, a body pitch
-  // -1.00). Correcting it in the projection was tried and does not work: the
-  // map path reports `placed - pose_`, a correction against a fused pose that
-  // is the mean of the two cameras, so any change common to both arrives at
-  // each of them with the opposite sign and the front/rear split widens
-  // instead of closing. Applied here the step is corrected where it is
-  // measured and the map is left alone.
-  double photometric_scale = 1.0;
-  // What 0.9988 is actually doing, measured 2026-09-10 against truth with the
-  // estimator taken out of the loop (`monoscale_evaluation/photometric_bias.py`,
-  // which repeats to 0.012%):
+  // A constant scale is physical in exactly one case -- a camera height that is
+  // wrong by a fixed amount makes every step wrong by a fixed fraction. That
+  // form is refuted. Measured against truth with the estimator taken out
+  // (`photometric_bias.py`, corrected for the truth pose's report point), the
+  // photometric bias splits by **what is painted on the road**:
   //
-  //   drive            condition        photometric bias   band-sensitive
-  //   straight120_v2   2 m/s straight        -0.025%       yes, 0.16% swing
-  //   straight110_s15  1.5 m/s straight      +0.076%
-  //   straight110_s4   4 m/s straight        +0.096%
-  //   straight_s8      8 m/s straight        +0.167%       no, 0.04%
-  //   curve_s05        slalom                +0.167%
-  //   curve_s20        slalom, harder        -0.229%       no, 0.02%
+  //   surface                              drives                bias
+  //   dark asphalt, lane and bay markings   v2 v3 v4 s15 s4     -0.03 .. +0.10%
+  //   plain light concrete, no markings     s8 cs05 cs10 cs20   +0.17 .. +0.20%
   //
-  // Two things follow, and neither was what this constant looked like.
+  // 0.22 points apart at the same speed on the same map, uniform along each
+  // drive, and the two surfaces are two stretches of Town01 the bench happens
+  // to sample 5:4. A height error cannot know what is painted on the road, so
+  // the bias is not a constant and a constant cannot correct it. Worse, the
+  // multiplier's optimum is set by that 5:4 mix: add or drop a drive and it
+  // moves. A parameter whose optimum is a property of the benchmark's
+  // composition rather than of the rig is not a parameter of the rig.
   //
-  // The bias is not constant. It spans 0.4 per cent across the drives, and the
-  // instrument's own spread over three recordings of one condition is 0.012 --
-  // so every one of those differences is real. A single multiplier cannot be
-  // correcting it.
+  // The argument that used to stand here was that at 1.0 the trajectory
+  // over-runs truth by +0.069 to +0.120 per cent on *every* drive, which no
+  // single surface could explain. It is true of the bench nine and false of the
+  // system: the two held-out park drives read **-0.4429%** and **+0.2469%**,
+  // nowhere near that band, and 0.9988 makes the first worse and leaves the
+  // second untouched to four figures. It was written without running held-out.
   //
-  // And 0.9988 is not that number anyway. What it nulls is the *trajectory's*
-  // length: at 1.0 the estimate over-runs truth by +0.069 to +0.120 per cent on
-  // every drive, and at 0.9988 that falls to -0.012 to +0.029. It is a
-  // whole-path scale correction entering through the only multiplier available,
-  // on the 57-92 per cent of frames where the photometric step is applied at
-  // all. Setting it to 1.0 without finding what over-runs is not a repair.
+  // What removing it costs, and the asymmetry is the whole argument:
   //
-  // `curve_s20` is the drive nothing has explained, and it is now measured
-  // rather than inferred: it is the only one whose length bias is *negative*,
-  // while `curve_s05` -- the same manoeuvre, gentler -- is +0.167. Turning
-  // flips the sign. It is not the region of road being looked at: sweeping
-  // `road_step_roi_y0` from 0.50 to 0.80 moves it by 0.02 per cent while it
-  // moves straight120_v2 by 0.16.
+  //   set                 ATE/거리              끝오차/거리
+  //   bench 9 (tuned)     0.0224% -> 0.0523%    0.0281% -> 0.0919%   +134%
+  //   held-out park 2     0.1875% -> 0.1903%    0.1750% -> 0.1891%   +1.5%
+  //
+  // Something that corrected a property of the rig would pay on both. It pays
+  // ninety times more on the set it was fitted to.
+  //
+  // The bias it was hiding is real and is now visible: +0.094% on the bench
+  // mean, split by surface as above. Naming it is the open problem; the likely
+  // handle is that markings concentrate the fit's information at whatever range
+  // they occupy -- and a longitudinal line constrains no longitudinal motion at
+  // all -- so the effective measurement range differs by surface, which a
+  // residual plane error then turns into a length.
   double photometric_step_gain = 0.0;
   // Frames whose road did not land on itself this well are not used. The
   // alignment reads 0.93 to 0.99 when it has the surface; the tail events that

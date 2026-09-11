@@ -311,8 +311,9 @@ struct GroundModel
     // centres 3.1 mm along their own viewing axes, which is 1.55 mm of height
     // since both look down at 30 degrees, takes the straight-line length bias
     // to zero at 1.4, 1.9 and 7.5 m/s together -- from +0.140, +0.162 and
-    // +0.148 per cent to within the instrument's 0.012% floor -- and with it
-    // `photometric_scale` stops wanting 0.9988 and wants 1.0. The sensitivity
+    // +0.148 per cent to within the instrument's 0.012% floor. (It was also
+    // what made the removed `photometric_scale` want 1.0; that multiplier is
+    // gone as of 2026-09-11 regardless.) The sensitivity
     // measures 0.0483% per millimetre of axis offset against the 0.048 a
     // height change of half that predicts, so the mechanism is confirmed and
     // not merely fitted.

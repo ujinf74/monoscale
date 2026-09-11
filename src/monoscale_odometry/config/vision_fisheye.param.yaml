@@ -1245,24 +1245,24 @@
     # with this block   0.0256  (worst 0.1034)
     # ------------------------------------------------------------------
 
-    # The scale the photometric step is accumulated at, and the one fitted
-    # multiplier left in this file.
+    # `photometric_scale` was here and is gone (2026-09-11). It was the one
+    # fitted multiplier left in this file, kept -- as the note said in as many
+    # words -- "because removing it costs, not because it is understood".
     #
-    # It is kept because removing it costs, not because it is understood: 1.0
-    # takes ATE/거리 from 0.0254% to 0.0547% and the final error from 0.0290%
-    # to 0.0971%, so it is correcting something real that has not been named.
-    # Every other free multiplier here was measured against unity and either
-    # made no difference or lost -- `road_point_weight`, `align_ambiguity_ratio`,
-    # `camera_disagreement_weight` were identical to four figures,
-    # `ground_common_scale` was a net loss, and `anchor_information_power`
-    # replaced a derived law with a fitted exponent. They are gone.
+    # What it was hiding: the photometric length bias is a property of the road
+    # surface. Measured against truth with the estimator out of the loop, the
+    # bench's nine drives sit on two stretches of Town01 -- dark asphalt with
+    # bay and lane markings (v2 v3 v4 s15 s4) reading -0.03 to +0.10%, and plain
+    # light concrete with no markings at all (s8 cs05 cs10 cs20) reading +0.17
+    # to +0.20%. 0.22 points apart at the same speed, uniform along each drive.
+    # A constant scale is physical only as a camera-height error, and a height
+    # error cannot know what is painted on the road.
     #
-    # Re-tuned for the corrected warp. 0.99867 was chosen by a 13k sweep against
-    # a front/rear bias of -0.379%/+0.250% that the cubic map interpolation
-    # removed; the bias is now +0.147%/-0.200% and the optimum moved with it, to
-    # 0.9988. That the optimum moved when the measurement's bias moved is the
-    # direct evidence that this constant was covering the warp.
-    photometric_scale: 0.9988
+    # So the multiplier's optimum was a property of the bench's 5:4 surface mix,
+    # not of the rig. Removing it costs 134% of ATE on the set it was fitted to
+    # and 1.5% on the two held-out park drives -- which are a third surface
+    # again, and where 0.9988 made one worse and left the other unchanged to
+    # four figures. The full account is in estimator.hpp where it was declared.
     photometric_min_score: 0.0
 
     # Attitude from the anchors' displacement on the projection surface rather

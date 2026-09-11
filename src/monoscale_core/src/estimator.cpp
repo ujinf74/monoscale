@@ -524,7 +524,8 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // front, 0.040%/mm rear, 0.048 weighted) to better than one per cent.
   //
   // So the number this path uses and the number the other path needs disagree
-  // by 4 mm, and `photometric_scale` has been absorbing the difference.
+  // by 4 mm. `photometric_scale` was absorbing the difference; it was removed
+  // 2026-09-11 and the disagreement is now unmasked and unfixed.
   //
   // Worse: **this path does not have one number.** Measured 2026-09-10 with
   // the photometric step switched off, so the trajectory's length comes from
@@ -740,9 +741,9 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // stop asking this path for a length.
   //
   // Held: with the photometric step on, it supplies the length on 57-92% of
-  // frames and this path supplies the rest, so what `photometric_scale` fits
-  // is that mixture. That is why one constant appeared to work and why it
-  // moves when the map's share moves.
+  // frames and this path supplies the rest, so the removed `photometric_scale`
+  // was fitting that mixture. That is why one constant appeared to work and
+  // why it moved when the map's share moved.
   if (settings.ground_plane_offset_m != 0.0) {
     for (auto & camera : cameras_) {
       const double height = camera->model.translation_base_from_camera.z();
@@ -832,8 +833,7 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
     (settings_.photometric_max_spread <= 0.0 ||
     incoming.photometric_spread <= settings_.photometric_max_spread))
   {
-    camera.photometric_since_solve +=
-      settings_.photometric_scale * incoming.photometric_step;
+    camera.photometric_since_solve += incoming.photometric_step;
     camera.photometric_valid = true;
     if (std::isfinite(incoming.esm_tilt_leak)) {
       camera.photometric_leak_sum += incoming.esm_tilt_leak;
@@ -2558,9 +2558,10 @@ void Estimator::process_pair()
   //
   // The weight that would zero the bias is 0.28 to 0.94 and different on every
   // drive, so there is no single weight that removes it. `photometric_scale`
-  // is the constant that was fitted to what is left: -0.133% against a
-  // per-drive spread of 0.5 percentage points, four times the correction. It
-  // is right on the set and wrong on each drive in it.
+  // was the constant fitted to what is left, and it is gone (2026-09-11): it
+  // was right on the set and wrong on each drive in it, and the spread it was
+  // averaging turned out to be the road surface -- see estimator.hpp where it
+  // used to be declared.
   //
   // Two cameras give `w` two degrees of freedom. `w'1 = 1` spends one. The
   // second is spent by `w'g = 0`, where `g` is the direction a nuisance common
