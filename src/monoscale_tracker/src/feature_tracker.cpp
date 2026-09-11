@@ -1652,7 +1652,8 @@ private:
                 std::fprintf(
                   esm_sigma_file_,
                   "stamp,camera,step,search,sigma_step,sigma_yaw,sigma_pitch,"
-                  "sigma_roll,corr_step_pitch,score,reach,tilt_leak,esm_yaw,turn_in\n");
+                  "sigma_roll,corr_step_pitch,corr_step_yaw,score,reach,tilt_leak,"
+                  "esm_yaw,turn_in\n");
               }
             }
             if (esm_sigma_file_ != nullptr && state.road_esm.covariance_ok) {
@@ -1661,13 +1662,16 @@ private:
                   return v > 0.0 ? std::sqrt(v) : std::numeric_limits<double>::quiet_NaN();
                 };
               const double sp = root(c[0]) * root(c[7]);
+              // Step against yaw: the pair the turn term would leak through.
+              const double sy = root(c[0]) * root(c[4]);
               std::fprintf(
                 esm_sigma_file_,
-                "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.5f,%.4f,%.6f,"
+                "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.4f,%.5f,%.4f,%.6f,"
                 "%.9f,%.9f\n",
                 stamp, name.c_str(), state.road_esm.step, found * span, root(c[0]),
                 root(c[4]), root(c[7]), root(c[9]),
                 sp > 0.0 ? c[2] / sp : std::numeric_limits<double>::quiet_NaN(),
+                sy > 0.0 ? c[1] / sy : std::numeric_limits<double>::quiet_NaN(),
                 state.road_esm.score, reach,
                 state.road_esm.tilt_leak_ok ? state.road_esm.tilt_leak
                 : std::numeric_limits<double>::quiet_NaN(),

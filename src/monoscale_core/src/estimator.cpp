@@ -2819,14 +2819,33 @@ void Estimator::process_pair()
   //   curve_s27    0.0435      0.004537     0.1042          -0.826%
   //
   // 93% of the yaw rate and 132% of the curvature, and the term comes out 40%
-  // *larger*. Fitted on the three bench slaloms and extrapolated:
+  // *larger*.
   //
-  //   law in turn per frame, -52t - 14000t^2      predicts -0.524%   58% out
-  //   law in curvature,      -3.2c - 54c^2        predicts -0.925%   11% out
+  // **Read as an absolute length it is simpler than that.** The two drives'
+  // steps differ by 30% and their turns by 7%, so multiplying the relative term
+  // back out:
   //
-  // against a measured -0.826% and an instrument floor of 0.012%. The two
-  // hypotheses differ by 0.4 percentage points here, thirty times the floor, so
-  // this is not a close call.
+  //   drive        psi/frame   step      relative    absolute
+  //   curve_s05    0.001261    0.0619 m   -0.088%    -0.0545 mm
+  //   curve_s10    0.002487    0.0619     -0.191     -0.1182
+  //   curve_s20    0.004881    0.0620     -0.589     -0.3652
+  //   curve_s27    0.004537    0.0435     -0.826     -0.3593
+  //
+  // The last two sit 1.6% apart in absolute millimetres while their steps are
+  // 30% apart. **The error is a length the turn sets, and the distance
+  // travelled does not enter it.** Divided by the step that reads as curvature,
+  // which is why a set recorded at one speed could not tell the two apart.
+  //
+  // Fitted on the three bench slaloms and extrapolated:
+  //
+  //   relative, in turn per frame  -52t - 14000t^2    -0.524%   58% out
+  //   relative, in curvature       -2.4c - 64c^2      -0.949%   15% out
+  //   absolute, in turn per frame  -24.2psi - 10335psi^2   -0.322 mm   10% out
+  //
+  // against a measured -0.826% / -0.359 mm and an instrument floor of 0.012%.
+  // The first is 58% out and the other two are 10-15%, so what is excluded is
+  // the *relative* reading in turn per frame -- the form the three same-speed
+  // slaloms suggested -- and what survives is one quantity seen two ways.
   //
   // A geometric term, then, and not a temporal one: exposure-time rotation, IMU
   // interpolation lag and inter-frame blur are all ruled out with it, because
@@ -2851,6 +2870,13 @@ void Estimator::process_pair()
   //   Nothing it computes about itself sees this.
   // - **Road camber.** The slalom road's truth z spans 0.0 mm over a hundred
   //   metres, so there is no crown to traverse.
+  // - **Yaw leaking into step through the fit.** An absolute error set by the
+  //   turn is what a yaw-to-step cross-term looks like, so the fit's covariance
+  //   was asked: the step-yaw correlation runs 0.012 to 0.039 on the slaloms
+  //   against a step-pitch correlation of 0.93. The leak coefficient that
+  //   implies, `rho sigma_step / sigma_yaw`, is 0.074, so -0.36 mm of step
+  //   would need 4.9e-3 rad of yaw error -- the whole turn -- and the yaw
+  //   reproduces truth with correlation +1.0000. Three orders too small.
   //
   // What is left is the surface under the patch on a curving path, uniform
   // across the band, invisible to the fit, and proportional to how sharply the
