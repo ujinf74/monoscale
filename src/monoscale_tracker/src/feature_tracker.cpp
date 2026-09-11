@@ -263,6 +263,49 @@ struct GroundModel
     // So this stays as it is, and the warning is for whoever measures a
     // sideslip here next: check it against what the cameras see before
     // modelling it.
+    //
+    // One thing the fit will not do is carry a large step and a large turn at
+    // once. Recorded 2026-09-10 to separate the turn term's variable -- the
+    // same slalom steer at 3.7 m/s instead of 1.9, so the yaw rate matches
+    // curve_s10 and the curvature halves:
+    //
+    //   drive                    step     |turn|    score   sigma_step
+    //   straight110_s4  3.7 m/s  0.124    0         0.862   1.06e-4
+    //   curve_s10       1.9      0.062    0.00249   0.949   7.84e-5
+    //   curve_s05_v4    3.7      0.123    0.00235   0.832   2.11e-3
+    //
+    // Twenty times worse than the straight drive at the same step and
+    // twenty-seven times worse than the slalom at the same turn, with a median
+    // length bias of -2.0% against truth and a tenth percentile of -53%.
+    // Neither speed nor turning breaks the fit; both together do, and the
+    // failure is flat across the turn's rate of change, so it is not the
+    // transitions. The patch has to be matched across a translation of a tenth
+    // of the band's depth *and* a rotation, and the overlap that leaves is not
+    // enough.
+    //
+    // Going slower instead fails the other way, and between them the two
+    // failures fence the fit's working range. The same steer at 1.0 m/s:
+    //
+    //   drive                    step     |turn|    score   sigma_step  /step
+    //   straight110_s15 1.4 m/s  0.046    0         0.879   9.12e-5     0.20%
+    //   curve_s05       1.9      0.062    0.00126   0.945   7.89e-5     0.13%
+    //   curve_s10       1.9      0.062    0.00249   0.949   7.84e-5     0.13%
+    //   curve_s10_v1    0.8      0.030    0.00127   0.947   6.98e-4     2.33%
+    //   curve_s05_v4    3.7      0.123    0.00235   0.832   2.11e-3     1.71%
+    //
+    // The slow drive's **score is as good as any** -- 0.947 -- so the alignment
+    // still finds the road. What it loses is sharpness: at a 30 mm step the
+    // fit's own sigma is 2.3% of what it is measuring, and the length bias
+    // against truth comes out -7.7%. Too little motion leaves too little to
+    // localise the shift against; too much, with a turn, leaves too little
+    // overlap to match across.
+    //
+    // So the photometric length works between roughly 45 and 70 mm of step when
+    // the vehicle is turning -- 1.4 to 2 m/s at 30 Hz -- and out to 250 mm when
+    // it is straight. Every bench drive sits inside that. It is a real
+    // constraint on the method and not an artefact of these recordings: a
+    // vehicle that slows to walking pace through a turn leaves the range where
+    // this measurement is worth anything.
     double along = step;
     double across = 0.0;
     if (arc_hop && std::abs(turn) > 1e-9) {
