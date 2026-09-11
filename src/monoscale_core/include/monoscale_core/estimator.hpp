@@ -510,6 +510,18 @@ struct EstimatorSettings
   // The two-frame solve *is* a displacement, so a measured distance belongs
   // there and the map correction is left alone.
   bool photometric_on_pairs = false;
+  // Build the hop from the gyro's turn and the road's length instead of
+  // scaling the pair solve's direction, with the kinematic sideslip in. Only
+  // where the map is silent, which is where the length already replaces the
+  // fused one outright.
+  bool hop_from_turn = false;
+  // Distance from the yaw pivot to the point whose course the hop follows, in
+  // metres. The truth sideslip puts it at `beta v / omega` = 1.32 and the
+  // open-loop hop error is minimised at 1.36 -- two routes, one number -- but
+  // **0.0 is the default** because the length and the turn reaching the hop
+  // span different intervals, which makes the term wrong by that ratio. See
+  // where it is used.
+  double sideslip_lever_m = 0.0;
   // Give the map alignment the road's distance as a prior and a gate centre,
   // instead of overwriting what it returns.
   //
@@ -914,6 +926,7 @@ struct Diagnostics
   // What the road's length did to the fused hop, 1 for nothing.
   double photometric_ratio = 1.0;
   int64_t photometric_uses = 0;
+  int64_t hop_from_turn_uses = 0;
   int64_t photometric_rejected = 0;
   int64_t photometric_chances = 0;
   int64_t photometric_mapless = 0;
