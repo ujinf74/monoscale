@@ -60,6 +60,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_sensor_kit_consistency
     test/test_sensor_kit_consistency.py)
+  ament_add_pytest_test(test_sim_copy_matches_live
+    test/test_sim_copy_matches_live.py)
 endif()
 
 ament_package()
