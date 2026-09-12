@@ -686,6 +686,35 @@
     # trade a general-purpose stack should take.
     solve_max_distance_m: 5.8
     anchor_max_range_m: 5.7
+    # Widening these was tried 2026-09-12 and **refused by held-out**. Recorded
+    # so the edge is not chased again.
+    #
+    # `anchor_max_range_m` sits on an edge: raising it alone improves the bench
+    # until it saturates, and 8.5 and 10.0 come back bit identical because
+    # `ground_max_distance_m` 8.0 bounds where an anchor can exist at all. They
+    # are one knob, and moving the band alone does nothing -- bit identical to
+    # the deployed pair, because the anchor range binds first.
+    #
+    # Moved together, on the bench nine:
+    #
+    #   range/band   ATE/거리          끝오차/거리        walk
+    #   5.7 / 8.0    0.0237 / 0.0391   0.0326 / 0.0627   1.10 / 2.57
+    #   9.0          0.0221 / 0.0371   0.0357 / 0.0592   1.30 / 3.35
+    #   10.0         0.0211 / 0.0340   0.0312 / 0.0518   1.31 / 3.27
+    #   11.0         0.0237 / 0.0315   0.0335 / 0.0458   1.18 / 2.70
+    #
+    # 10.0 is -11% on the mean and -13% on the worst drive, and it raises walk
+    # 19% against the 10% the acceptance rule allows. On the two held-out park
+    # drives it is **+7.5% on ATE and +12.2% on the final error**, and no value
+    # from 9 to 12 improves that set on every metric: 9.0 takes its final error
+    # -15.6% while raising its worst ATE 8.0%, 11.0 takes its worst ATE -5.8%
+    # while raising its final error 21.6%.
+    #
+    # So the edge is real and what lies past it belongs to the bench. Further
+    # ground is more points and a longer lever for the rotation, and it is also
+    # range-squared noise on every one of them; the trade lands differently on a
+    # 111 m straight than on a 30 m parking manoeuvre, and this set has 5 of the
+    # former and 2 of the latter.
     # Both frames of a hop used to be projected with the *current* body tilt,
     # so the earlier frame carried the whole pitch change of the hop. The
     # ray-plane intersection moves by (R^2+h^2)/h per radian -- about 8 m/rad
