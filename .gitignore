@@ -24,6 +24,24 @@ tools/
 # src/monoscale_carla; this is the rig that drives them.
 sim/
 
+# Except the conditions the bags were recorded under, which are not scaffolding.
+# `sensor_kit_calibration.yaml` is where vision_fisheye.param.yaml's mount
+# heights and rotations come from -- when that file moved a millimetre on
+# 2026-09-11 the odometry's extrinsics had to move with it, and they cannot move
+# in one commit if half the pair is untracked. The sensor mapping is the kit the
+# bench recorded with, and the four scripts are the recipe that made the bags.
+# `test_sim_copy_matches_live.py` holds these against the live tree.
+!sim/
+!sim/README.md
+!sim/*.sh
+!sim/*.py
+!sim/ioniq_carla_bridge/
+!sim/ioniq_carla_bridge/config/
+!sim/ioniq_carla_bridge/config/*.yaml
+sim/logs/
+sim/**/*.bak
+sim/**/*.before-*
+
 # Recordings and grids.
 *.db3
 *.npz

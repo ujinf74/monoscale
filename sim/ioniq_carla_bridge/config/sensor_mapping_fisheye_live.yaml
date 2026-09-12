@@ -1,0 +1,277 @@
+# The kit for driving the assembled fisheye live, at 1280x720 and 30 Hz.
+#
+# Same optics and the same assembled output as sensor_mapping_fisheye.yaml.
+# What differs is what it costs to produce, because this one is meant to be
+# driven rather than recorded, and a wheel wants the world to run at the speed
+# the world runs at.
+#
+# Measured on 08-18, four sources plus the two VIO cameras and the IMU, all
+# through one client. The two things that decide the rate are not the two that
+# look like they would.
+#
+#   Bytes are not the limit. Free running, four sources deliver 8.2 Hz each at
+#   1792 square and 10.4 at 640 -- eight times fewer pixels buys a quarter more
+#   frames. Nor is the bridge: cvtColor and cv_bridge together cost 1.12 ms on
+#   a 1792 square frame, which is 224 Hz worth of headroom for four cameras.
+#   The cost is a fixed per-camera latency on the free running stream, and it
+#   is why 12-3 of the development log saw no gain from 960x540 to 640x360.
+#
+#   Synchronous delivery removes it. The same four cameras report 41 Hz each
+#   when the client owns the tick. So this kit is for a synchronous world, and
+#   what sets the pace is then the physics step rather than the transport.
+#
+# fixed_delta_seconds is meant to be 1/60 with this kit. That is 1.22x real
+# time with 1024 square sources, against 0.24x at the recorded 1/600, and it
+# divides both sensor rates exactly: the fisheye at 1/30 is two steps and the
+# IMU at 1/60 is one. Nothing is rounded and nothing is dropped.
+#
+# 1024 rather than the recorded 1792 because 1792 was never shown to be needed.
+# 배포본_구성.md says of the bag that established the 1280x720 assembly: "다만
+# 이 bag은 소스도 1792라 해상도 하나로 귀속할 수 없다." The assembled output,
+# which is the contract the calibration rests on, is unchanged -- 1280x720 at a
+# 160 degree diagonal is fx 525.91 whatever the source is.
+#
+# The vehicle carries one 1.8 mm, 160 degree diagonal lens per end. CARLA has no
+# fisheye sensor -- all eight camera blueprints are pinholes -- and its lens
+# distortion attributes are a post-process: measured on 08-09, turning them up
+# draws a circular image whose contents are the same scene at the same field,
+# squeezed into fewer pixels. Nothing new enters the frame.
+#
+# So each fisheye is rendered as two square pinholes, 100 degrees apart by 70,
+# and assembled by monoscale_carla's fisheye_assembler into one image on
+# one topic. Downstream sees one camera per end. The pair covers the 139.5 x
+# 78.4 degrees the real lens sees and fills 99.9% of the output.
+#
+# Why bother: an equidistant fisheye spends r = f*theta, so angle maps to
+# pixels evenly, while a pinhole spends r = f*tan(theta) and throws its pixels
+# at the edge. At a 160 degree diagonal the middle of a pinhole frame resolves
+# 4.52 px per degree against the fisheye's 18.36 -- and the middle is what this
+# stack reads. At 0.89 m of camera height and 30 degrees of down pitch, ground
+# from 0.6 m to 30 m all lands within 28 degrees of the optical axis.
+#
+# 33.3 Hz -- one per simulation step -- because 2560x1440 at 60 would be
+# 442 MB/s of mono8 per end before the
+# assembly, and the occupancy sweep is keyed to travel rather than to frames.
+# The odometry is the consumer that wants rate, and it keeps its own 640 pair
+# at 60.
+
+# ----------------------------------------------------------------------------
+# Only what the vision odometry consumes, and this time actually only that.
+#
+# The file this was derived from says in its opening line that the 1920x1080
+# pair and the LiDAR are dropped, and then defines both. The simulator was
+# rendering two 1080p cameras at 25 Hz and casting a LiDAR at 10 Hz that
+# nothing subscribed to -- a hundred million pixels a second against the
+# sixty-two million the odometry actually reads.
+#
+# This variant adds the LiDAR back and turns it on, which the file it came
+# from never did: both mappings listed only the IMU and the two VIO cameras
+# under enabled_sensors, so the 1080p pair and the LiDAR defined above them
+# were never spawned. Two runs that were supposed to compare with and without
+# them were therefore comparing the same thing, and came out identical.
+#
+# Rendered at the size the tracker works at, not at the size it downsamples
+# from. Dropping this to 640x360 was tried once and changed nothing, but that
+# was while the simulation step was 1/600 s and the tick itself was the whole
+# cost; with the step at the camera's own rate the rendering and the bridge
+# are what is left. The estimator scales its intrinsics from the calibration
+# size to whatever frame arrives, so this needs no other change.
+
+# Canonical kit plus a low resolution camera pair at the same poses, used only
+# by the vision odometry.
+#
+# The 1920x1080 pair matches the Isaac rig and stays the primary stream for
+# perception and recording. Feeding it to the Python estimator does not work:
+# rclpy spends more time turning an 8.3 MB frame into Python objects than the
+# estimator has per pair, and the pair rate falls from 17 Hz to 9 Hz with the
+# odometry degrading accordingly. Rendering a second, cheap pair costs the
+# simulator little and leaves the primary kit untouched.
+#
+# Installing ros-humble-image-proc and resizing the 1080p stream would remove
+# the need for this file.
+
+default_sensor_kit_name: ioniq_carla_bridge
+
+vehicle_config:
+  # Measured from vehicle.toyota.prius physics in CARLA, not from the real
+  # IONIQ. The kit follows the car that actually exists in the simulator.
+  wheelbase: 2.8192
+
+# The driving kit carries the fisheye and the instrument, and nothing else.
+# The vio pinholes and the lidar are what a recording wants; a wheel does not
+# read them, and every sensor is a share of the step.
+sensor_mappings:
+
+  imu_link:
+    carla_type: sensor.other.imu
+    id: imu
+    ros_config:
+      frame_id: imu_link
+      topic: /sensing/imu/imu_data
+      # Above the 200 Hz the sensor now produces, so the throttle never rounds
+      # a sample away. It was 150 against a 200 Hz tick and the IMU came out at
+      # exactly 100 Hz -- the throttle does not clamp to itself, it falls to
+      # the next rate that divides the sensor's.
+      frequency_hz: 300
+      qos_profile: best_effort
+    parameters:
+      # 100 Hz, matching the IMU on the target vehicle -- the 200 the
+      # file carried was a wrong belief about the hardware. Measured on
+      # 08-12: the estimator does not care (60/100/200 Hz all land at
+      # RMSE 3.66-3.76 m, heading 16-17 deg), so fidelity decides.
+      # Six steps of the 1/600 s tick, a hair under the exact multiple.
+      # 1/60, one step, so the rate comes out exactly. 100 Hz was 0.6 of a
+      # step at this delta and CARLA would round it, and the scored
+      # recordings carry 60 Hz anyway.
+      sensor_tick: 0.0166666
+      noise_accel_stddev_x: 0.0
+      noise_accel_stddev_y: 0.0
+      noise_accel_stddev_z: 0.0
+      noise_gyro_stddev_x: 0.0
+      noise_gyro_stddev_y: 0.0
+      noise_gyro_stddev_z: 0.0
+      noise_gyro_bias_x: 0.0
+      noise_gyro_bias_y: 0.0
+      noise_gyro_bias_z: 0.0
+  front_camera_fish_a_link:
+    carla_type: sensor.camera.rgb
+    id: front_camera_fish_a
+    ros_config:
+      frame_id: front_camera_optical_link
+      topic_image: /sensing/camera/front/fisheye_a/image_raw
+      topic_info: /sensing/camera/front/fisheye_a/camera_info
+      frequency_hz: 60
+      qos_profile: best_effort
+      image_encoding: mono8
+    parameters:
+      image_size_x: 1024
+      image_size_y: 1024
+      fov: 100.0
+      # 스텝의 정수배여야 두 소스가 같은 틱에 같은 스탬프로 나온다.
+      # 배수가 아니면 한쪽만 나오는 틱이 생기고 합성기가 짝을 못 찾는다
+      # (0.03 스텝에 0.033333 을 두었을 때 front 524 장을 버렸다).
+      # 이 킷은 스텝이 1/60 이므로 1/30 은 정확히 두 스텝이고, 요청한
+      # 30 Hz 가 반올림 없이 그대로 나온다.
+      sensor_tick: 0.0333333333
+      exposure_mode: manual
+      shutter_speed: 200.0
+      iso: 100.0
+      exposure_compensation: 0.0
+      lens_circle_multiplier: 0.0
+      lens_k: 0.0
+      lens_kcube: 0.0
+      lens_flare_intensity: 0.0
+      chromatic_aberration_intensity: 0.0
+      bloom_intensity: 0.0
+      motion_blur_intensity: 0.0
+      motion_blur_max_distortion: 0.0
+      motion_blur_min_object_screen_size: 0.0
+
+  front_camera_fish_b_link:
+    carla_type: sensor.camera.rgb
+    id: front_camera_fish_b
+    ros_config:
+      frame_id: front_camera_optical_link
+      topic_image: /sensing/camera/front/fisheye_b/image_raw
+      topic_info: /sensing/camera/front/fisheye_b/camera_info
+      frequency_hz: 60
+      qos_profile: best_effort
+      image_encoding: mono8
+    parameters:
+      image_size_x: 1024
+      image_size_y: 1024
+      fov: 100.0
+      # 스텝의 정수배여야 두 소스가 같은 틱에 같은 스탬프로 나온다.
+      # 배수가 아니면 한쪽만 나오는 틱이 생기고 합성기가 짝을 못 찾는다
+      # (0.03 스텝에 0.033333 을 두었을 때 front 524 장을 버렸다).
+      # 이 킷은 스텝이 1/60 이므로 1/30 은 정확히 두 스텝이고, 요청한
+      # 30 Hz 가 반올림 없이 그대로 나온다.
+      sensor_tick: 0.0333333333
+      exposure_mode: manual
+      shutter_speed: 200.0
+      iso: 100.0
+      exposure_compensation: 0.0
+      lens_circle_multiplier: 0.0
+      lens_k: 0.0
+      lens_kcube: 0.0
+      lens_flare_intensity: 0.0
+      chromatic_aberration_intensity: 0.0
+      bloom_intensity: 0.0
+      motion_blur_intensity: 0.0
+      motion_blur_max_distortion: 0.0
+      motion_blur_min_object_screen_size: 0.0
+
+  rear_camera_fish_a_link:
+    carla_type: sensor.camera.rgb
+    id: rear_camera_fish_a
+    ros_config:
+      frame_id: rear_camera_optical_link
+      topic_image: /sensing/camera/rear/fisheye_a/image_raw
+      topic_info: /sensing/camera/rear/fisheye_a/camera_info
+      frequency_hz: 60
+      qos_profile: best_effort
+      image_encoding: mono8
+    parameters:
+      image_size_x: 1024
+      image_size_y: 1024
+      fov: 100.0
+      # 스텝의 정수배여야 두 소스가 같은 틱에 같은 스탬프로 나온다.
+      # 배수가 아니면 한쪽만 나오는 틱이 생기고 합성기가 짝을 못 찾는다
+      # (0.03 스텝에 0.033333 을 두었을 때 front 524 장을 버렸다).
+      # 이 킷은 스텝이 1/60 이므로 1/30 은 정확히 두 스텝이고, 요청한
+      # 30 Hz 가 반올림 없이 그대로 나온다.
+      sensor_tick: 0.0333333333
+      exposure_mode: manual
+      shutter_speed: 200.0
+      iso: 100.0
+      exposure_compensation: 0.0
+      lens_circle_multiplier: 0.0
+      lens_k: 0.0
+      lens_kcube: 0.0
+      lens_flare_intensity: 0.0
+      chromatic_aberration_intensity: 0.0
+      bloom_intensity: 0.0
+      motion_blur_intensity: 0.0
+      motion_blur_max_distortion: 0.0
+      motion_blur_min_object_screen_size: 0.0
+
+  rear_camera_fish_b_link:
+    carla_type: sensor.camera.rgb
+    id: rear_camera_fish_b
+    ros_config:
+      frame_id: rear_camera_optical_link
+      topic_image: /sensing/camera/rear/fisheye_b/image_raw
+      topic_info: /sensing/camera/rear/fisheye_b/camera_info
+      frequency_hz: 60
+      qos_profile: best_effort
+      image_encoding: mono8
+    parameters:
+      image_size_x: 1024
+      image_size_y: 1024
+      fov: 100.0
+      # 스텝의 정수배여야 두 소스가 같은 틱에 같은 스탬프로 나온다.
+      # 배수가 아니면 한쪽만 나오는 틱이 생기고 합성기가 짝을 못 찾는다
+      # (0.03 스텝에 0.033333 을 두었을 때 front 524 장을 버렸다).
+      # 이 킷은 스텝이 1/60 이므로 1/30 은 정확히 두 스텝이고, 요청한
+      # 30 Hz 가 반올림 없이 그대로 나온다.
+      sensor_tick: 0.0333333333
+      exposure_mode: manual
+      shutter_speed: 200.0
+      iso: 100.0
+      exposure_compensation: 0.0
+      lens_circle_multiplier: 0.0
+      lens_k: 0.0
+      lens_kcube: 0.0
+      lens_flare_intensity: 0.0
+      chromatic_aberration_intensity: 0.0
+      bloom_intensity: 0.0
+      motion_blur_intensity: 0.0
+      motion_blur_max_distortion: 0.0
+      motion_blur_min_object_screen_size: 0.0
+
+enabled_sensors:
+  - imu_link
+  - front_camera_fish_a_link
+  - front_camera_fish_b_link
+  - rear_camera_fish_a_link
+  - rear_camera_fish_b_link

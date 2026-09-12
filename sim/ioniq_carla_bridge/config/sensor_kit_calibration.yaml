@@ -1,0 +1,224 @@
+# Where each sensor is attached to the CARLA actor.
+# x forward, y right, z up, measured from the actor origin.
+#
+# These are attachment offsets, not the heights the sensors end up at: CARLA
+# holds the vehicle actor origin the distance below off the road, so a sensor
+# attached at z sits at z + that above the ground, and it is the sum the
+# vision odometry scales with. The offsets are chosen so that sum lands on the
+# IONIQ's own mounting heights -- 0.89 m front camera, 1.26 rear, 2.00 LiDAR.
+#
+# Until 08-04 the offsets were the IONIQ heights themselves, which put every
+# sensor 0.0372 m higher than the vehicle this is built for. On the cameras
+# that is 4.2%, against the 0.4 to 0.6% ground_range_scale was calibrating.
+actor_origin_height_m: 0.03635
+#
+# Measured against the recorded truth pose, which reports the actor origin's own
+# height. 2026-09-11, eight drives: 0.036466 on the Town01 asphalt stretch
+# (straight120_*, straight110_*) and 0.036160 to 0.036273 on the concrete one
+# (straight_*_t01, curve_*), mean 0.036354. The two stretches differ by 0.2 mm
+# of ride height, which is the only spread there is.
+#
+# This carried **0.0372** until 2026-09-11, 1.03 mm larger, and the note here
+# said so: it was left wrong deliberately because `ground_plane_offset_m` sits
+# in the same product and the pair was at a joint ATE optimum. That optimum was
+# measured with `photometric_scale` still in the stack absorbing length, and
+# before the ESM's pitch freedom was known to leak into the step. Both are
+# accounted for now, and the millimetre pays on its own:
+#
+#   bench nine   ATE/거리   0.0523% -> 0.0257%   끝오차/거리 0.0919% -> 0.0414%
+#   held-out 2   ATE/거리   0.1903% -> 0.1883%   끝오차/거리 0.1891% -> 0.1794%
+#
+# Better on every metric of both sets, which a fit to the bench is not. And it
+# was a prediction before it was a measurement: the photometric length bias was
+# predicted to fall 0.275% -> 0.180% at the front mount and 0.231% -> 0.164% at
+# the rear, purely from delta/h, and measured +0.179% and +0.164%.
+#
+# What the vision odometry actually consumes is the sum -- the mount's height
+# above the ROAD -- and until now that sum appeared in no file. Stated here so
+# the two ends can be compared without re-deriving one of them:
+#
+#   front cameras   z 0.8528 + 0.03635 = 0.88915 m above the road
+#   rear cameras    z 1.2228 + 0.03635 = 1.25915 m
+#   separation      3.694 - (-0.82)   = 4.514 m, the vehicle's length, fixed by
+#                                       construction rather than measured
+#
+# monoscale_odometry/config/vision_fisheye.param.yaml carries those two heights
+# and that separation, and test_sensor_kit_consistency in that package derives
+# them from this file and fails if the two ever disagree.
+
+# x and y here are base_link -- the rear axle -- and the bridge converts them.
+# sensor_kit_loader applies x_vehicle_center = x - wheelbase/2 before spawning,
+# so no offset belongs in this file, and adding one on 08-09 put both cameras
+# 1.4 m too far back: the front one ended up inside the engine bay and 81% of
+# its frame was bodywork.
+#
+# z is different and does need the correction below, because the bridge does
+# not touch it: CARLA holds the actor origin off the road and the kit has to
+# subtract that itself.
+#
+# front sits at 3.694 rather than 3.50 so that the two cameras are exactly the
+# vehicle's length apart: the rear one is where it should be at -0.82, the
+# Prius measures 4.514 m end to end, and -0.82 + 4.514 = 3.694. After the
+# bridge subtracts wheelbase/2 that puts the front lens 10 mm ahead of the
+# front bumper and the rear one 12 mm inside the rear, which is where a
+# surround-view pair actually lives.
+#
+# One inexactness worth knowing about. The bridge's wheelbase defaults to
+# 2.850, so it shifts by 1.425, while the Prius this rig drives measures 2.819
+# between the axles with its box centre 1.399 ahead of the rear one. Sensors
+# therefore land 26 mm behind where this file says. Small next to the 1.4 m
+# above, but it is not zero.
+
+sensor_kit_base_link:
+  front_camera_link:
+    x: 3.694
+    y: 0.00
+    z: 0.8528
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 0.0
+
+  rear_camera_link:
+    x: -0.82
+    y: 0.00
+    z: 1.2228
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 3.1415926536
+
+  imu_link:
+    x: 1.35
+    y: 0.00
+    z: 0.34
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
+  lidar_link:
+    x: 0.90
+    y: 0.00
+    z: 1.9628
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+  lidar_high_link:
+    x: 0.90
+    y: 0.00
+    z: 2.9628
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
+  # Semantic taps, only spawned by sensor_mapping_semantic.yaml. They exist to
+  # answer one question -- whether a cell the vision grid calls occupied and the
+  # LiDAR reference calls free has something real standing in it -- and that
+  # only works if they see exactly what the vio pair sees, so these poses must
+  # stay identical to the vio pair below.
+  front_camera_sem_link:
+    x: 3.694
+    y: 0.00
+    z: 0.8528
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 0.0
+
+  rear_camera_sem_link:
+    x: -0.82
+    y: 0.00
+    z: 1.2228
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 3.1415926536
+
+  # High resolution taps for the occupancy sweep, only spawned by
+  # sensor_mapping_lidar_map.yaml. Same poses as the vio pair -- the sweep and
+  # the odometry have to agree about where the eye is -- but rendered at 1280
+  # and delivered at a tenth of the rate.
+  #
+  # The split exists because the two consumers want opposite things. Tracking
+  # wants frames often and does not care that a corner is four pixels or eight;
+  # the sweep wants the pixels, because a 0.15 m kerb at 20 m is 2.25 px wide
+  # at 640 and a 5 px correlation window buries it in road. Rendering one
+  # stream that satisfies both means 1280 at 60 Hz, which is four times the
+  # bytes and four times the sweep for a rate nothing needs.
+  front_camera_map_link:
+    x: 3.694
+    y: 0.00
+    z: 0.8528
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 0.0
+
+  rear_camera_map_link:
+    x: -0.82
+    y: 0.00
+    z: 1.2228
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 3.1415926536
+
+  # Fisheye source pinholes, only spawned by sensor_mapping_fisheye.yaml.
+  #
+  # CARLA has no fisheye sensor and its lens distortion is a post-process over
+  # an already-rendered pinhole -- measured on 08-09, the scene inside the
+  # circle it draws is the same scene, at the same field, squeezed. A 160
+  # degree diagonal fisheye is assembled from these two instead, at 100 degrees
+  # each and 35 degrees apart, which covers the 139.5 x 78.4 the real lens sees
+  # with 99.9% of the output filled.
+  #
+  # They are a rendering detail. The bridge assembles them into one image and
+  # publishes one topic; nothing downstream sees two cameras, and the vehicle
+  # carries one lens.
+  #
+  # Same position as the vio pair -- the assembled camera has to sit where the
+  # odometry thinks the eye is -- with only the yaw split.
+  front_camera_fish_a_link:
+    x: 3.694
+    y: 0.00
+    z: 0.8528
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: -0.6108652382
+
+  front_camera_fish_b_link:
+    x: 3.694
+    y: 0.00
+    z: 0.8528
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 0.6108652382
+
+  rear_camera_fish_a_link:
+    x: -0.82
+    y: 0.00
+    z: 1.2228
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 2.5307274154
+
+  rear_camera_fish_b_link:
+    x: -0.82
+    y: 0.00
+    z: 1.2228
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 3.7524578918
+
+  # Low resolution taps for the vision odometry, only spawned by
+  # sensor_mapping_vio.yaml. These must stay identical to the pair above; a
+  # test in monoscale_odometry fails if they diverge.
+  front_camera_vio_link:
+    x: 3.694
+    y: 0.00
+    z: 0.8528
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 0.0
+
+  rear_camera_vio_link:
+    x: -0.82
+    y: 0.00
+    z: 1.2228
+    roll: 0.0
+    pitch: -0.5235987756
+    yaw: 3.1415926536
