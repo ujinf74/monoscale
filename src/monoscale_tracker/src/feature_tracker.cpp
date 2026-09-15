@@ -1632,7 +1632,7 @@ private:
                   esm_sigma_file_,
                   "stamp,camera,step,search,sigma_step,sigma_yaw,sigma_pitch,"
                   "sigma_roll,corr_step_pitch,corr_step_yaw,score,reach,tilt_leak,"
-                  "esm_yaw,turn_in\n");
+                  "esm_yaw,turn_in,esm_pitch,esm_roll\n");
               }
             }
             if (esm_sigma_file_ != nullptr && state.road_esm.covariance_ok) {
@@ -1646,7 +1646,7 @@ private:
               std::fprintf(
                 esm_sigma_file_,
                 "%.6f,%s,%.6f,%.6f,%.9f,%.9f,%.9f,%.9f,%.4f,%.4f,%.5f,%.4f,%.6f,"
-                "%.9f,%.9f\n",
+                "%.9f,%.9f,%.9f,%.9f\n",
                 stamp, name.c_str(), state.road_esm.step, found * span, root(c[0]),
                 root(c[4]), root(c[7]), root(c[9]),
                 sp > 0.0 ? c[2] / sp : std::numeric_limits<double>::quiet_NaN(),
@@ -1654,7 +1654,8 @@ private:
                 state.road_esm.score, reach,
                 state.road_esm.tilt_leak_ok ? state.road_esm.tilt_leak
                 : std::numeric_limits<double>::quiet_NaN(),
-                state.road_esm.yaw, turn);
+                state.road_esm.yaw, turn,
+                state.road_esm.pitch, state.road_esm.roll);
               std::fflush(esm_sigma_file_);
             }
           }
@@ -3569,6 +3570,42 @@ private:
     // the deployed file. That does NOT make them free to drop: they absorb
     // model error the step would otherwise take as scale, and this was measured
     // 2026-09-11 rather than argued.
+    //
+    // Re-coordinating the nuisance is a no-op, derived and then measured
+    // 2026-09-15. The proposal: with M = [J_s J_yaw], project the pitch column
+    // to J_eta = (I - M(M^T W M)^-1 M^T W) J_p and solve (s, yaw, eta), so the
+    // nuisance cannot move along the motion directions. It is elegant and it
+    // changes nothing, because span([M J_p]) = span([M J_eta]): the model
+    // manifold and its minimum are the same point, and only the coordinate the
+    // step is read off moves, by s_tilde = s + a_s eta. In the quadratic
+    // approximation that projection **is** the dof=2 answer, which is measured
+    // at 2.8x.
+    //
+    // Checked rather than argued. `s_dof2 - s_dof3` against the covariance's
+    // own prediction `-rho (sigma_s / sigma_p) pitch`, per frame, both mounts:
+    //
+    //   drive   n      measured median   predicted median   correlation
+    //   v2      3118   +0.1290 mm        +0.1356 mm         **+0.9996**
+    //   cs20    3372   +0.0440           +0.0398            **+0.9922**
+    //
+    // So dof=2 is dof=3 with the pitch-correlated component of the step removed,
+    // and the orthogonal coordinate removes exactly that component. 0.22% of the
+    // step on v2, 0.16% on cs20.
+    //
+    // A prior on eta instead of a coordinate change dies the same way: for a
+    // cost quadratic in eta, raising lambda shrinks eta monotonically and walks
+    // the reported step from dof=3 to dof=2, and both ends are measured with
+    // dof=3 ahead. The optimum is lambda = 0. A *bound* would escape that
+    // argument, being non-smooth -- except `angle_limit` 0.05 rad never binds:
+    // zero frames of 3415 and 3464, with the largest fitted pitch 11x and 52x
+    // inside it.
+    //
+    // What is not closed by this: **adding** a nuisance mode outside the span of
+    // the pitch column. Pitch is the family's only outlet, and re-coordinating
+    // an outlet is not the same as widening it. A mode with a shape the plane
+    // model genuinely lacks -- a surface curvature term, a radial scale -- is new
+    // information rather than a change of basis, and that is the direction this
+    // measurement leaves open.
     //
     // **Roll is free, pitch is not.** 3 is a wash on the bench and better on
     // held-out (-2.8% ATE, -18.0% worst final error) while cutting warps 24.8%;
