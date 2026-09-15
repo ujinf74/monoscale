@@ -2974,11 +2974,31 @@ void Estimator::process_pair()
         // yaw that corrects the gyro is front-only, and the front camera's ground
         // recedes in reverse. See `monoscale-reverse-blind`.
         //
-        // So what the pair solve is still for is **manoeuvring and reverse, not
-        // forward driving**: on the nine forward drives the gyro's direction
-        // costs 0.0237% to 0.0267% of ATE and buys 16% of the worst final error,
-        // and on the one drive that reverses it costs 2.5x. Retiring the pair
-        // needs a heading through reverse, not a better hop.
+        // Reverse was the wrong diagnosis, and so was turning. Per drive the
+        // nine split four and four, with swings of +372% (str_1.5) to -38%
+        // (curve_s05), and the three slaloms at one speed go -38%, -23%, +119%
+        // -- so neither speed nor turn rate nor gear orders it.
+        //
+        // What does, measured against truth on a winner and a loser, is that
+        // this is a **trade and not a loss**:
+        //
+        //   drive                 lateral error      length error
+        //   str_1.5   deployed      0.0515%            0.1809%
+        //             gyro arc      0.0815%  (+58%)    0.1040%  (-43%)
+        //   curve_s05 deployed      0.0594%            0.2801%
+        //             gyro arc      0.0693%  (+17%)    0.1802%  (-36%)
+        //
+        // Both drives move the same way: the arc takes the length from the
+        // photometric and improves it by 36-43%, and gives up 17-58% of the
+        // lateral, which was the pair solve's. Which one dominates the ATE is
+        // what varies.
+        //
+        // That is the same shape as the map/photometric branch above and as
+        // `photometric_when_mapless`: an accurate length and an accurate
+        // direction that this stack can only take one of at a time, because a
+        // hop is one vector and there is nowhere to say which half of it came
+        // from where. Retiring the pair solve is not the question. The question
+        // is a hop whose length and bearing carry separate covariances.
         const double forward = motion->x >= 0.0 ? 1.0 : -1.0;
         const double along = forward * measured;
         double dx = along;
