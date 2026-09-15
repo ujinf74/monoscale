@@ -1070,6 +1070,10 @@ public:
     // image, which is what has been measured for accuracy.
     skip_top_ = declare_parameter<double>("detection_skip_top_fraction", 0.0);
     skip_bottom_ = declare_parameter<double>("detection_skip_bottom_fraction", 0.0);
+    // How many frames a new feature must be able to live before it is worth
+    // detecting. 0 leaves every birth where the detector put it.
+    detection_survival_frames_ =
+      declare_parameter<double>("detection_survival_frames", 0.0);
     dump_dir_ = declare_parameter<std::string>("debug_dump_directory", "");
     // Best effort with a shallow queue is right against a live camera, where
     // a late frame is worth less than the one behind it. It is wrong when the
@@ -1799,6 +1803,75 @@ private:
     state.velocities = velocities;
     state.identities = identities;
     const size_t followed = state.points.size();
+    // Where a new feature would not live long enough to measure anything.
+    //
+    // Ground leaves one edge of the frame and enters the other, and a feature
+    // born at the leaving edge has no future: measured on straight_s8 at
+    // 7.5 m/s, of the 65,044 front-camera features born in the bottom fifth
+    // **97.9% die after exactly one frame**, against 30.2% for the top fifth.
+    // The detector spreads births evenly and cannot see the difference.
+    //
+    // `detection_skip_bottom_fraction` was the fixed answer and it has to be
+    // tuned per camera and per speed. The flow already measures the quantity:
+    // time to the edge is the distance to it divided by the speed toward it,
+    // both in pixels, so
+    //
+    //     skip = frames * |median downward flow| / rows
+    //
+    // and speed, forward against reverse, front against rear and the turn all
+    // arrive through the flow without any of them being named. At a standstill
+    // the flow is zero and nothing is cut, which is right: nothing is leaving.
+    //
+    // Bottom only. The same expression with the sign reversed is the top edge,
+    // and the rear camera does not need it -- its births already sit at its
+    // entering edge and its lifetime is flat across the frame, which is the
+    // measurement in the note on `detection_skip_bottom_fraction`.
+    //
+    // **Measured 2026-09-15 and left off. The doomed births are not waste.**
+    //
+    // It works and it is cheap: at 3 frames on straight_s8 the flow stage goes
+    // 3.78 to 2.87 ms (-24%), the whole follow stage 12.79 to 11.88 (-7.1%),
+    // and the track output 78 to 69 MB. The road fit is untouched at 9.0 ms,
+    // which is the first thing this measurement corrected -- the frame is
+    // dominated by the photometric fit, not by tracking, so a fifth of the
+    // births was never going to be "the real saving".
+    //
+    // What it costs, only this key moved:
+    //
+    //   set          ATE/거리              끝오차/거리
+    //   bench 9      0.0237% -> 0.0247%    0.0326% -> 0.0324%  (worst 0.0391 -> 0.0404)
+    //   held-out 2   0.1781% -> 0.1826%    0.1461% -> 0.1492%  (worst 0.2659 -> 0.2956,
+    //                                                           final worst 0.1937 -> 0.2333)
+    //
+    // Both sets lose and the held-out worst case loses 11% of ATE and 20% of
+    // the final error. A one-frame track is still a measurement: 65,044 of them
+    // each cast one vote into the pair solve's direction, and the ablation
+    // above measured that direction to be what the pair solve is for. They are
+    // short-lived, not useless.
+    if (detection_survival_frames_ > 0.0 && !velocities.empty() && gray.rows > 0) {
+      // The flow *at the edge*, not over the frame. A median over every
+      // tracked point is dominated by the horizon and the far ground, which
+      // barely move -- the first version of this took it and cut almost
+      // nothing. The bottom quarter is where the leaving happens and where a
+      // pixel is worth five millimetres rather than the thirty-four
+      // centimetres it is worth at the far limit.
+      const float edge = 0.75f * static_cast<float>(gray.rows);
+      std::vector<float> downward;
+      downward.reserve(velocities.size());
+      for (size_t i = 0; i < velocities.size() && i < current_points.size(); ++i) {
+        if (std::isfinite(velocities[i].y) && current_points[i].y >= edge) {
+          downward.push_back(velocities[i].y);
+        }
+      }
+      if (downward.size() >= 8) {
+        std::nth_element(
+          downward.begin(), downward.begin() + downward.size() / 2, downward.end());
+        const double flow = downward[downward.size() / 2];
+        state.skip_bottom = flow > 1e-3
+          ? std::min(0.5, detection_survival_frames_ * flow / gray.rows)
+          : 0.0;
+      }
+    }
     detect(state, gray);
     stage.detect = lap();
     // Held before it is replaced: the road fit needs the frame the flow just
@@ -4742,6 +4815,7 @@ private:
   double quality_level_ = 0.01;
   bool publish_clarity_ = false;
   double skip_bottom_ = 0.0;
+  double detection_survival_frames_ = 0.0;
   int road_step_coarse_divisor_ = 1;
   double road_step_bracket_k_ = 0.0;
   int road_step_esm_dof_ = 4;
