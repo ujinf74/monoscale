@@ -2955,12 +2955,38 @@ void Estimator::process_pair()
       // ground went. A core of turn and length needs a sign from somewhere, and
       // that is a third measurement rather than a parameter.
         const double psi = *yaw_delta;
-        double dx = measured;
+        // The road's length is a distance and carries no sign, so the arc built
+        // from it points forward whatever the vehicle did. On the bench that is
+        // free -- nothing reverses -- and on the two held-out park drives, which
+        // reverse and change gear, it was the whole of this path's cost: the
+        // final error went 0.1777% to 0.3005%.
+        //
+        // Taken from the hop this is about to replace. Measured 2026-09-15, and
+        // the sign was not the problem: the held-out final error went 0.3005% to
+        // **0.2900%** with it, recovering 3.5% of a degradation that is 98%.
+        //
+        // Where the rest is, is sharper than the sign. Only `park_clean` moves
+        // -- `park_obst` is bit identical, so this path never fires there -- and
+        // on it the ATE barely shifts (0.0794 to 0.0822) while the **final error
+        // goes 0.0578% to 0.1438%**. The path's shape survives and its endpoint
+        // does not, which is an accumulating heading error rather than a length
+        // one. `park_clean` is the drive that reverses and changes gear, the ESM
+        // yaw that corrects the gyro is front-only, and the front camera's ground
+        // recedes in reverse. See `monoscale-reverse-blind`.
+        //
+        // So what the pair solve is still for is **manoeuvring and reverse, not
+        // forward driving**: on the nine forward drives the gyro's direction
+        // costs 0.0237% to 0.0267% of ATE and buys 16% of the worst final error,
+        // and on the one drive that reverses it costs 2.5x. Retiring the pair
+        // needs a heading through reverse, not a better hop.
+        const double forward = motion->x >= 0.0 ? 1.0 : -1.0;
+        const double along = forward * measured;
+        double dx = along;
         double dy = 0.0;
         if (std::abs(psi) > 1e-9) {
           const double half = std::sin(0.5 * psi);
-          dx = measured * std::sin(psi) / psi;
-          dy = measured * 2.0 * half * half / psi;
+          dx = along * std::sin(psi) / psi;
+          dy = along * 2.0 * half * half / psi;
         }
         motion->x = dx;
         motion->y = dy;
