@@ -1915,6 +1915,56 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     }
     if (aligned.has_value()) {
       camera.last_translation = aligned->translation;
+      // The map's answer, written as what it actually is.
+      //
+      // `align_to_anchors` returns a translation, and the estimator consumes it
+      // as if it were a measurement of where the vehicle is. It is not. Each
+      // anchor is a weighted mean of the poses that saw it, and the translation
+      // is a weighted mean of the anchors, so composing the two gives
+      //
+      //     t_k = sum_i beta_i t_i + c_k
+      //
+      // -- a constraint tying this pose to a weighted combination of the last
+      // two dozen, not an independent fix. With the poses held still that is
+      // arithmetically what is computed today; the question this dump exists to
+      // answer is whether letting that window move would change the answer, and
+      // it is written out so the fixed-lag solve can be tried offline before any
+      // of it is built into the filter.
+      if (const char * path = std::getenv("MONOSCALE_MAP_BETA")) {
+        std::vector<std::pair<int32_t, double>> beta;
+        anchors_->pose_weights(camera.source, selected_ids, aligned->weight, beta);
+        if (!beta.empty()) {
+          if (map_beta_file_ == nullptr) {
+            map_beta_file_ = std::fopen(path, "w");
+            if (map_beta_file_ != nullptr) {
+              std::fprintf(map_beta_file_, "pose,source,tx,ty,cx,cy,span,terms,beta\n");
+            }
+          }
+          if (map_beta_file_ != nullptr) {
+            double sx = 0.0;
+            double sy = 0.0;
+            for (const auto & entry : beta) {
+              if (entry.first >= 0 &&
+                static_cast<size_t>(entry.first) < pose_history_.size())
+              {
+                sx += entry.second * pose_history_[static_cast<size_t>(entry.first)][0];
+                sy += entry.second * pose_history_[static_cast<size_t>(entry.first)][1];
+              }
+            }
+            std::fprintf(
+              map_beta_file_, "%zu,%d,%.9f,%.9f,%.9f,%.9f,%d,%zu,",
+              pose_history_.size(), camera.source,
+              aligned->translation.x(), aligned->translation.y(),
+              aligned->translation.x() - sx, aligned->translation.y() - sy,
+              beta.back().first - beta.front().first, beta.size());
+            for (size_t b = 0; b < beta.size(); ++b) {
+              std::fprintf(
+                map_beta_file_, "%s%d:%.9f", b ? " " : "", beta[b].first, beta[b].second);
+            }
+            std::fprintf(map_beta_file_, "\n");
+          }
+        }
+      }
       if (aligned->bearing_terms > 0) {
         camera.anchor_yaw_last = aligned->bearing_yaw;
         camera.anchor_yaw_fresh = true;

@@ -430,6 +430,60 @@ void GroundAnchorMap::anchor_view(
   }
 }
 
+void GroundAnchorMap::pose_weights(
+  int source, const Identities & ids, const Weights & alignment,
+  std::vector<std::pair<int32_t, double>> & out) const
+{
+  out.clear();
+  if (alignment.size() != ids.size()) {
+    return;
+  }
+  double total = 0.0;
+  for (Eigen::Index i = 0; i < alignment.size(); ++i) {
+    if (std::isfinite(alignment(i)) && alignment(i) > 0.0) {
+      total += alignment(i);
+    }
+  }
+  if (!(total > 0.0)) {
+    return;
+  }
+  std::unordered_map<int32_t, double> beta;
+  for (Eigen::Index i = 0; i < ids.size(); ++i) {
+    const double share = std::isfinite(alignment(i)) && alignment(i) > 0.0
+      ? alignment(i) / total : 0.0;
+    if (share <= 0.0) {
+      continue;
+    }
+    const int64_t slot = slot_of(source, ids(i));
+    if (slot < 0 || sight_count_(slot) <= 0) {
+      continue;
+    }
+    const int32_t held = std::min<int32_t>(sight_count_(slot), kRemember);
+    double inner = 0.0;
+    for (int32_t k = 0; k < held; ++k) {
+      if (sight_pose_(slot, k) >= 0) {
+        inner += std::max<double>(sight_weight_(slot, k), 1e-12);
+      }
+    }
+    if (!(inner > 0.0)) {
+      continue;
+    }
+    for (int32_t k = 0; k < held; ++k) {
+      const int32_t index = sight_pose_(slot, k);
+      if (index < 0) {
+        continue;
+      }
+      beta[index] += share * std::max<double>(sight_weight_(slot, k), 1e-12) / inner;
+    }
+  }
+  out.assign(beta.begin(), beta.end());
+  std::sort(
+    out.begin(), out.end(),
+    [](const std::pair<int32_t, double> & a, const std::pair<int32_t, double> & b) {
+      return a.first < b.first;
+    });
+}
+
 void GroundAnchorMap::update(
   int source, const Identities & ids, const Points2 & world_points, bool allow_new,
   const Weights & information, const Points2 & body_points, int32_t pose_index,
@@ -1230,6 +1284,12 @@ std::optional<AnchorAlignment> align_to_anchors(
   const double s = std::sin(yaw);
   AnchorAlignment result;
   result.inliers.resize(count);
+  // The settled mode's own weights, before the hard mask is applied: this is
+  // what the translation is a weighted mean over.
+  result.weight.resize(count);
+  for (Eigen::Index i = 0; i < count; ++i) {
+    result.weight(i) = weight_of(i) * robust[static_cast<size_t>(i)];
+  }
   Eigen::Index kept = 0;
   double squared = 0.0;
   // The radial residuals, held until the reference range is known: normalising

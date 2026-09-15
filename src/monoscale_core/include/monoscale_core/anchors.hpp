@@ -305,6 +305,33 @@ public:
   // World positions and weights together, from one lookup. The solve wants
   // both for the same features, and asking twice means searching the index
   // twice for an answer that could not have changed in between.
+  // How much each remembered pose contributes to an alignment's answer.
+  //
+  // The alignment's translation is a weighted mean over anchors, and each
+  // anchor is a weighted mean over the poses that saw it. Composing the two,
+  // `t_k = sum_i beta_i t_i + c_k`, and this returns the sparse `beta`, indexed
+  // by pose. `alignment` is `AnchorAlignment::weight`; it is normalised here.
+  //
+  // Diagnostic. Nothing in the solve consumes it -- it exists to ask whether
+  // stating the map's output in that form, and letting the window it spans move,
+  // would change the answer. Measured 2026-09-15 on straight120_v2 and
+  // curve_s20, 661 alignments: **it would not.** The effective number of poses,
+  // 1 / sum(beta^2), is **1.05** at the median on both drives, and the largest
+  // single beta is **0.977** -- three quarters of alignments put over 0.9 of
+  // their answer on one pose, and in 79-82% of them that pose is the
+  // immediately previous one. The constraint spans 22 poses and 111 indices,
+  // and weighs almost all of it at lag zero.
+  //
+  // So `t_k = sum_i beta_i t_i + c_k` is the correct general form and it
+  // collapses, on this data, to `t_k = t_{k-1} + c_k`: a hop. A fixed-lag
+  // smoother over that window has 2.3% of one correction to distribute over
+  // twenty-odd poses. The tail is real -- the tenth percentile of the largest
+  // beta is 0.20-0.27 and N_eff reaches 34 -- but it is a tenth of a third of
+  // the hops.
+  void pose_weights(
+    int source, const Identities & ids, const Weights & alignment,
+    std::vector<std::pair<int32_t, double>> & out) const;
+
   void anchor_view(
     int source, const Identities & ids, Points2 & world_out, Weights & weights_out) const;
   void anchor_view(const Identities & ids, Points2 & world_out, Weights & weights_out) const
@@ -514,6 +541,17 @@ private:
 struct AnchorAlignment
 {
   Eigen::Vector2d translation;
+  // The weight each anchor actually carried into that translation, at the mode
+  // the fit settled on: `map weight * soft gate`, unnormalised. `inliers` is
+  // the hard mask beside it and is not the same thing -- under a soft gate a
+  // point outside the threshold still votes, with a small weight.
+  //
+  // Here because the translation is a weighted mean of the anchors, and each
+  // anchor is itself a weighted mean of the poses that saw it. Compose the two
+  // and this solve's output is a linear functional of the recent trajectory:
+  // `t_k = sum_i beta_i t_i + c_k`. Recovering `beta` needs these weights, and
+  // nothing else in the result exposes them.
+  Weights weight;
   Mask inliers;
   // RMS residual of the inlying votes: how precise this camera's answer was.
   double spread = 0.0;

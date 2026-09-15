@@ -1247,6 +1247,8 @@ private:
   std::vector<Update> pending_updates_;
   Diagnostics diagnostics_;
   std::FILE * heading_innovation_file_ = nullptr;
+  // `MONOSCALE_MAP_BETA`: the map's answer as a constraint on recent poses.
+  std::FILE * map_beta_file_ = nullptr;
 };
 
 }  // namespace monoscale
