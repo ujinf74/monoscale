@@ -500,6 +500,13 @@ void GroundAnchorMap::update(
     if (slot < 0 || slot >= sight_pose_.rows()) {
       continue;
     }
+    if (dirty_.size() != static_cast<size_t>(sight_pose_.rows())) {
+      dirty_.assign(static_cast<size_t>(sight_pose_.rows()), 0);
+    }
+    if (!dirty_[static_cast<size_t>(slot)]) {
+      dirty_[static_cast<size_t>(slot)] = 1;
+      touched_.push_back(slot);
+    }
     const int32_t at = sight_count_(slot) % kRemember;
     sight_pose_(slot, at) = pose_index;
     sight_body_(slot, 2 * at) = static_cast<float>(body_points(i, 0));
@@ -520,7 +527,32 @@ void GroundAnchorMap::update(
 
 void GroundAnchorMap::rebuild(const std::vector<std::array<double, 3>> & poses)
 {
-  for (Eigen::Index slot = 0; slot < position_.rows(); ++slot) {
+  // Only the anchors that were sighted this frame.
+  //
+  // This used to sweep every live anchor and recompute the weighted mean of its
+  // remembered sightings, re-projected through the poses -- 8000 slots times up
+  // to sixteen sightings, every solve, for 0.24-0.39 ms against the anchor
+  // stage's 0.63 and the estimator's 1.8.
+  //
+  // Almost all of that could not change anything. `pose_history_` is appended to
+  // and never rewritten, so `p_i + R_i b_i` is fixed the moment a sighting is
+  // recorded, and an anchor's mean can only move when its ring does -- which is
+  // when it is sighted. Everything else recomputes the number it already holds.
+  //
+  // Sighted anchors are marked in `update` and the list is consumed here, so
+  // this stays **bit identical** rather than merely close: there is no running
+  // sum to accumulate rounding, each touched anchor's sixteen terms are summed
+  // from scratch exactly as before.
+  //
+  // `rebuild_shift()` reports the mean over the slots this visits, so its
+  // denominator is now the anchors that could move rather than all of them. The
+  // old figure was the same total divided by a larger count, which is to say it
+  // was diluted by anchors whose shift was zero by construction.
+  for (size_t entry = 0; entry < touched_.size(); ++entry) {
+    const Eigen::Index slot = static_cast<Eigen::Index>(touched_[entry]);
+    if (slot < 0 || slot >= position_.rows()) {
+      continue;
+    }
     if (identifier_(slot) < 0 || sight_count_(slot) <= 0) {
       continue;
     }
@@ -554,6 +586,13 @@ void GroundAnchorMap::rebuild(const std::vector<std::array<double, 3>> & poses)
       }
     }
   }
+  for (size_t entry = 0; entry < touched_.size(); ++entry) {
+    const size_t slot = static_cast<size_t>(touched_[entry]);
+    if (slot < dirty_.size()) {
+      dirty_[slot] = 0;
+    }
+  }
+  touched_.clear();
 }
 
 void GroundAnchorMap::update(

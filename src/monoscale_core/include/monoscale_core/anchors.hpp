@@ -502,6 +502,10 @@ private:
   // is still live rather than how long ago it was seen.
   std::unordered_set<int64_t> live_ids_;
   int64_t remembered_ = 0;
+  // Anchors sighted since the last rebuild, and the flag that keeps the list
+  // free of duplicates when both cameras see one in the same frame.
+  std::vector<int64_t> touched_;
+  std::vector<char> dirty_;
   double rebuild_shift_ = 0.0;
   int64_t rebuild_slots_ = 0;
   int sources_ = 1;
