@@ -14,11 +14,32 @@ On a 111 m drive in CARLA, against the ground-truth pose:
 | **final error / distance** | **0.0324 %** | 0.0627 % |
 | held-out, never tuned on | **0.1781 %** | 0.2659 % |
 
+In millimetres, because a percentage of distance is hard to feel: **26 mm of
+ATE over a 111 m drive**, and 79 mm over a 30 m parking manoeuvre that no
+parameter was ever chosen against.
+
+![Estimate against ground truth](media/trajectories.png)
+
 The held-out figure is the one to read. Two drives are kept out of every sweep
 and every judgement, and they earn their place: in one week they refused four
 changes that had won on the tuning set, including the removal of the last fitted
 multiplier in the stack. Numbers, the set they come from and how to reproduce
 them are in [`src/monoscale_evaluation/README.md`](src/monoscale_evaluation/README.md).
+
+## What it is for
+
+The rig is two fisheye cameras, front and rear, pitched 30 degrees down. That is
+the surround-view configuration a production car already carries for parking,
+and the point of taking scale from the ground plane is that **nothing has to be
+added to the vehicle to make those cameras metric** -- no stereo pair, no lidar,
+no HD map, no wheel encoder on the bus.
+
+Where that matters is where GNSS does not reach and the vehicle is moving
+slowly: indoor parking structures, loading yards, the last thirty metres of an
+automated park. The two drives held out of every decision here are parking
+manoeuvres for that reason. The accuracy of this method scales as the camera
+height over the distance travelled per frame, so low and slow is the regime it
+is best in, which is the opposite of what a stereo baseline prefers.
 
 ## Where the scale comes from, and what follows from it
 
@@ -55,6 +76,40 @@ front mount -- the lower one, which sees the ground it is about to drive over --
 is the better of the two to keep. A unit test holds the floor:
 `EstimatorDrive.OneCameraIsARigNotADegenerateCase`. What must not happen is that
 it silently stops solving.
+
+## What it assumes, and where it has not been tested
+
+**The road under the cameras is locally planar.** The whole scale chain rests on
+it: the homography is plane-induced, and a surface that is not a plane is model
+error the four-parameter fit has to absorb. On these roads it holds to under a
+millimetre over a hundred metres. On a crest, a rutted surface or a steep
+camber it is the first thing that would break, and nothing here has measured
+that.
+
+**The mounting height has to be right to a millimetre.** The scale is `t/h`, so
+a relative error in `h` is the same relative error in every distance: correcting
+one millimetre of it moved the benchmark by half. A real vehicle's ride height
+moves with load, tyre pressure and suspension travel, and none of that exists in
+these recordings.
+
+**Everything here is measured in simulation.** CARLA, one town, one weather, one
+sun angle, `-quality-level=Low`. Two facts follow that a reader should have
+before the numbers. The rendered road's texture is what the photometric
+alignment reads, and changing the quality level alone moves the length bias by a
+factor of sixty. And **the simulated IMU carries zero noise on every axis** --
+accelerometer, gyro and gyro bias all set to 0.0 -- so the attitude filter, the
+heading and the inertial propagation have never met a noisy one.
+
+The heading itself is self-contained, and that is worth saying because it is the
+easy thing to fake in a simulator: `imu_yaw_from_gyro` is on, so the yaw is
+integrated from the gyro and its bias is corrected by the road fit's own yaw
+observation. The orientation CARLA reports -- which is truth to 0.000000 deg on
+these bags -- is not read. What has not been tested is that integration against
+a gyro with real angle random walk.
+
+None of that is a reason to discount the method. It is the list of things that
+would have to be measured again on a vehicle, and it is written down here rather
+than left for a reader to find.
 
 ## How it is built
 
