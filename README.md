@@ -20,6 +20,9 @@ parameter was ever chosen against.
 
 ![Estimate against ground truth](media/trajectories.png)
 
+At the scale of the drive the two lines are one. The right-hand panel zooms until the gap is visible and puts a scale bar beside it, because a figure where nothing can be seen proves nothing. Regenerate it with
+`monoscale_evaluation/plot_trajectories.py <slalom_dir> <park_dir> <out.png>` from any pair of `--tum` outputs.
+
 The held-out figure is the one to read. Two drives are kept out of every sweep
 and every judgement, and they earn their place: in one week they refused four
 changes that had won on the tuning set, including the removal of the last fitted
