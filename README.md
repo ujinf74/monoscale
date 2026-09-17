@@ -2,9 +2,9 @@
 
 **Metric visual-inertial odometry whose scale comes from the ground plane**, and
 an occupancy grid built from the same images. No stereo, no lidar, no learned
-model, no prior map. The scale comes from the cameras' mounting height above the
-road, so one camera is enough and N is allowed; the cameras do not have to
-overlap.
+model, no prior map. One camera is enough, N is allowed, and they are free not
+to overlap -- the two on this vehicle face opposite ways and share no field of
+view at all.
 
 On a 111 m drive in CARLA, against the ground-truth pose:
 
@@ -19,6 +19,42 @@ and every judgement, and they earn their place: in one week they refused four
 changes that had won on the tuning set, including the removal of the last fitted
 multiplier in the stack. Numbers, the set they come from and how to reproduce
 them are in [`src/monoscale_evaluation/README.md`](src/monoscale_evaluation/README.md).
+
+## Where the scale comes from, and what follows from it
+
+Monocular vision has no scale. The usual sources are a second camera with a
+known baseline, a lidar, or an IMU excited enough to observe it. This takes it
+from the one distance a road vehicle already knows to a millimetre: **the height
+of the camera above the road**. A plane-induced homography between two frames
+recovers `t/h`, and `h` is the mounting height, so the answer is metric without
+anything else in the vehicle measuring length.
+
+Two properties follow, and neither is a design goal -- they are what is left
+over once the scale does not come from a baseline.
+
+**The cameras do not have to overlap, and here they cannot.** The two optical
+axes point in opposite directions and each carries a 139.47 deg horizontal
+field, so the front spans bearings −69.74 to +69.74 and the rear 110.27 to
+249.74. That leaves **40.53 deg of gap on each side**, computable from the
+configuration and not a claim: there is no shared feature anywhere, and no
+baseline to triangulate on. What the second camera buys is not stereo -- it is a
+nuisance that the two read with opposite sign, so averaging them cancels it.
+
+**One camera is a rig, not a degenerate case.** With the disagreement between
+two of them gone, `single_camera_variance` carries that weight instead. It
+solves every drive in both sets:
+
+| | bench mean / worst | held-out mean / worst |
+| --- | ---: | ---: |
+| front + rear | 0.0237 % / 0.0391 % | 0.1781 % / 0.2659 % |
+| front only | 0.0621 % / 0.1265 % | 0.5689 % / 1.0588 % |
+| rear only | 0.1474 % / 0.4529 % | 0.5694 % / 0.7701 % |
+
+So one camera costs a factor of 2.6 to 6.2 and does not fall over, and the
+front mount -- the lower one, which sees the ground it is about to drive over --
+is the better of the two to keep. A unit test holds the floor:
+`EstimatorDrive.OneCameraIsARigNotADegenerateCase`. What must not happen is that
+it silently stops solving.
 
 ## How it is built
 
@@ -123,10 +159,9 @@ front_image_topic: /sensing/camera/front/image_raw
 ```
 
 Add a name and the same parameters are read under it; frames are gathered by
-whichever combination of stamps sits closest together. With one camera the
-disagreement between cameras disappears as a signal and
-`single_camera_variance` stands in for it -- it runs, and it is noticeably worse
-than two.
+whichever combination of stamps sits closest together. There is no upper bound
+and no pairing: frames are aligned by stamp, not by being a pair. One camera is
+a supported configuration and costs a factor of 2.6 to 6.2 -- the table above.
 
 ## Tests
 
