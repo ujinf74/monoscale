@@ -8,4 +8,4 @@ python3 $SC/checkbag.py /home/i/hero_bags/curve_s05_t01 2>/dev/null | grep -v IN
 python3 $SC/checkbag.py /home/i/hero_bags/curve_s20_t01 2>/dev/null | grep -v INFO
 ./rec_straight.sh straight_s8_t01 8.0 20 > /tmp/rec_s8.log 2>&1
 python3 $SC/checkbag.py /home/i/hero_bags/straight_s8_t01 2>/dev/null | grep -v INFO
-echo "== 전부 완료"
+echo "== all done"

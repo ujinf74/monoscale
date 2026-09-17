@@ -1,9 +1,9 @@
-// The CUDA path: hand the whole match-aggregate-reduce to the monoscale_fast
+// The CUDA path: hand the whole match-aggregate-reduce to the sweep
 // kernel that plane_sweep.py already runs, so the C++ node and the python
 // reference share the exact arithmetic rather than approximate each other.
 //
 // The kernel is `plane_sweep_cuda_impl`, declared here with a weak fallback so
-// the library links whether or not monoscale_fast is on the link line: a build
+// the library links whether or not the kernels are on the link line: a build
 // without CUDA gets a stub that reports unavailable, and the Sweep falls back
 // to the CPU path in sweep.cpp.
 
@@ -17,7 +17,7 @@
 
 #include <Eigen/Dense>
 
-// Provided by monoscale_fast (src/sweep_kernels.cu) in the GLOBAL namespace,
+// Provided by src/sweep_kernels.cu in the GLOBAL namespace,
 // with C++ linkage. Declaring these inside namespace monoscale_occupancy made the
 // compiler reference monoscale_occupancy::plane_sweep_cuda_* instead, which have no
 // definition -- the weak symbol stayed null and the backend silently fell back

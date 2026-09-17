@@ -472,7 +472,7 @@ struct EstimatorSettings
   //
   // What removing it costs, and the asymmetry is the whole argument:
   //
-  //   set                 ATE/거리              끝오차/거리
+  //   set                 ATE/dist              final/dist
   //   bench 9 (tuned)     0.0224% -> 0.0523%    0.0281% -> 0.0919%   +134%
   //   held-out park 2     0.1875% -> 0.1903%    0.1750% -> 0.1891%   +1.5%
   //

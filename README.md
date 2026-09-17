@@ -1,31 +1,58 @@
 # monoscale
 
-지면평면을 기준으로 **미터 단위 스케일을 얻는 시각-관성 오도메트리**와, 그
-과정에서 나온 지면점으로 만드는 **점유격자**다. 스테레오도 라이다도 쓰지
-않는다. 스케일은 카메라 장착 높이와 지면평면에서 나오고, 카메라는 1대부터
-N대까지 쓸 수 있다. 사전 기록 지도를 쓰지 않고(mapless), 학습 모델도 쓰지
-않는다.
+**Metric visual-inertial odometry whose scale comes from the ground plane**, and
+an occupancy grid built from the same images. No stereo, no lidar, no learned
+model, no prior map. The scale comes from the cameras' mounting height above the
+road, so one camera is enough and N is allowed; the cameras do not have to
+overlap.
 
-차량에 올라가는 것은 전부 C++이다. 이 스택은 Python 추정기로 개발됐고, 그
-Python은 궤적이 일치하는 것을 확인한 뒤 이력에만 남기고 트리에서 걷어냈다.
-어느 시점을 옮긴 것인지와 무엇을 남기지 않았는지는
-[`src/monoscale_core/README.md`](src/monoscale_core/README.md)에 있다.
+On a 111 m drive in CARLA, against the ground-truth pose:
 
-## 패키지
+| | mean | worst |
+| --- | ---: | ---: |
+| **ATE / distance travelled** | **0.0237 %** | 0.0391 % |
+| **final error / distance** | **0.0324 %** | 0.0627 % |
+| held-out, never tuned on | **0.1781 %** | 0.2659 % |
 
-| 패키지 | 하는 일 |
+The held-out figure is the one to read. Two drives are kept out of every sweep
+and every judgement, and they earn their place: in one week they refused four
+changes that had won on the tuning set, including the removal of the last fitted
+multiplier in the stack. Numbers, the set they come from and how to reproduce
+them are in [`src/monoscale_evaluation/README.md`](src/monoscale_evaluation/README.md).
+
+## How it is built
+
+Every constant in `vision_fisheye.param.yaml` carries the measurement that chose
+it, and the measurements that rejected the alternatives. That is why the config
+is 90 % comment: a value without its evidence is a value nobody can change
+safely later. Ideas that were tried and lost are recorded with their numbers so
+they are not tried again, and several of them were mine.
+
+Two rules do most of the work. **Measure the quantity, do not fit the score** --
+the scale correction that reads 0.1 % is derived from a millimetre of frame
+geometry, not swept against ATE. And **held-out decides** -- a change that wins
+on the bench and loses on the two park drives is an artefact of the bench.
+
+Everything that runs on the vehicle is C++. The stack was developed against a
+Python estimator, which was removed from the tree once the trajectories matched;
+what was carried across and what was not is in
+[`src/monoscale_core/README.md`](src/monoscale_core/README.md).
+
+## Packages
+
+| package | what it does |
 | --- | --- |
-| `monoscale_core` | 추정 그 자체. ROS를 모른다 — 그래서 그래프 없이 시험되고, 나중에 추종기와 한 프로세스로 묶일 수 있다. |
-| `monoscale_tracker` | C++ KLT 전단. 이미지에서 특징 궤적만 뽑아 발행한다. |
-| `monoscale_odometry` | 위를 감싸는 노드. bag을 직접 재생해 채점하는 `monoscale_replay`도 여기 있다. |
-| `monoscale_occupancy_grid_map` | 원본 어안 영상을 평면 스윕해 점유격자를 만든다. CUDA 필요. |
-| `monoscale_evaluation` | 참값 대비 채점. 차량에는 올리지 않는다. |
-| `monoscale_carla` | CARLA 전용: 카메라 조립, 참값 탭, 주행 스크립트. |
+| `monoscale_core` | the estimation itself. Knows nothing of ROS, so it is tested without a graph and can later share a process with a controller. |
+| `monoscale_tracker` | the C++ KLT front end. Turns images into feature tracks and publishes those alone. |
+| `monoscale_odometry` | the node around it, and `monoscale_replay`, which scores a bag directly. |
+| `monoscale_occupancy_grid_map` | plane-sweeps the raw fisheye into an occupancy grid. CUDA for real time. |
+| `monoscale_evaluation` | scoring against truth. Not deployed. |
+| `monoscale_carla` | CARLA only: camera assembly, the truth tap, the drive scripts. |
 
-## 토픽
+## Topics
 
 ```
-이미지 ─┬─→ monoscale_tracker  →  /vision/tracks/<camera>
+images ─┬─→ monoscale_tracker  →  /vision/tracks/<camera>
         │                          └→ monoscale_odometry
         │                                 ├→ /localization/kinematic_state
         │                                 └→ /perception/ground_points
@@ -34,27 +61,29 @@ Python은 궤적이 일치하는 것을 확인한 뒤 이력에만 남기고 트
                   + /localization/kinematic_state
 ```
 
-두 갈래가 이미지에서 갈린다. 오도메트리는 특징 궤적만 보고, 점유격자는 원본
-영상을 다시 본다.
+The two branches split at the image. Odometry sees only feature tracks; the grid
+looks at the raw frames again.
 
-격자는 **평면 스윕**으로 만든다. 세계-수평 평면을 −0.15 m부터 0.05 m 계단으로
-쌓아 올리며 화소마다 어느 높이에서 두 시점이 가장 잘 맞는지를 ZNCC로 재고,
-SGM으로 집계해 그 화소의 표면 높이를 정한다. 즉 높이가 **판정 결과**이지 특징
-삼각측량의 부산물이 아니다. 자세(롤·피치)는 구독한 오도메트리에서 직접 꺼내
-화소별 워프에 넣는다.
+The grid is a **plane sweep**: world-horizontal planes are stacked from −0.15 m
+in 0.05 m steps, each pixel is scored by ZNCC for how well two views agree at
+each height, and SGM aggregates that into the surface height for that pixel. The
+height is therefore a decision, not a by-product of triangulating features.
+Attitude comes straight out of the subscribed odometry and enters the per-pixel
+warp.
 
-이전 구현은 오도메트리가 발행하는 `/perception/ground_points`를 격자에 누적했다.
-그 토픽은 지금도 나오지만 격자는 더 이상 쓰지 않는다. 코너를 내주지 않는
-장애물은 그 경로에 존재하지 않았고, 깊이 사슬에 2026-09-02 감사가 측정한 결함
-다섯 개가 있었다 — 그중 가장 큰 것은 워프가 피치·롤을 0으로 고정한 것으로,
-프레임 공통 오차의 94 %였다.
+An earlier version accumulated the odometry's `/perception/ground_points` into
+the grid. That topic is still published and the grid no longer uses it: an
+obstacle that yields no corners never existed on that path, and an audit of the
+depth chain found five defects, the largest of which was the warp holding pitch
+and roll at zero -- 94 % of the frame-common error.
 
-격자는 0.1 m 해상도의 고정 60 x 60 m이고 첫 포즈에 앵커된다. 참값 대비 채점은
-`approach_hd60_occ_b`에서 G1(차량을 자유라 함) 0, G2(막힌 곳을 자유라 함) 3,
-G3(커버) 0.831, G4(오탐) 29, 경로유령 0이다. 파이썬 참조 구현이 같은 조건에서
-G2 2 / G3 0.829 / G4 39이므로, 커버와 오탐에서는 이쪽이 앞선다.
+The grid is a fixed 60 x 60 m at 0.1 m, anchored to the first pose. Scored
+against truth on `approach_hd60_occ_b`: G1 (calling the vehicle free) 0, G2
+(calling blocked ground free) 3, G3 (cover) 0.831, G4 (false positives) 29, path
+ghosts 0. A Python reference under the same conditions gives G2 2 / G3 0.829 /
+G4 39, so cover and false positives are ahead here.
 
-## 빌드와 실행
+## Building and running
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -64,51 +93,53 @@ source install/setup.bash
 ros2 launch monoscale_odometry odometry.launch.py
 ```
 
-오도메트리에는 CUDA가 필요 없다. `monoscale_tracker`의 광류에 GPU 경로가
-있지만(`use_cuda`), cudaoptflow가 있는 OpenCV를 만났을 때만 빌드되고 기본값은
-꺼져 있다.
+Odometry needs no CUDA. `monoscale_tracker` has a GPU path for the optical flow
+(`use_cuda`), built only when an OpenCV with cudaoptflow is found, and off by
+default.
 
-**점유격자에는 필요하다.** 평면 스윕의 CPU 경로는 키프레임 674장에 28분이라
-배포할 수 없고, CUDA 경로는 키프레임당 0.2초다. 커널은
-`monoscale_fast/src/sweep_kernels.cu`를 CMake가 직접 컴파일해 파이썬 참조
-구현과 같은 산술을 공유한다. 그 파일이나 nvcc가 없으면 CPU 경로로 조용히
-물러나므로, 빌드가 성공했다고 배포 가능한 것은 아니다 — 첫 실행에서
-`cuda backend: available=1`을 확인할 것.
+**The occupancy grid does need it.** The CPU sweep takes 28 minutes over 674
+keyframes and cannot ship; the CUDA path takes 0.2 s per keyframe. The kernel is
+`src/monoscale_occupancy_grid_map/src/sweep_kernels.cu` and CMake compiles it
+when `nvcc` is present. Without `nvcc` the build quietly falls back to the CPU
+path, so a successful build is not a deployable one -- check the first run for
+`cuda backend: available=1`.
 
-## 카메라 대수
+## Number of cameras
 
-`camera_names`가 대수를 정한다. 기본값은 차량에 달린 두 대다.
+`camera_names` sets it. The default is the two on the vehicle.
 
-추정기와 트래커가 이름이 다르다: 추정기는 `camera_names`, 트래커는 `cameras`를
-읽는다. 이미지 토픽도 마찬가지로 추정기는 카메라 이름으로 합성한
-`<이름>_image_topic`을, 트래커는 `image_topics` 배열을 읽는다. 배포에서는
-`deployment.param.yaml`이 트래커 쪽을 채운다.
+The estimator and the tracker use different keys: the estimator reads
+`camera_names`, the tracker `cameras`. The same split applies to image topics --
+the estimator composes `<name>_image_topic`, the tracker reads an `image_topics`
+array. In deployment `deployment.param.yaml` fills the tracker's side.
 
 ```yaml
-camera_names: ['front', 'rear']       # 추정기
-cameras: ['front', 'rear']            # 트래커
-front.k: [...]                      # 3x3, 행 우선
+camera_names: ['front', 'rear']       # estimator
+cameras: ['front', 'rear']            # tracker
+front.k: [...]                        # 3x3, row major
 front.rotation_base_from_camera: [...]   # 3x3
 front.translation_base_from_camera: [x, y, z]
 front_image_topic: /sensing/camera/front/image_raw
 ```
 
-이름을 하나 더 넣으면 그 이름으로 같은 파라미터를 읽고, 프레임은 스탬프가
-가장 가깝게 모이는 조합으로 정렬된다. 한 대만 쓰면 카메라끼리의 불일치라는
-신호가 사라지므로 `single_camera_variance`가 그 자리를 대신한다 — 돌긴 하지만
-두 대보다 눈에 띄게 나쁘다.
+Add a name and the same parameters are read under it; frames are gathered by
+whichever combination of stamps sits closest together. With one camera the
+disagreement between cameras disappears as a signal and
+`single_camera_variance` stands in for it -- it runs, and it is noticeably worse
+than two.
 
-## 테스트
+## Tests
 
 ```bash
-colcon test --packages-select monoscale_core
+colcon test
 colcon test-result --all
 ```
 
-기하, 앵커맵, 필터, 관성, 자세, 그리고 합성 주행 위의 추정기 전체까지
-132개다. 채점 패키지의 Python 테스트는 `python3 -m pytest src/monoscale_evaluation/test`.
+148 of them: the geometry, the anchor map, the filters, the inertial path, the
+attitude, the estimator end to end over a synthetic drive, and two that hold the
+vehicle's frame tree against the simulator's own calibration.
 
-## 기록된 주행에 대고 채점하기
+## Scoring against a recorded drive
 
 ```bash
 ros2 run monoscale_odometry monoscale_replay <bag> \
@@ -116,9 +147,14 @@ ros2 run monoscale_odometry monoscale_replay <bag> \
   --set track_topic_prefix:=/vision/tracks
 ```
 
-bag을 직접 읽어 라이브러리를 녹화 순서대로 돌린다. 시계도 난수도 읽지 않으므로
-같은 bag은 데스크톱에서든 Orin에서든 같은 궤적을 낸다 — 회귀가 보이는 것은
-그 때문이다.
+It reads the bag itself and drives the library in recording order. It reads no
+clock and no random source, so one bag gives one trajectory on a desktop and on
+an Orin alike -- which is why regressions are visible at all.
 
-현재 수치와 그것을 다시 만드는 절차, 튜닝에 쓰지 않는 held-out 세트는
-`src/monoscale_evaluation/README.md`에 있다.
+## Reproducing the recordings
+
+[`sim/`](sim/README.md) carries the conditions the bags were recorded under: the
+sensor kit the odometry's extrinsics are derived from, the sensor mapping, and
+the drive scripts. It is there because a millimetre of mounting height moves the
+result by 0.1 %, so the calibration and the config that depends on it have to
+move in one commit.

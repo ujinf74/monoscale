@@ -5,7 +5,7 @@
 // buffered frames the way plane_sweep.py does offline, and publishes the
 // accumulated grid on a timer. The pose comes from odometry alone -- this node
 // does no estimation and holds no transform tree, which is the seam that let
-// the whole thing be debugged offline (see docs/점유지도_노드_설계.md).
+// the whole thing be debugged offline (the node design note).
 
 #include <deque>
 #include <map>

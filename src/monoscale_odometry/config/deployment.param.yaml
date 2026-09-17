@@ -18,7 +18,7 @@ feature_tracker:
     # written twice in two spellings. The estimator takes both now; the arrays
     # win where they are given.
     # Images arrive from the bridge as best_effort. Demanding reliable here is
-    # the failure `작업_규율` records as "발행: front 0 장 (버림 0)": a
+    # the failure the working notes record as "published: front 0 frames (0 dropped)": a
     # subscription that never matches, and a node that looks alive.
     input_reliability: best_effort
     input_queue_depth: 30

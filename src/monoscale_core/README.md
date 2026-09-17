@@ -92,5 +92,5 @@ Measured on the same recording, per solve:
 | **total** | **2.25 ms** | **0.61** | **11.91** | **2.43** |
 
 The ground projection barely moves because the Python was already calling C++
-for it through `monoscale_fast`. What changed by an order of magnitude is the
+for it through the CUDA sweep. What changed by an order of magnitude is the
 bookkeeping around it.

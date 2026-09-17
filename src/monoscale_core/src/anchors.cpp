@@ -275,7 +275,7 @@ bool GroundAnchorMap::usable_at(int64_t slot) const
 // gate becomes a function of range rather than of consistency -- backwards.
 // Its low tail is the anchors with the most longitudinal information, which
 // are the ones abreast holding 57% of it, and those are what it cuts:
-// ratio 4 measures 0.0410% mean ATE/거리 against the absolute gate's 0.0217%,
+// ratio 4 measures 0.0410% mean ATE/dist against the absolute gate's 0.0217%,
 // and even at its best, ratio 8, it is 0.0240%.
 //
 // An absolute threshold is the right instrument for a scatter that does not
@@ -319,7 +319,7 @@ double GroundAnchorMap::weight_at(int64_t slot) const
   //   straight_s8      measured 120    scatter 0.0012    drift 6.6
   //
   // four orders of magnitude below the terms it is added to, and removing it
-  // moves nothing: 0.0217% mean ATE/거리 against 0.0213%, with the worst case
+  // moves nothing: 0.0217% mean ATE/dist against 0.0213%, with the worst case
   // slightly better. It is small because the sightings are each written in the
   // frame the estimate had just settled on, so they agree with each other far
   // better than any of them agrees with the ground -- it measures the

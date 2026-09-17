@@ -582,7 +582,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
   // right, on the theory that a plane tilt is what grows with range -- widens
   // the spread from 0.58% to 0.98% and takes straight_s8 from +0.089% to
   // +1.287%. And capping `anchor_max_range_m` at 2.8, which reads as the
-  // bench's best point at 0.0214% mean and 0.0303% worst ATE/거리 against
+  // bench's best point at 0.0214% mean and 0.0303% worst ATE/dist against
   // 0.0226/0.0375, is a fit: its neighbours at 2.4 and 3.4 both measure
   // 0.0285%, the final error is worse at every capped value, and the two
   // held-out park drives go 0.1880% -> 0.2414% mean with the final error
@@ -2003,7 +2003,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         // from the alignment's radial residual while `pair_scale_gain` drove
         // the same state from the pair solve's regression. Two paths, one
         // quantity, and they were partly cancelling each other: removing the
-        // pair one alone takes the worst ATE/거리 from 0.0361% to 0.1345%,
+        // pair one alone takes the worst ATE/dist from 0.0361% to 0.1345%,
         // while removing this one takes the mean from 0.0254% to 0.0239% and
         // RPE5 from 0.133% to 0.130%. Correcting the same error twice through
         // different observations is how a stack ends up needing both.
@@ -2055,7 +2055,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       //
       // A gain stood here, blending the map's displacement against the pair
       // solve's so that only part of the map's standing disagreement with the
-      // fused pose was applied. It measures 0.0217% mean ATE/거리 at 0.7
+      // fused pose was applied. It measures 0.0217% mean ATE/dist at 0.7
       // against 0.0226% at unity -- a real trend and a small one -- and what
       // it is doing is discounting a correction that is correlated with the
       // pose it corrects. That correlation is the thing to write down; a
@@ -2125,7 +2125,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       // missed its peak, and what it then reports is unbounded: the failures
       // reach 3.8x and 32x, and two consecutive frames of the latter took
       // str_4.0 from 0.079 to 1.347. The fused path has always rejected these.
-      // This one never did, and unguarded it measures 0.8304% mean ATE/거리
+      // This one never did, and unguarded it measures 0.8304% mean ATE/dist
       // against the deployed 0.0224%, which is not a worse blend but a handful
       // of frames destroying whole drives.
       const double disagreement =
@@ -2407,7 +2407,7 @@ void Estimator::process_pair()
     // between one and six millimetres.
     //
     // Gated on the pose graph, the nine drives go 0.0226% to 0.0232% mean
-    // ATE/거리 and the two held-out park drives go 0.1880% to 0.2054% with the
+    // ATE/dist and the two held-out park drives go 0.1880% to 0.2054% with the
     // final error 0.1777% to 0.1894%. The running average and the remembered
     // mean differ below the fourth decimal and the difference is worth nine per
     // cent of the held-out score.
@@ -2694,7 +2694,7 @@ void Estimator::process_pair()
   //
   // park is the exception, 0.66 degrees of pitch standard deviation and 3.1
   // at worst, through gear changes and braking. There this earns its keep:
-  // ATE/거리 0.1892% -> 0.1843% mean and 0.2729% -> 0.2631% worst, with
+  // ATE/dist 0.1892% -> 0.1843% mean and 0.2729% -> 0.2631% worst, with
   // computed weights of 0.503 and 0.377. On the nine it costs 0.0233% ->
   // 0.0252%, which is what moving the weights off even buys when there is
   // nothing to cancel.
@@ -2747,7 +2747,7 @@ void Estimator::process_pair()
   }
 
   // The even weight is the best single choice, and it is not exactly right on
-  // any drive. Sweeping a fixed weight on the front camera, ATE/거리 per drive:
+  // any drive. Sweeping a fixed weight on the front camera, ATE/dist per drive:
   //
   //   w_front     0.40    0.45    0.50    0.55    0.60
   //   str_v2    0.0173  0.0136  0.0243  0.0426  0.0613
@@ -2916,7 +2916,7 @@ void Estimator::process_pair()
       //   dx = s sin(psi)/psi,   dy = s (1 - cos psi)/psi
       //
       // Measured, that costs nothing: the nine drives read 0.0241% / 0.0363%
-      // mean and worst ATE/거리 against the deployed 0.0226% / 0.0375%, inside
+      // mean and worst ATE/dist against the deployed 0.0226% / 0.0375%, inside
       // the 1.05x repeat spread. A RANSAC over hundreds of ground points is
       // replaced by two trigonometric terms.
       //
@@ -3044,7 +3044,7 @@ void Estimator::process_pair()
         // monotonically at every scale tried:
         //
         //   road sigma inflated by  1     2     4.3   8     16    40
-        //   ATE/거리                0.0238 0.0358 0.0677 0.0931 0.1107 0.1181 %
+        //   ATE/dist                0.0238 0.0358 0.0677 0.0931 0.1107 0.1181 %
         //
         // against 0.0233% for the constant. The reason is that both variances
         // are optimistic and by very different amounts. The road fit's is 4.3x
@@ -3069,7 +3069,7 @@ void Estimator::process_pair()
         // spends itself on and the only part that bounds longitudinal drift.
         // That is what `photometric_when_mapless` is protecting: switched off
         // it takes RPE 5m from 0.133% to 0.112%, because the hop's length
-        // really is measured better, while ATE/거리 goes 0.0224% to 0.0522%.
+        // really is measured better, while ATE/dist goes 0.0224% to 0.0522%.
         //
         // Separating the two so the length lands on the displacement alone was
         // built and does not work, and the reason is the same one that sank the
@@ -3080,7 +3080,7 @@ void Estimator::process_pair()
         // too and the difference is not a clean displacement either. Taking it
         // as the hop outright doubles the error, which is the note in the map
         // branch; using it to define the correction inherits the same defect.
-        // Measured: 0.0781% mean ATE/거리 weighting the correction by the
+        // Measured: 0.0781% mean ATE/dist weighting the correction by the
         // fusing camera's share, 0.1340% at full strength, against 0.0522% for
         // not separating them at all.
         //
@@ -3499,7 +3499,7 @@ void Estimator::process_pair()
     // by the hop's own variance, offer the map's placement with a variance of
     // its own, and combine them the way two statements about one quantity
     // combine. It is the right algebra for a map. It measures 0.0340% mean
-    // ATE/거리 against 0.0226% for the branch, with the worst case at 0.0652%
+    // ATE/dist against 0.0226% for the branch, with the worst case at 0.0652%
     // against 0.0373%, and its normalised innovation sits at 3.2-3.8 once both
     // covariances have been made honest by their effective sample counts.
     //

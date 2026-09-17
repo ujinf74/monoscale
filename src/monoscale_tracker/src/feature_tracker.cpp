@@ -1838,7 +1838,7 @@ private:
     //
     // What it costs, only this key moved:
     //
-    //   set          ATE/거리              끝오차/거리
+    //   set          ATE/dist              final/dist
     //   bench 9      0.0237% -> 0.0247%    0.0326% -> 0.0324%  (worst 0.0391 -> 0.0404)
     //   held-out 2   0.1781% -> 0.1826%    0.1461% -> 0.1492%  (worst 0.2659 -> 0.2956,
     //                                                           final worst 0.1937 -> 0.2333)

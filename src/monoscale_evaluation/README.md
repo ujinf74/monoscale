@@ -1,68 +1,75 @@
 # monoscale_evaluation
 
-재생된 주행을 채점하고, 측정을 진값에 대고 확인하는 도구.
+Scoring replayed drives, and checking measurements against truth.
 
-## 벤치마크
+## The benchmark
 
-이 스택이 지금 얼마를 내는지, 그리고 그 숫자를 어떻게 다시 만드는지.
+What the stack scores now, and how to make those numbers again.
 
-지표가 무엇을 재는지는 여기서 다시 쓰지 않는다.
-`monoscale_evaluation/benchmark.py`의 docstring이
-RPE를 헤드라인으로 쓰는 이유, `hop%`와 `walk`가 무엇을 가르는지, 반복 녹화를
-최악으로 세는 이유를 담고 있다. 여기 있는 것은 **어떤 주행에** 대고 재는지,
-**어떻게** 재는지, 그리고 **지금 얼마인지**다.
+What the metrics mean is not repeated here. The docstring of
+`monoscale_evaluation/benchmark.py` carries why RPE is the headline, what `hop%`
+and `walk` separate, and why repeated recordings are counted at their worst.
+This is about **which drives**, **how**, and **what it is now**.
 
-## 두 세트
+## Two sets
 
-**튜닝 세트 9개.** 파라미터를 고를 때 보는 것.
+**Nine tuning drives.** What is looked at when choosing parameters.
 
-| tag | bag | 조건 | 도로 |
+| tag | bag | condition | road |
 | --- | --- | --- | --- |
-| `str_v2` | `straight120_v2_r2` | 직진 1.9 m/s | A |
-| `str_v3` | `straight120_v3_r2` | 같은 조건 재녹화 | A |
-| `str_v4` | `straight120_v4_r2` | 같은 조건 재녹화 | A |
-| `str_1.5` | `straight110_s15_r2` | 직진 1.4 m/s | A |
-| `str_4.0` | `straight110_s4_r2` | 직진 3.7 m/s | A |
-| `str_8.0` | `straight_s8_t01_r3` | 직진 7.5 m/s | B |
-| `curve_s05` | `curve_s05_t01c_r3` | 슬라럼 약 (0.0013 rad/frame) | B |
-| `curve_s10` | `curve_s10_t01d_r3` | 슬라럼 중 (0.0025) | B |
-| `curve_s20` | `curve_s20_t01c_r3` | 슬라럼 강 (0.0049) | B |
+| `str_v2` | `straight120_v2_r2` | straight, 1.9 m/s | A |
+| `str_v3` | `straight120_v3_r2` | same condition, re-recorded | A |
+| `str_v4` | `straight120_v4_r2` | same condition, re-recorded | A |
+| `str_1.5` | `straight110_s15_r2` | straight, 1.4 m/s | A |
+| `str_4.0` | `straight110_s4_r2` | straight, 3.7 m/s | A |
+| `str_8.0` | `straight_s8_t01_r3` | straight, 7.5 m/s | B |
+| `curve_s05` | `curve_s05_t01c_r3` | gentle slalom (0.0013 rad/frame) | B |
+| `curve_s10` | `curve_s10_t01d_r3` | medium slalom (0.0025) | B |
+| `curve_s20` | `curve_s20_t01c_r3` | hard slalom (0.0049) | B |
 
-`str_v2`/`v3`/`v4`는 **한 조건의 세 녹화**다. 헤드라인에는 한 번, 최악으로
-들어가고, 따로 반복폭으로 보고된다.
+`str_v2`/`v3`/`v4` are **one condition recorded three times**. They enter the
+headline once, at their worst, and are reported separately as the repeat spread.
 
-도로 A는 스폰 x≈−48.8의 차선, 도로 B는 y≈199. 진값에서 읽으면 A는 100 m에 걸쳐
-z가 2.1–3.8 mm 움직이고 국소 경사가 0.038–0.099° 흩어지며, B는 0.0–1.3 mm에
-0.004°로 평평하다. 경사는 양쪽 다 0.0000°이므로 언덕은 없다. 이 차이가 지면
-투영의 원거리 오차를 가르므로, 결과가 도로별로 갈리면 우연이 아니다.
+Road A is the lane at spawn x~-48.8, road B is at y~-199. Read from truth, A
+moves 2.1-3.8 mm in z over 100 m with local slopes spread over 0.038-0.099 deg,
+while B is flat at 0.0-1.3 mm and 0.004 deg. The gradient is 0.0000 deg on both,
+so neither is a hill. That difference separates the far-range error of the
+ground projection, so a result that splits by road is not a coincidence.
 
-**held-out 2개.** 파라미터를 고를 때 **보지 않는** 것.
+**Two held-out drives.** What is **not** looked at when choosing parameters.
 
-| tag | bag | 조건 |
+| tag | bag | condition |
 | --- | --- | --- |
-| `park_clean` | `park_clean_r2` | 주차 기동 30 m, 후진·기어변속 포함 |
-| `park_obst` | `park_obst_a_r2` | 주차 기동 13 m, 장애물 |
+| `park_clean` | `park_clean_r2` | 30 m parking manoeuvre, reverse and gear changes |
+| `park_obst` | `park_obst_a_r2` | 13 m parking manoeuvre, obstacle |
 
-주차는 13–30 m의 저속 기동이라 절대 수치가 벤치의 10배다. **절대값을 벤치와
-비교하는 것은 무의미하고, 같은 세트 안의 A/B가 이 세트의 용도다.** 짧은
-`park_obst`가 판별력의 대부분을 갖는다.
+Parking is a 13-30 m low-speed manoeuvre, so the absolute figures are ten times
+the bench's. **Comparing the absolute numbers to the bench is meaningless; what
+this set is for is an A/B inside itself.** The short `park_obst` carries most of
+the discriminating power.
 
-이 세트는 실제로 쓸모를 증명했다. 2026-09-10 하루에만 벤치에서 이긴 변경 두
-개를 반증했다 — 자기 앵커 재바인딩(벤치 최악 −17%, held-out 평균 +13% 끝오차
-+25%)과 `anchor_max_range_m: 2.8`(벤치 최악 −19%, held-out 끝오차 2.2배).
-**벤치에서 이겼다는 것만으로 배포하지 않는다.**
+The set has earned its place. On 2026-09-10 alone it refuted two changes that
+had won on the bench -- cross-source anchor rebinding (bench worst -17%,
+held-out mean +13% and final error +25%) and `anchor_max_range_m: 2.8` (bench
+worst -19%, held-out final error 2.2x). In the week of 2026-09-11 it refused two
+more: widening `anchor_max_range_m` and `ground_max_distance_m` together, which
+is -11% of bench ATE and +7.5% held-out, and a flow-derived mask on feature
+births, which is -24% of the tracker's flow stage and +11% of the held-out worst
+ATE. **Winning on the bench is not a reason to deploy.**
 
-## 다시 만들기
+## Making the numbers again
 
-두 단계다. 트래커로 bag에서 트랙을 뽑고, 추정기로 재생해 채점한다.
+Two stages: pull tracks out of the bag with the tracker, then replay them
+through the estimator and score.
 
 ```bash
-M=/home/i/monoscale
+M=<repo>
+BAGS=<where the recordings are>
 BASE="--params-file $M/src/monoscale_odometry/config/vision_fisheye.param.yaml \
   -p cameras:=['front','rear'] \
   -p image_topics:=['/sensing/camera/front/fisheye/image_raw','/sensing/camera/rear/fisheye/image_raw']"
 
-$M/build/monoscale_tracker/feature_tracker --offline /home/i/hero_bags/<bag> <tracks_dir> \
+$M/build/monoscale_tracker/feature_tracker --offline $BAGS/<bag> <tracks_dir> \
   --ros-args $BASE
 
 $M/build/monoscale_odometry/monoscale_replay <tracks_dir> \
@@ -73,113 +80,128 @@ python3 $M/src/monoscale_evaluation/monoscale_evaluation/benchmark.py \
   str_v2=<out_v2> str_v3=<out_v3> ... curve_s20=<out_cs20>
 ```
 
-**CARLA는 `-quality-level=Low`로 띄운다.** 새 bag을 녹화할 때의 이야기이고,
-이것이 어긋나면 그 bag은 벤치 세트와 비교할 수 없다. 측정 2026-09-10: 같은
-직진 1.4 m/s를 `-quality-level=Epic -RenderOffScreen`으로 띄운 서버에서 찍으면
-광도 길이가 진값 대비 **−6.826%**, `-quality-level=Low`로 찍으면 **+0.111%**로
-09-02의 s15(+0.076%)와 같은 범위다. 62배 차이가 실행 인자 하나다.
+**Start CARLA with `-quality-level=Low`.** This matters when recording a new
+bag, and a bag recorded otherwise cannot be compared with this set. Measured
+2026-09-10: the same straight at 1.4 m/s recorded against a server started with
+`-quality-level=Epic -RenderOffScreen` gives a photometric length of **-6.826%**
+against truth, and `-quality-level=Low` gives **+0.111%**, which is the range of
+the 09-02 `str_1.5` at +0.076%. A factor of sixty in one launch argument.
 
-광도 정합은 노면 질감 위에서 동작하고 품질 레벨이 그 질감·그림자·후처리를
-바꾼다. 이 함정은 결론을 하나 만들어냈다가 지웠다 — Epic으로 찍은 빠른(3.4 m/s)
-드라이브가 −2.0%, 느린(0.8 m/s) 드라이브가 −7.7%로 나와 "적합에 step 45~70 mm의
-작동 창이 있다"는 발견이 섰는데, Low로 다시 찍으니 각각 +0.150%와 +0.129%로
-벤치 범위 안이었다. 창은 없었다. `record_run.sh`는 태양 각도를 "비교 가능성 때문에" 고정하면서 렌더링
-품질은 서버를 띄우는 사람에게 맡겨 두었다.
+The photometric alignment works on the road's texture and the quality level
+changes that texture, its shadows and its post-processing. The trap produced a
+conclusion and then erased it: recorded at Epic, a fast drive (3.4 m/s) read
+-2.0% and a slow one (0.8 m/s) -7.7%, which stood up as "the fit has a working
+range of 45-70 mm of step" -- re-recorded at Low they read +0.150% and +0.129%,
+inside the bench's own range. There was no window. `record_run.sh` pins the sun
+angle "for comparability" and leaves the rendering quality to whoever starts the
+server.
 
 ```bash
-cd /home/i/CARLA_0.9.16 && ./CarlaUE4.sh -quality-level=Low
+cd <CARLA> && ./CarlaUE4.sh -quality-level=Low
 ```
 
-**추출은 파라미터 파일 단독으로 한다.** 그것이 `odometry.launch.py`가 하는 것과
-같기 때문이고, 여기서 어긋나면 벤치가 배포되지 않는 설정을 재게 된다. 2026-09-08
-까지 추출 스크립트가 `road_step_esm:=true`를 얹고 있었고 yaml에는 없었다 —
-ATE/거리 평균이 0.0445%로 측정되던 것이 키를 넣자 0.0229%였다. **두 배가 이
-한 줄이었다.** 클래스를 잡는 검사는 하나뿐이다: 파라미터 파일만으로 추출해서
-채점하라.
+**Extract with the parameter file alone.** That is what `odometry.launch.py`
+does, and a difference here means the bench is scoring a configuration that is
+not deployed. Until 2026-09-08 the extraction script added `road_step_esm:=true`
+and the yaml did not carry it -- ATE over distance measured 0.0445% and read
+0.0229% once the key was written down. **A factor of two was one line.** There
+is one check that catches the class: extract with the parameter file only, and
+score that.
 
-트랙 추출물은 추정기 쪽 변경에는 유효하다. 트래커 파라미터가 바뀔 때만 다시
-뽑으면 된다.
+Track extractions stay valid across estimator-side changes. They have to be
+pulled again only when a tracker parameter moves.
 
-## 지금 (2026-09-12, `road_step_esm_dof: 3`)
+## Now (2026-09-12, `road_step_esm_dof: 3`)
 
-|  | 벤치 9 평균 | 벤치 9 최악 | held-out 평균 | held-out 최악 |
+|  | bench 9 mean | bench 9 worst | held-out mean | held-out worst |
 | --- | ---: | ---: | ---: | ---: |
-| **ATE/거리** | **0.0237 %** | **0.0391 %** | **0.1781 %** | **0.2659 %** |
-| **끝오차/거리** | **0.0326 %** | **0.0627 %** | **0.1461 %** | **0.1937 %** |
+| **ATE / distance** | **0.0237 %** | **0.0391 %** | **0.1781 %** | **0.2659 %** |
+| **final error / distance** | **0.0326 %** | **0.0627 %** | **0.1461 %** | **0.1937 %** |
 | hop% | 0.14 | 0.17 | 0.83 | 1.29 |
 | walk | 1.10 | 2.57 | 0.76 | 1.17 |
-| 반복폭 | 1.06x | | | |
+| repeat spread | 1.06x | | | |
 
-2026-09-11~12의 변경을 순서대로:
+The changes of 2026-09-11 and 12, in order:
 
-| | 벤치 ATE | 벤치 끝오차 | held-out ATE | held-out 끝오차 |
+| | bench ATE | bench final | held-out ATE | held-out final |
 | --- | ---: | ---: | ---: | ---: |
-| 그 전 (`ef10fe7`) | 0.0226 % | 0.0287 % | 0.1880 % | 0.1777 % |
-| `road_step_arc` 배포 | 0.0224 | 0.0281 | 0.1875 | 0.1750 |
-| `photometric_scale` 제거 | 0.0523 | 0.0919 | 0.1903 | 0.1891 |
-| 마운트 높이 보정 | 0.0234 | 0.0324 | 0.1833 | 0.1582 |
+| before (`ef10fe7`) | 0.0226 % | 0.0287 % | 0.1880 % | 0.1777 % |
+| `road_step_arc` deployed | 0.0224 | 0.0281 | 0.1875 | 0.1750 |
+| `photometric_scale` removed | 0.0523 | 0.0919 | 0.1903 | 0.1891 |
+| mount heights corrected | 0.0234 | 0.0324 | 0.1833 | 0.1582 |
 | **`road_step_esm_dof: 3`** | **0.0237** | **0.0326** | **0.1781** | **0.1461** |
 
-적합 승수 하나를 들어내고 프레임의 1 mm를 고치고 자유도 하나를 줄인 결과,
-**벤치는 반복폭 안에서 제자리이고 held-out은 ATE −5.3%, 끝오차 −17.8%**다.
-튜닝하지 않은 세트가 좋아진 것이 요점이다.
+Taking out the one fitted multiplier, correcting a millimetre of frame geometry
+and dropping one degree of freedom leaves **the bench where it was, inside its
+repeat spread, and the held-out set better by 5.3% of ATE and 17.8% of the final
+error.** The set that was never tuned on is the one that improved.
 
-**주의**: 트래커 파라미터(마운트 높이, `road_step_esm_dof` 등)를 바꿀 때는 **추출과
-설정 파일을 함께** 바꿔야 한다. 추정기도 같은 설정에서 높이를 읽으므로, 추출만
-바꾸면 두 경로가 서로 다른 기하를 쓰고 채점이 조용히 틀린다.
+**Careful**: when a tracker parameter moves (mount heights, `road_step_esm_dof`
+and the like), **the extraction and the parameter file have to move together.**
+The estimator reads the heights from that same file, so changing only the
+extraction leaves the two paths on different geometries and the scoring is
+quietly wrong.
 
-## 이 세트는 한 노면 위에 있지 않다
+## This set is not on one road surface
 
-벤치 아홉 개는 Town01의 **두 구간**에 5:4로 갈려 있고, 광도 길이 편향이 그
-구간을 따라간다. 진값에 직접 잰 값(추정기 없음, 보고 지점 보정 후):
+The nine bench drives are split 5:4 across **two stretches** of Town01, and the
+photometric length bias follows the stretch. Measured against truth with no
+estimator in the loop, after correcting the truth pose's report point:
 
-| 노면 | 드라이브 | 밴드에 보이는 것 | 편향 |
+| surface | drives | what the band shows | bias |
 | --- | --- | --- | ---: |
-| A | str_v2 v3 v4 1.5 4.0 | 어두운 아스팔트 + 흰색 주차·차선 표시 | −0.03 ~ +0.10 % |
-| B | str_8.0 curve_s05 s10 s20 | 균일한 밝은 콘크리트, 표시 없음 | +0.17 ~ +0.20 % |
-| — | park_clean park_obst (held-out) | 또 다른 아스팔트, park_obst는 앞 밴드에 주차 차량 | 경로장 −0.44 / +0.25 % |
+| A | str_v2 v3 v4 1.5 4.0 | dark asphalt with white bay and lane markings | -0.03 .. +0.10 % |
+| B | str_8.0 curve_s05 s10 s20 | plain light concrete, no markings at all | +0.17 .. +0.20 % |
+| -- | park_clean park_obst (held-out) | a third asphalt; park_obst has a parked car in the front band | path length -0.44 / +0.25 % |
 
-같은 속도, 같은 맵, 드라이브 내내 균일하다. **속도도 선회도 아니고 노면이다.**
-높이 오차는 노면에 무엇이 칠해져 있는지 알 수 없으므로, 상수 스케일로 보정할 수
-있는 형태가 아니다.
+Same speed, same map, uniform along each drive. **It is the road, not the speed
+and not the turning.** A height error cannot know what is painted on the road,
+so this is not a shape a constant scale can correct.
 
-세트를 넓힐 때 이 축을 의도적으로 채워라. 지금은 노면이 드라이브 선택의 부수
-효과로 정해져 있고, 그것이 파라미터 하나를 이 세트에 묶어 놓았다.
+Fill this axis on purpose when extending the set. Right now the surface is a
+side effect of which drives were recorded, and that tied one parameter to this
+set's mix.
 
-## 이 세트로 물으면 안 되는 것
+## What not to ask this set
 
-**길이 편향을 ATE에 묻지 마라.** 하니스의 잡음 바닥은 ±2%인데 길이 편향은 0.1%
-단위이고, 무엇보다 **ATE를 최소화하는 스케일은 무편향 스케일이 아니다** — 다른
-모든 오차가 거기 기댈 수 있기 때문이다. 배포된 `photometric_scale: 0.9988`이
-보정하는 양은 광도 측정의 실제 편향(+0.03%)의 네 배다.
+**Do not ask ATE about a length bias.** The harness's noise floor is +-2% and a
+length bias is measured in tenths of a per cent, and above all **the scale that
+minimises ATE is not the unbiased scale** -- every other error gets to lean on
+it. `photometric_scale` was exactly that, a constant fitted to the mean of a
+bias that varies by road surface, and it was removed on 2026-09-11: it cost 134%
+of bench ATE and 1.5% of held-out, which is what a fit to the set looks like.
 
-길이는 추정기를 빼고 진값에 직접 물어야 한다:
-`monoscale_evaluation/photometric_bias.py`. 같은 조건
-세 녹화에서 **0.012%로 반복**되므로 ATE보다 150배 예리하다.
+Ask truth directly, with the estimator taken out:
+`monoscale_evaluation/photometric_bias.py`. Across three recordings of one
+condition it **repeats to 0.012%**, 150 times sharper than ATE.
 
-**정밀하다는 것과 옳은 곳을 겨눈다는 것은 다른 말이다.** 이 도구는 몇 주 동안
-회전할 때만 나타나는 길이 편향을 보고했고, 세 드라이브가 서로 일치했으며,
-열세 가지 기구가 하나씩 배제되었다. 실제로는 CARLA가 진리 포즈를 뒤축보다
-1.399 m 앞선 액터 원점에서 보고하기 때문이었다. 직진에서는 그 오프셋이
-변위에서 상쇄되어 보이지 않고, 회전에서는 앞선 점이 더 긴 경로를 그려
-`(L psi)^2 / 2s`만큼 초과한다. 2026-09-11에 보정했다(`TRUTH_REPORT_OFFSET_M`).
-직진 수치는 바뀌지 않았고 회전항은 96-98% 사라졌다. 이 도구로 새 결론을
-내릴 때는 **직진 드라이브를 대조군으로 함께 돌려라.**
+**Precise and correctly aimed are different things.** For weeks this tool
+reported a length bias that appeared only when turning; three drives agreed with
+each other, and thirteen mechanisms were excluded one at a time. The cause was
+that CARLA reports the truth pose at the actor origin, 1.399 m ahead of the rear
+axle. Along a straight that offset cancels in a displacement; through a turn the
+forward point traces the longer path, exceeding the reference point's by
+`(L psi)^2 / 2s`. Corrected 2026-09-11 (`TRUTH_REPORT_OFFSET_M`): the straight
+figures did not move and 96-98% of the turn term disappeared. **Run a straight
+drive as a control** with anything new this tool says.
 
-**반복폭 1.05x가 바닥이다.** 같은 조건 세 녹화가 그만큼 벌어지므로, 그보다 작은
-차이는 측정이 아니다. 양옆이 나쁜 고립된 최적점은 적합의 서명이고, 그때는
-held-out이 결정한다.
+**The repeat spread of 1.05x is the floor.** Three recordings of one condition
+differ by that much, so a smaller difference is not a measurement. An isolated
+optimum with worse neighbours on both sides is the signature of a fit, and then
+the held-out set decides.
 
-## 갱신
+## Updating
 
-**배포 설정(`vision_fisheye.param.yaml`)이 바뀌면 이 문서의 표를 같은 커밋에서
-고친다.** 표에 붙은 커밋 해시가 그 숫자가 어느 트리의 것인지 말한다.
+**When the deployed configuration (`vision_fisheye.param.yaml`) changes, fix the
+tables here in the same commit.** The commit hash beside a table says which tree
+its numbers came from.
 
-## 다른 도구
+## The other tools
 
-| 파일 | 무엇을 재는가 |
+| file | what it measures |
 | --- | --- |
-| `benchmark.py` | 재생된 궤적들을 진값에 대고 채점한다. 헤드라인과 진단 지표. |
-| `photometric_bias.py` | 도로 적합의 step을 진값에 대고 직접 잰다. 추정기가 끼지 않으므로 길이 편향을 0.012%로 본다. |
-| `jacobian.py` | 지면 투영의 오차 Jacobian. 어떤 외부/내부 파라미터가 어떤 방향으로 거리에 들어가는지. |
-| `nullspace.py` | 그 Jacobian의 rank와 nullspace. 무엇이 관측 가능하고 무엇이 구별되지 않는지. |
+| `benchmark.py` | scores replayed trajectories against truth. Headline and diagnostic metrics. |
+| `photometric_bias.py` | the road fit's step against truth directly. No estimator in between, so it sees a length bias at 0.012%. |
+| `jacobian.py` | the error Jacobian of the ground projection: which extrinsic or intrinsic enters range, and in which direction. |
+| `nullspace.py` | the rank and nullspace of that Jacobian: what is observable and what cannot be told apart. |
+| `bag_gate.py` | whether a fresh recording is usable: collisions, drift out of the lane, and the PhysX substep artefact. |

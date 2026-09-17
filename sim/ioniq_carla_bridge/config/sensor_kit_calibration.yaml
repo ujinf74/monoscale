@@ -25,8 +25,8 @@ actor_origin_height_m: 0.03635
 # before the ESM's pitch freedom was known to leak into the step. Both are
 # accounted for now, and the millimetre pays on its own:
 #
-#   bench nine   ATE/거리   0.0523% -> 0.0257%   끝오차/거리 0.0919% -> 0.0414%
-#   held-out 2   ATE/거리   0.1903% -> 0.1883%   끝오차/거리 0.1891% -> 0.1794%
+#   bench nine   ATE/dist   0.0523% -> 0.0257%   final/dist 0.0919% -> 0.0414%
+#   held-out 2   ATE/dist   0.1903% -> 0.1883%   final/dist 0.1891% -> 0.1794%
 #
 # Better on every metric of both sets, which a fit to the bench is not. And it
 # was a prediction before it was a measurement: the photometric length bias was

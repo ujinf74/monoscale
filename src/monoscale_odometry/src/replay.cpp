@@ -500,7 +500,7 @@ int main(int argc, char ** argv)
     }
   }
   if (bag.empty()) {
-    std::cerr << "사용법: monoscale_replay <bag> --params <yaml> [--set name:=value] ...\n";
+    std::cerr << "usage: monoscale_replay <bag> --params <yaml> [--set name:=value] ...\n";
     return 2;
   }
 
@@ -525,7 +525,7 @@ int main(int argc, char ** argv)
     }
   }
   if (track_topics.empty()) {
-    std::cerr << "track_topic_prefix 가 비어 있다. 이 경로는 트랙 입력만 받는다.\n";
+    std::cerr << "track_topic_prefix is empty; this path takes track input only.\n";
     return 2;
   }
 
@@ -644,7 +644,7 @@ int main(int argc, char ** argv)
 
   if (!configs_path.empty()) {
     if (tum_directory.empty()) {
-      std::cerr << "--configs 는 --tum <디렉터리> 를 함께 요구한다.\n";
+      std::cerr << "--configs requires --tum <directory> alongside it.\n";
       return 2;
     }
     std::ifstream list(configs_path);
@@ -905,7 +905,7 @@ int main(int argc, char ** argv)
       }
       if (straight_n > 0 || turning_n > 0) {
         std::printf(
-          "  곡률별 융합 편향: 직진 %+.2f%% (n=%ld)   선회 %+.2f%% (n=%ld, 평균 %.3f rad/m)\n",
+          "  fused bias by curvature: straight %+.2f%% (n=%ld)   turning %+.2f%% (n=%ld, mean %.3f rad/m)\n",
           straight_n > 0 ? 100.0 * straight_sum / straight_n : 0.0, straight_n,
           turning_n > 0 ? 100.0 * turning_sum / turning_n : 0.0, turning_n,
           turning_n > 0 ? turning_rate / turning_n : 0.0);
@@ -995,7 +995,7 @@ int main(int argc, char ** argv)
           point.x, point.y, point.z, point.label, point.origin_x, point.origin_y);
       }
       std::fclose(f);
-      std::printf("점 %zu 개 -> %s\n", collected_points.size(), points_path.c_str());
+      std::printf("%zu points -> %s\n", collected_points.size(), points_path.c_str());
     }
   }
   if (!hops_path.empty()) {
@@ -1065,7 +1065,7 @@ int main(int argc, char ** argv)
           std::fclose(f);
         }
       }
-      std::printf("  곡률 구간별 편향:");
+      std::printf("  bias by curvature band:");
       for (int b = 0; b < kBands; ++b) {
         if (band_n[b] < 10) {
           continue;
@@ -1077,8 +1077,8 @@ int main(int argc, char ** argv)
       std::printf("\n");
       if (left_n >= 10 || right_n >= 10) {
         std::printf(
-          "  선회 방향별: 좌 %+.2f%% (n=%ld, %.3f)  우 %+.2f%% (n=%ld, %.3f)"
-          "  | 선회구간 카메라 front %+.2f%% rear %+.2f%%\n",
+          "  by turn direction: left %+.2f%% (n=%ld, %.3f)  right %+.2f%% (n=%ld, %.3f)"
+          "  | turning, per camera front %+.2f%% rear %+.2f%%\n",
           left_n > 0 ? 100.0 * left_sum / left_n : 0.0, left_n,
           left_n > 0 ? left_yaw / left_n : 0.0,
           right_n > 0 ? 100.0 * right_sum / right_n : 0.0, right_n,
@@ -1087,7 +1087,7 @@ int main(int argc, char ** argv)
           per_camera_n[1] > 0 ? 100.0 * per_camera_sum[1] / per_camera_n[1] : 0.0);
       }
     }
-    std::printf("hop 대 진값 (진행 방향, 홉 길이 대비):\n");
+    std::printf("hop against truth (along travel, over hop length):\n");
     for (size_t i = 0; i <= cameras; ++i) {
       if (seen[i] == 0) {
         continue;
@@ -1239,8 +1239,8 @@ int main(int argc, char ** argv)
         const auto by_rate = fit(1);
         const auto by_signed = fit(2);
         std::printf(
-          "  split 평균 %+.2f%%  n=%zu | 속도 기울기 %+.3f%%/(m/s) R2=%.3f"
-          " | |요율| %+.3f%%/(rad/s) R2=%.3f | 부호요율 %+.3f R2=%.3f\n",
+          "  split mean %+.2f%%  n=%zu | slope on speed %+.3f%%/(m/s) R2=%.3f"
+          " | |yaw rate| %+.3f%%/(rad/s) R2=%.3f | signed yaw rate %+.3f R2=%.3f\n",
           100.0 * mean_split, split_rows.size(),
           100.0 * by_speed.first, by_speed.second,
           100.0 * by_rate.first, by_rate.second,
@@ -1269,13 +1269,13 @@ int main(int argc, char ** argv)
         const auto s = stat(sym);
         const auto f = stat(fus);
         std::printf(
-          "  대칭성분(누적되는 것): 편향 %+.3f%% 잡음 %.3f%% | 융합결과: 편향 %+.3f%%"
-          " 잡음 %.3f%%  n=%zu\n",
+          "  common mode (what accumulates): bias %+.3f%% noise %.3f%% | fused: bias %+.3f%%"
+          " noise %.3f%%  n=%zu\n",
           100.0 * s.first, 100.0 * s.second, 100.0 * f.first, 100.0 * f.second,
           common_rows.size());
       }
       if (bins.size() >= 3) {
-        std::printf("  10 m 구간별 front편향/rear편향 | 맵사용률 front/rear:\n   ");
+        std::printf("  per 10 m: front bias / rear bias | map share front/rear:\n   ");
         for (const auto & bin : bins) {
           if (bin.n < 5) {
             continue;
@@ -1301,20 +1301,20 @@ int main(int argc, char ** argv)
       const double mean = cross_sum / n;
       const double rms = std::sqrt(cross_square / n);
       std::printf(
-        "  fused 횡: bias=%+.2f%% noise=%.2f%%  | 누적 %.3f m (진행분 %.3f, 횡분 %.3f)"
+        "  fused lateral: bias=%+.2f%% noise=%.2f%%  | accumulated %.3f m (along %.3f, across %.3f)"
         "  coasted %ld/%ld\n",
         100.0 * mean, 100.0 * std::sqrt(std::max(rms * rms - mean * mean, 0.0)),
         std::hypot(world_error_x, world_error_y),
         std::hypot(world_along, world_along_y),
         std::hypot(world_across_x, world_across_y), coasted, applied_n);
       std::printf(
-        "  횡오차 회귀: 부호있는 요 -> %+.4f m (레버암),  |요| -> %+.4f m\n",
+        "  lateral error regressed: signed yaw -> %+.4f m (lever arm),  |yaw| -> %+.4f m\n",
         lever_xx > 1e-12 ? lever_xy / lever_xx : 0.0,
         rect_xx > 1e-12 ? rect_xy / rect_xx : 0.0);
     }
     if (paired > 0 && pair_a[0] > 0.0 && pair_b[0] > 0.0) {
       std::printf(
-        "  두 카메라 오차 상관 r=%+.3f (n=%ld), 평균 홉 %.3f m\n",
+        "  the two cameras' errors correlate r=%+.3f (n=%ld), mean hop %.3f m\n",
         cross[0] / std::sqrt(pair_a[0] * pair_b[0]), paired,
         travelled / std::max<int64_t>(seen[cameras], 1));
     }
@@ -1382,8 +1382,8 @@ int main(int argc, char ** argv)
     const double ar = std::sqrt(along_square / n);
     const double cr = std::sqrt(cross_square / n);
     std::printf(
-      "위치오차 분해: 종 rms=%.4f sd=%.4f mean=%+.4f | 횡 rms=%.4f sd=%.4f mean=%+.4f"
-      "  (합성 %.4f, n=%ld)\n",
+      "position error split: along rms=%.4f sd=%.4f mean=%+.4f | across rms=%.4f sd=%.4f mean=%+.4f"
+      "  (combined %.4f, n=%ld)\n",
       ar, std::sqrt(std::max(ar * ar - am * am, 0.0)), am,
       cr, std::sqrt(std::max(cr * cr - cm * cm, 0.0)), cm,
       std::hypot(ar, cr), error_count);
@@ -1392,13 +1392,13 @@ int main(int argc, char ** argv)
     const auto & d = estimator.diagnostics();
     if (d.nis_samples > 0) {
       std::printf(
-        "필터 NIS 평균 %.3f (정직하면 2.0)   갱신 %ld회\n",
+        "filter NIS mean %.3f (2.0 if honest)   %ld updates\n",
         d.nis_total / static_cast<double>(d.nis_samples), d.nis_samples);
     }
   }
   if (claimed_position > 0.0) {
     std::printf(
-      "주장 불확실성: 위치 1시그마 %.4f m   헤딩 1시그마 %.3f deg\n",
+      "claimed uncertainty: position 1 sigma %.4f m   heading 1 sigma %.3f deg\n",
       claimed_position, claimed_yaw * 180.0 / M_PI);
   }
   const auto & diagnostics = estimator.diagnostics();
@@ -1408,7 +1408,7 @@ int main(int argc, char ** argv)
     "n=%ld/%ld/%ld/%ld/%ld/%ld w=%.0f/%.0f/%.0f/%.0f/%.0f/%.0f "
     "r=%.1f/%.1f/%.1f/%.1f/%.1f/%.1f\n"
     "seen[1 2 3-4 5-8 9-16 17+]=%ld/%ld/%ld/%ld/%ld/%ld road_anchors=%ld usable=%ld parallax_pts=%ld scatter[<1e-6 1e-5 1e-4 1e-3 1e-2 +]=%ld/%ld/%ld/%ld/%ld/%ld\n"
-    "coasted=%ld yaw_misses=%ld anchors=%d(도달 %d, 종평균 %+.1fm 종퍼짐 %.1fm) "
+    "coasted=%ld yaw_misses=%ld anchors=%d(reached %d, along mean %+.1fm spread %.1fm) "
     "map_frames=%ld evicted=%ld "
     "link[n=%ld gap=%.4fm range=%.2fm gap/range=%.5f]\n",
     diagnostics.pairs_seen, diagnostics.frames_processed, estimates.size(),
@@ -1471,7 +1471,7 @@ int main(int argc, char ** argv)
     // A split that is a calibration reads the same in every stretch; one that
     // accumulates does not. Measured: str_v3 holds 0.98 the whole way while
     // str_v2 runs 1.09 to 1.95, so this one is a divergence, not a mount.
-    std::printf("  10 m 구간별 카메라 비: ");
+    std::printf("  per 10 m, the two cameras' ratio: ");
     const size_t group =
       (diagnostics.travel_bins.size() + 11) / 12;
     double front = 0.0;
@@ -1489,7 +1489,7 @@ int main(int argc, char ** argv)
   }
   if (diagnostics.crossings > 0) {
     std::printf(
-      "카메라 교차: n=%ld  along=%+.4f m  baseline=%.2f m  기울기->scale %.4f  절편=%+.4f m\n",
+      "camera crossing: n=%ld  along=%+.4f m  baseline=%.2f m  slope->scale %.4f  intercept=%+.4f m\n",
       diagnostics.crossings, diagnostics.crossing_along_m,
       diagnostics.crossing_travel_m, diagnostics.crossing_scale,
       diagnostics.crossing_offset_m);
@@ -1505,20 +1505,20 @@ int main(int argc, char ** argv)
       1000.0 * seconds / std::max<int64_t>(diagnostics.frames_processed, 1));
     stages += buffer;
   }
-  std::printf("단계별 ms/solve: %s\n", stages.c_str());
+  std::printf("ms per solve, by stage: %s\n", stages.c_str());
   if (diagnostics.remembered_sightings > 0) {
     const double slots = static_cast<double>(diagnostics.anchors);
     const double bytes = slots * 16.0 * (4.0 + 8.0 + 4.0) + slots * 4.0;
     std::printf(
-      "관측별 포즈: %ld개 기억, 앵커 %ld, 포즈 이력 %ld, 저장 %.1f MB, 재구성 %.2f ms\n",
+      "sightings: %ld remembered, %ld anchors, %ld poses of history, %.1f MB held, rebuild %.2f ms\n",
       diagnostics.remembered_sightings, diagnostics.anchors,
       diagnostics.pose_history, bytes / 1048576.0, diagnostics.rebuild_ms);
-    std::printf("  재구성이 앵커를 옮기는 거리 평균 %.7f m, 관측 포즈 폭 %.1f\n",
+    std::printf("  rebuild moves an anchor by %.7f m on average, sighting span %.1f\n",
       diagnostics.rebuild_shift_m, diagnostics.sighting_span);
-    std::printf("  광도 step: 적용 %ld / 기회 %ld, 맵없음 %ld\n",
+    std::printf("  photometric step: applied %ld of %ld chances, mapless %ld\n",
       diagnostics.photometric_uses, diagnostics.photometric_chances,
       diagnostics.photometric_mapless);
-    std::printf("  포즈그래프: 재방문 구속 %ld개, 포즈 평균 이동 %.4f m\n",
+    std::printf("  pose graph: %ld revisit constraints, poses moved %.4f m on average\n",
       diagnostics.pose_graph_loops, diagnostics.pose_graph_shift_m);
   }
   for (size_t i = 0; i < diagnostics.pair_radial_samples.size(); ++i) {
@@ -1526,7 +1526,7 @@ int main(int argc, char ** argv)
       continue;
     }
     std::printf(
-      "2프레임 dh/h[%zu]: %+.5f  n=%ld\n",
+      "two-frame dh/h[%zu]: %+.5f  n=%ld\n",
       i, diagnostics.pair_radial[i], diagnostics.pair_radial_samples[i]);
   }
   for (size_t i = 0; i < diagnostics.radial_samples.size(); ++i) {
@@ -1534,30 +1534,30 @@ int main(int argc, char ** argv)
       continue;
     }
     std::printf(
-      "지면 기울기[%zu]: %+.5f  n=%ld\n",
+      "ground lean[%zu]: %+.5f  n=%ld\n",
       i, diagnostics.radial_linear[i], diagnostics.radial_samples[i]);
   }
   if (diagnostics.levelled > 0) {
     std::printf(
-      "자세: roll=%+.3fdeg pitch=%+.3fdeg 높이=%+.3fm 수평보정=%ld 지면스케일=%.5f\n",
+      "attitude: roll=%+.3fdeg pitch=%+.3fdeg height=%+.3fm levelled=%ld ground scale=%.5f\n",
       diagnostics.roll * 180.0 / M_PI, diagnostics.pitch * 180.0 / M_PI,
       diagnostics.height, diagnostics.levelled, diagnostics.range_scale);
-    std::printf("hop 잔차: 갱신직후=%.4f 최종=%.4f m\n", diagnostics.hop_taken, diagnostics.hop_residual);
+    std::printf("hop residual: just after the update=%.4f final=%.4f m\n", diagnostics.hop_taken, diagnostics.hop_residual);
   }
   if (diagnostics.last_nis != 0.0 || diagnostics.filter_rejections != 0) {
     std::printf(
-      "필터: 마지막 NIS=%.3f  게이트기각=%ld  버림=%ld\n",
+      "filter: last NIS=%.3f  gate rejections=%ld  dropped=%ld\n",
       diagnostics.last_nis, diagnostics.filter_rejections, diagnostics.filter_dropped);
   }
 
   if (diagnostics.photometric_nulled > 0) {
     std::printf(
-      "기울기 소거 가중: %ld 회, 마지막 %.4f\n",
+      "lean-cancelling weight: %ld times, last %.4f\n",
       diagnostics.photometric_nulled, diagnostics.photometric_null_weight);
   }
   if (diagnostics.esm_frames > 0) {
     std::printf(
-      "적합 공분산: %ld/%ld 프레임 도착 (%.1f%%)\n",
+      "fit covariance: %ld of %ld frames arrived (%.1f%%)\n",
       diagnostics.esm_covariance_frames, diagnostics.esm_frames,
       100.0 * static_cast<double>(diagnostics.esm_covariance_frames) /
       static_cast<double>(diagnostics.esm_frames));
@@ -1572,12 +1572,12 @@ int main(int argc, char ** argv)
     const int64_t fed = diagnostics.consumer_fed[which];
     if (armed > 0 && fed == 0) {
       std::printf(
-        "굶은 소비자: %s 가 %ld 프레임 무장했으나 한 번도 먹지 못함 -- %s 필요\n",
+        "starved consumer: %s was armed for %ld frames and never fed -- needs %s\n",
         monoscale::Diagnostics::consumer_name(which), armed,
         monoscale::Diagnostics::consumer_needs(which));
     } else if (armed > 0 && fed * 4 < armed) {
       std::printf(
-        "마른 소비자: %s %ld/%ld 프레임만 먹음 (%.0f%%)\n",
+        "thin consumer: %s fed on only %ld of %ld frames (%.0f%%)\n",
         monoscale::Diagnostics::consumer_name(which), fed, armed,
         100.0 * static_cast<double>(fed) / static_cast<double>(armed));
     }

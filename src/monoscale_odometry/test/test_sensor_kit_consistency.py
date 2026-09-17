@@ -49,7 +49,9 @@ def _load_kit(name):
     candidates.append(os.path.join(root, KIT_PACKAGE, 'config'))
     candidates.append(os.path.join(root, '..', 'sim', KIT_PACKAGE, 'config'))
     candidates.append(
-        os.path.join('/home/i/ros2_ws/hero-release/sim', KIT_PACKAGE, 'config'))
+        os.path.join(
+            os.environ.get('MONOSCALE_SIM_LIVE', '/home/i/ros2_ws/hero-release/sim'),
+            KIT_PACKAGE, 'config'))
     for directory in candidates:
         path = os.path.join(directory, name)
         if os.path.exists(path):

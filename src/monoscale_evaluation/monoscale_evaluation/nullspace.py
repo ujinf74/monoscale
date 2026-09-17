@@ -75,15 +75,15 @@ def mk(kind,amt):
     if kind=="f":  return lambda cam,pix,s,t: flow(cam,pix,s,t,f=cam.f*(1+amt))
     if kind=="x":  return lambda cam,pix,s,t: flow(cam,pix,s,t,t_BC=cam.t+np.array([amt,0,0]))
     if kind=="y":  return lambda cam,pix,s,t: flow(cam,pix,s,t,t_BC=cam.t+np.array([0,amt,0]))
-NAMES=[("노면 높이 / 평면 오프셋","h",0.010,"10mm"),
-       ("마운트 pitch","p",math.radians(0.5),"0.5deg"),
-       ("마운트 roll","r",math.radians(0.5),"0.5deg"),
-       ("초점","f",0.01,"1%"),
-       ("마운트 세로 위치","x",0.010,"10mm"),
-       ("마운트 가로 위치","y",0.010,"10mm")]
-for S,T,lbl in ((0.0615,0.0,"직선 2 m/s"),(0.0615,4.875e-3,"슬라롬 2 m/s"),(0.2667,0.0,"직선 8 m/s")):
+NAMES=[("road height / plane offset","h",0.010,"10mm"),
+       ("mount pitch","p",math.radians(0.5),"0.5deg"),
+       ("mount roll","r",math.radians(0.5),"0.5deg"),
+       ("focal","f",0.01,"1%"),
+       ("mount x","x",0.010,"10mm"),
+       ("mount y","y",0.010,"10mm")]
+for S,T,lbl in ((0.0615,0.0,"straight 2 m/s"),(0.0615,4.875e-3,"slalom 2 m/s"),(0.2667,0.0,"straight 8 m/s")):
     print(f"\n=== {lbl} ===")
-    print(f"{'파라미터':24s} {'단위':>8s} {'g_front':>10s} {'g_rear':>10s} {'비':>8s} {'균등 후':>9s}")
+    print(f"{'parameter':24s} {'unit':>8s} {'g_front':>10s} {'g_rear':>10s} {'ratio':>8s} {'equalised':>9s}")
     G=[]
     for name,kind,amt,unit in NAMES:
         gf=col(front,S,T,mk(kind,amt)); gr=col(rear,S,T,mk(kind,amt))
@@ -92,4 +92,4 @@ for S,T,lbl in ((0.0615,0.0,"직선 2 m/s"),(0.0615,4.875e-3,"슬라롬 2 m/s"),
         print(f"{name:24s} {unit:>8s} {100*gf:9.4f}% {100*gr:9.4f}% {ratio:8.3f} {100*0.5*(gf+gr):8.4f}%")
     G=np.array(G).T   # 2 x k
     u,sv,vt=np.linalg.svd(G)
-    print(f"  특이값 {sv[0]:.5f} {sv[1]:.5f}   조건수 {sv[0]/max(sv[1],1e-12):.1f}")
+    print(f"  singular values {sv[0]:.5f} {sv[1]:.5f}   condition {sv[0]/max(sv[1],1e-12):.1f}")

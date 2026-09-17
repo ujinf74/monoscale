@@ -80,7 +80,7 @@ def check(path):
     imu, truth, front, rear = read(path)
     bad = []
     if len(imu) < 10 or len(truth) < 10:
-        return False, {}, ['IMU 또는 진값이 없다']
+        return False, {}, ['no IMU or no truth']
 
     duration = truth[-1, 0] - truth[0, 0]
     step = np.hypot(np.diff(truth[:, 1]), np.diff(truth[:, 2]))
@@ -107,13 +107,13 @@ def check(path):
 
     if abs(drift) > GYRO_DRIFT_DEG:
         bad.append(
-            f'자이로 적분이 진값과 {drift:+.3f}° 어긋난다 '
-            f'(한계 {GYRO_DRIFT_DEG}°) — PhysX 서브스텝 결함일 수 있다: '
-            'carla_autoware.py의 max_substep_delta_time이 0.002인지 확인')
+            f'gyro integration disagrees with truth by {drift:+.3f} deg '
+            f'(limit {GYRO_DRIFT_DEG} deg) -- this can be the PhysX substep defect: '
+            'check that max_substep_delta_time in carla_autoware.py is 0.002')
     if not parking and peak > COLLISION_ACCEL_MPS2:
-        bad.append(f'|accX| 최대 {peak:.0f} m/s^2 — 충돌 (한계 {COLLISION_ACCEL_MPS2:.0f})')
+        bad.append(f'|accX| peaks at {peak:.0f} m/s^2 -- a collision (limit {COLLISION_ACCEL_MPS2:.0f})')
     if not parking and stopped > STATIONARY_FRACTION:
-        bad.append(f'표본의 {stopped * 100:.0f}%가 정지 상태 — 길을 벗어났을 수 있다')
+        bad.append(f'{stopped * 100:.0f}% of samples are stationary -- it may have left the road')
     if len(front) and len(rear):
         # Nearest stamp, not the same index. One end starting a frame earlier
         # shifts every index-wise pair by a whole period and reports a skew the
@@ -135,12 +135,12 @@ def check(path):
         summary['drops'] = int((gaps > nominal * 1.5).sum()) if nominal > 0 else 0
         if unpaired > 0.01:
             bad.append(
-                f'전방 프레임의 {unpaired * 100:.1f}%가 후방 짝을 못 찾는다 '
-                f'(중앙 스큐 {skew * 1e3:.2f} ms) — FISHEYE_SPLIT 확인')
+                f'{unpaired * 100:.1f}% of front frames find no rear partner '
+                f'(median skew {skew * 1e3:.2f} ms) -- check FISHEYE_SPLIT')
         if summary['drops']:
-            bad.append(f"프레임 결손 {summary['drops']}개")
+            bad.append(f"{summary['drops']} dropped frames")
     else:
-        bad.append('영상이 없다')
+        bad.append('no images')
     return not bad, summary, bad
 
 
@@ -154,16 +154,16 @@ def main(argv=None):
         try:
             ok, s, bad = check(path)
         except Exception as error:                       # noqa: BLE001
-            print(f'{path}: 읽지 못했다 — {error}')
+            print(f'{path}: could not read -- {error}')
             worst = 1
             continue
         name = path.rstrip('/').rsplit('/', 1)[-1]
         if s:
             print(
                 f"{name:<28s} {s['duration_s']:5.1f}s {s['distance_m']:7.2f}m "
-                f"{s['speed_mps']:5.2f}m/s  자이로 {s['gyro_drift_deg']:+7.3f}°  "
-                f"|accX| {s['peak_accel_mps2']:6.1f}  정지 {s['stopped'] * 100:4.1f}%  "
-                f"{'통과' if ok else '불량'}")
+                f"{s['speed_mps']:5.2f}m/s  gyro {s['gyro_drift_deg']:+7.3f}deg  "
+                f"|accX| {s['peak_accel_mps2']:6.1f}  stopped {s['stopped'] * 100:4.1f}%  "
+                f"{'pass' if ok else 'fail'}")
         for line in bad:
             print(f'    - {line}')
         worst = max(worst, 0 if ok else 1)

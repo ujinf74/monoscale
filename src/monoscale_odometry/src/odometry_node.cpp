@@ -625,12 +625,12 @@ private:
       if (armed > 0 && fed == 0) {
         RCLCPP_ERROR(
           get_logger(),
-          "굶은 소비자: %s 가 %ld 프레임 무장했으나 한 번도 먹지 못했다. %s 를 켜라.",
+          "starved consumer: %s was armed for %ld frames and never fed. Turn on %s.",
           monoscale::Diagnostics::consumer_name(which), armed,
           monoscale::Diagnostics::consumer_needs(which));
       } else if (armed > 0 && fed * 4 < armed) {
         RCLCPP_WARN(
-          get_logger(), "마른 소비자: %s %ld/%ld 프레임만 먹었다.",
+          get_logger(), "thin consumer: %s fed on only %ld of %ld frames.",
           monoscale::Diagnostics::consumer_name(which), fed, armed);
       }
     }

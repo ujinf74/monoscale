@@ -175,7 +175,7 @@ def _headline(scored: Dict[str, Dict], pick) -> Optional[Tuple[float, float]]:
 
 def report(scored: Dict[str, Dict]) -> None:
     header = ''.join(f'{"RPE" + str(int(n)):>8}' for n in SEGMENT_LENGTHS)
-    print(f'{"drive":11}{"거리":>7}{header}{"hop%":>8}{"walk":>7}{"ATE":>9}{"끝오차":>9}')
+    print(f'{"drive":11}{"dist":>7}{header}{"hop%":>8}{"walk":>7}{"ATE":>9}{"final":>9}')
     for name, entry in scored.items():
         cells = ''.join(
             f'{entry["segments"][n]:8.3f}' if entry['segments'][n] is not None
@@ -193,29 +193,29 @@ def report(scored: Dict[str, Dict]) -> None:
         if found is None:
             continue
         mean, worst = found
-        print(f'  RPE {int(length):2d}m   평균 {mean:6.3f}%   최악 {worst:6.3f}%')
+        print(f'  RPE {int(length):2d}m   mean {mean:6.3f}%   worst {worst:6.3f}%')
     for key, label, width in (
-        ('hop', 'hop%', 2), ('walk', 'walk', 2), ('ate', 'ATE', 4), ('final', '끝오차', 4)):
+        ('hop', 'hop%', 2), ('walk', 'walk', 2), ('ate', 'ATE', 4), ('final', 'final', 4)):
         mean, worst = _headline(scored, lambda e, k=key: e[k])
-        print(f'  {label:8} 평균 {mean:6.{width}f}   최악 {worst:6.{width}f}')
+        print(f'  {label:8} mean {mean:6.{width}f}   worst {worst:6.{width}f}')
     found = _headline(
         scored,
         lambda e: e['ate'] / e['distance'] if e['distance'] > 0 else None)
     if found is not None:
         mean, worst = found
-        print(f'  ATE/거리  평균 {mean * 100:6.4f}%   최악 {worst * 100:6.4f}%')
+        print(f'  ATE/dist    mean {mean * 100:6.4f}%   worst {worst * 100:6.4f}%')
     found = _headline(scored, lambda e: e['finalpct'] / 100.0)
     if found is not None:
         mean, worst = found
-        print(f'  끝오차/거리 평균 {mean * 100:6.4f}%   최악 {worst * 100:6.4f}%')
+        print(f'  final/dist  mean {mean * 100:6.4f}%   worst {worst * 100:6.4f}%')
     spread = [
         scored[k]['segments'][SEGMENT_LENGTHS[0]] for k in REPEATS
         if k in scored and scored[k]['segments'][SEGMENT_LENGTHS[0]] is not None
     ]
     if len(spread) >= 2:
         print(
-            f'  반복폭    {max(spread) / min(spread):6.2f}x  '
-            f'(RPE {int(SEGMENT_LENGTHS[0])}m, 같은 드라이브 {len(spread)}회 녹화)'
+            f'  repeat      {max(spread) / min(spread):6.2f}x  '
+            f'(RPE {int(SEGMENT_LENGTHS[0])}m, one condition recorded {len(spread)} times)'
         )
 
 

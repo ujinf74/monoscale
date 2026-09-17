@@ -54,7 +54,7 @@
     # not the number the launch produced.
     #
     # Measured 2026-09-08 on the nine re-recorded drives, same params, only
-    # this key moved:  ATE/거리 0.0445% -> 0.0229% mean, 0.0682% -> 0.0389%
+    # this key moved:  ATE/dist 0.0445% -> 0.0229% mean, 0.0682% -> 0.0389%
     # worst, walk 1.59 -> 0.94. The shape says where it lands: hop% is
     # unchanged (0.14 vs 0.16) and RPE 5m barely moves (0.170 -> 0.158), while
     # RPE 40m nearly halves (0.103 -> 0.058). One hop was already right; what
@@ -79,7 +79,7 @@
     # not there, and the band's own covariance says step and pitch are 0.93
     # correlated, so whatever it estimates lands on the step. Measured:
     #
-    #   dof   bench ATE/거리     held-out ATE       held-out 끝오차
+    #   dof   bench ATE/dist     held-out ATE       held-out final error
     #   4     0.0234% / 0.0402%  0.1833% / 0.2893%  0.1582% / 0.2361%
     #   3     0.0237% / 0.0391%  0.1781% / 0.2659%  0.1461% / 0.1937%
     #   2     0.0647% / 0.0971%  0.2077% / 0.3382%  0.2749% / 0.4695%
@@ -108,10 +108,10 @@
     # deployment decision, which waited on an eleven-drive judgement that the
     # code default (false) was holding open.
     #
-    # Judged 2026-09-11, only this key moved. Bench nine: ATE/거리 0.0226% ->
+    # Judged 2026-09-11, only this key moved. Bench nine: ATE/dist 0.0226% ->
     # 0.0224% mean, 0.0375% -> 0.0379% worst -- a wash, both inside the 1.05x
     # repeat floor. Held-out park: 0.1880% -> 0.1875% mean and 0.2915% ->
-    # 0.2905% worst, 끝오차/거리 0.1777% -> 0.1750% and 0.2611% -> 0.2557%;
+    # 0.2905% worst, final/dist 0.1777% -> 0.1750% and 0.2611% -> 0.2557%;
     # slightly better on every metric and worse on none.
     #
     # What decides it is not the error. First it is the correct geometry, and
@@ -152,7 +152,7 @@
     # 13 was chosen when the search's answer was the answer. It is not any
     # more: the fit above overwrites it, so the search only has to put the seed
     # inside the fit's basin. Measured 2026-09-08 on the nine re-recorded
-    # drives, ATE/거리 mean/worst: 13 gives 0.0229%/0.0389%, 9 gives
+    # drives, ATE/dist mean/worst: 13 gives 0.0229%/0.0389%, 9 gives
     # 0.0231%/0.0383%, 7 gives 0.0233%/0.0380%. The mean moves inside the
     # harness's own +-2% repeat noise and the worst improves, while `road`
     # falls 9.01 ms a frame to 7.20.
@@ -404,7 +404,7 @@
       #
       # Predicted before it was measured, from delta/h alone: the photometric
       # length bias falls 0.275% -> 0.180% here and 0.231% -> 0.164% at the
-      # rear. Measured +0.179% and +0.164%. Bench nine ATE/거리 0.0523% ->
+      # rear. Measured +0.179% and +0.164%. Bench nine ATE/dist 0.0523% ->
       # 0.0257%, held-out 0.1903% -> 0.1883%, better on every metric of both.
       translation_base_from_camera: [3.694, 0.0, 0.88915]
     rear:
@@ -697,7 +697,7 @@
     #
     # Moved together, on the bench nine:
     #
-    #   range/band   ATE/거리          끝오차/거리        walk
+    #   range/band   ATE/dist          final/dist        walk
     #   5.7 / 8.0    0.0237 / 0.0391   0.0326 / 0.0627   1.10 / 2.57
     #   9.0          0.0221 / 0.0371   0.0357 / 0.0592   1.30 / 3.35
     #   10.0         0.0211 / 0.0340   0.0312 / 0.0518   1.31 / 3.27
@@ -1201,11 +1201,11 @@
     # approach_fish8 acceleration looked catastrophic (0.037 -> 0.477 m), but
     # that bag runs 600 Hz physics under a 100 Hz IMU and its accelerometer
     # correlates with the truth at r=0.067 -- it is not a signal
-    # (IMU_가속도_유효성.md). On approach_clean60_release it looked good
+    # (the IMU acceleration study). On approach_clean60_release it looked good
     # (0.175 -> 0.108 m) on one run per arm, which is not a measurement. On
     # approach_hd60 it looked bimodal, but that was measured through a harness
     # that delivered a different subset of frames to every run
-    # (재현성_조사.md).
+    # (the reproducibility study).
     #
     # Fourth: one tracker, two estimators hanging off it, identical track and
     # IMU input to both, five and four repeats (tools/ab_odometry.py):
@@ -1420,7 +1420,7 @@
     # The regression's own slope, with no gain in front of it.
     #
     # 1.8 stood here and the sweep is flat across it: 1.0 through 2.6 move
-    # ATE/거리 between 0.0226% and 0.0260%, which is the harness's own noise.
+    # ATE/dist between 0.0226% and 0.0260%, which is the harness's own noise.
     # A number that the score cannot distinguish from unity is not measuring
     # anything, and taking the slope as measured is the statement the
     # regression already makes.
@@ -1435,7 +1435,7 @@
     anchor_link_radius_m: 0.02
     # A source may not rebind an anchor it founded, only adopt another camera's.
     #
-    # Allowing it wins on the nine bench drives -- worst ATE/거리 0.0376% ->
+    # Allowing it wins on the nine bench drives -- worst ATE/dist 0.0376% ->
     # 0.0306% -- and loses on the two held-out park manoeuvres, where the mean
     # goes 0.1822% -> 0.2065% and the final error 0.1723% -> 0.2150%. The bench
     # is nine forward drives at 1.5 to 8 m/s and the park drives are 13 and 30 m
@@ -1495,7 +1495,7 @@
     # Python frontend and does not launch the separate tracker. The current
     # deployment candidate overrides this to /vision/tracks and runs the C++
     # tracker at 640 px, 1600 features and a 4x3 grid; see
-    # docs/오도메트리_인수인계.md. Do not interpret this empty default as the
+    # the odometry handover note. Do not interpret this empty default as the
     # best-performing Orin configuration.
     track_topic_prefix: ''
     input_reliability: reliable

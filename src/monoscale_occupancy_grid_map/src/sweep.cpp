@@ -10,7 +10,7 @@ namespace monoscale_occupancy
 {
 
 // The CUDA backend, in cuda_backend.cpp. Fills best/costs (and the volume when
-// asked) from the monoscale_fast kernel; returns false when CUDA is not linked.
+// asked) from the CUDA kernel; returns false when CUDA is not linked.
 bool cuda_match(
   const Lens & lens, const SweepSettings & settings,
   const cv::Mat & reference32, const std::vector<cv::Mat> & source32,

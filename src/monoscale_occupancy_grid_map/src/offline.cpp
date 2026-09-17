@@ -37,7 +37,7 @@ namespace
 
 // ---------------------------------------------------------------------------
 // Camera constants, hardcoded from
-// /home/i/ros2_ws/hero-release/src/monoscale_odometry/config/vision_fisheye.param.yaml
+// src/monoscale_odometry/config/vision_fisheye.param.yaml
 // (camera blocks `front` and `rear`; distortion_model: equidistant, d all
 // zero, calibration_width 2560). The runner scales the intrinsics to the
 // cached frame width, exactly as ps_points.py does (k * width_px / 2560).

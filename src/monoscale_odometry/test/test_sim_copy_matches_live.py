@@ -19,7 +19,10 @@ import os
 
 import pytest
 
-LIVE = '/home/i/ros2_ws/hero-release/sim'
+# The tree that records. `MONOSCALE_SIM_LIVE` moves it; the default is where
+# it sits on the machine the bench was recorded on, and on any other machine
+# these comparisons skip rather than fail.
+LIVE = os.environ.get('MONOSCALE_SIM_LIVE', '/home/i/ros2_ws/hero-release/sim')
 VENDORED = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'sim')
 
 
@@ -69,7 +72,7 @@ def test_the_kit_the_odometry_reads_is_the_vendored_one():
         os.path.join(os.path.dirname(__file__), 'test_sensor_kit_consistency.py'),
         'r').read()
     sim_at = source.index("'..', 'sim', KIT_PACKAGE")
-    absolute_at = source.index('/home/i/ros2_ws/hero-release/sim')
+    absolute_at = source.index('MONOSCALE_SIM_LIVE')
     assert sim_at < absolute_at, (
         'the absolute path is searched before the vendored copy, so this '
         "machine would read the live kit and every other machine the copy")

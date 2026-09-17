@@ -141,9 +141,9 @@ def main(argv):
             if camera not in found:
                 continue
             it = found[camera]
-            print(f"  {camera}: 중앙 {100 * it['median']:+6.3f}%"
-                  f" 평균 {100 * it['mean']:+7.3f}%"
-                  f" 누적 {100 * it['accumulated']:+6.3f}%", end="")
+            print(f"  {camera}: median {100 * it['median']:+6.3f}%"
+                  f" mean {100 * it['mean']:+7.3f}%"
+                  f" accumulated {100 * it['accumulated']:+6.3f}%", end="")
         print(f"  n={found.get('front', {}).get('hops', 0)}")
     return 0
 

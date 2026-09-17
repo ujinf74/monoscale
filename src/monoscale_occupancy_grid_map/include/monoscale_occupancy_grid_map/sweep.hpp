@@ -166,7 +166,7 @@ struct SweepSettings
   double source_tolerance = 0.15;
   int threads = 0;
 
-  // Use the monoscale_fast CUDA kernel for the whole match-aggregate-reduce
+  // Use the CUDA kernel for the whole match-aggregate-reduce
   // when it is linked in; false forces the CPU path (the parity reference).
   bool use_cuda = true;
 };

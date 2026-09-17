@@ -37,7 +37,7 @@ from sensor_msgs.msg import CameraInfo, Image
 
 try:
     import cv2
-except ImportError:  # pragma: no cover - 런타임에만 필요하다
+except ImportError:  # pragma: no cover - only needed at runtime
     cv2 = None
 
 
@@ -54,7 +54,7 @@ def carla_rotation(pitch_deg: float, yaw_deg: float,
     ])
 
 
-# CARLA 축(x 전방, y 우, z 상) -> 광학 축(x 우, y 하, z 전방).
+# CARLA axes (x forward, y right, z up) -> optical axes (x right, y down, z forward).
 _OPTICAL = np.array([[0.0, 1.0, 0.0],
                      [0.0, 0.0, -1.0],
                      [1.0, 0.0, 0.0]])
@@ -203,9 +203,9 @@ class EndAssembler:
         if self.joint is None:
             self.prepare(arrays)
 
-        # 소스를 하나로 이어 붙여 remap 을 한 번만 돈다. 겹침은 맵을 만들 때
-        # 이미 갈라 두었으므로 프레임마다 마스크를 씌울 일이 없다. 프레임당
-        # 8.9 ms 에서 1.5 ms 로 줄어드는 자리다.
+        # The sources are concatenated so remap runs once. The overlap was
+        # already divided when the maps were built, so no per-frame mask is
+        # needed. This is where 8.9 ms a frame becomes 1.5 ms.
         side = arrays[0].shape[1]
         for index, source in enumerate(arrays):
             self.canvas[:, index * side:(index + 1) * side] = source
@@ -255,8 +255,8 @@ class EndAssembler:
         shape = (arrays[0].shape[0], side * len(arrays)) + arrays[0].shape[2:]
         self.canvas = np.empty(shape, np.uint8)
         self.node.get_logger().info(
-            f'{self.end}: {side}x{arrays[0].shape[0]} 소스 {len(arrays)}장 -> '
-            f'{self.width}x{self.height} 어안, 채워짐 {100.0 * filled.mean():.1f}%')
+            f'{self.end}: {side}x{arrays[0].shape[0]} from {len(arrays)} sources -> '
+            f'{self.width}x{self.height} fisheye, {100.0 * filled.mean():.1f}% filled')
 
     def camera_info(self, source: Image) -> CameraInfo:
         """Equidistant intrinsics: fx = fy = pixels per radian, no distortion.
@@ -293,7 +293,7 @@ class FisheyeAssembler(Node):
         self.declare_parameter('queue_depth', 100)
         self.declare_parameter('source_reliability', 'reliable')
         self.declare_parameter('report_period_sec', 10.0)
-        # 한 스텝의 절반. 같은 틱에 찍힌 두 장은 이 안에 든다.
+        # Half a step. Two frames taken on the same tick fall inside it.
         self.declare_parameter('tolerance_ms', 15.0)
 
         width = int(self.get_parameter('width').value)
@@ -311,7 +311,7 @@ class FisheyeAssembler(Node):
         tolerance = int(float(self.get_parameter('tolerance_ms').value) * 1e6)
 
         if cv2 is None:
-            self.get_logger().error('cv2 가 없어 합성할 수 없다')
+            self.get_logger().error('no cv2, cannot assemble')
         self.ends = [
             EndAssembler(self, end, width, height, diagonal, source_fov,
                          offsets, pitch, base_yaw, depth, tolerance,
@@ -320,10 +320,10 @@ class FisheyeAssembler(Node):
         ]
         focal = fisheye_focal(width, height, diagonal)
         self.get_logger().info(
-            f'어안 {width}x{height} 대각 {diagonal}°, '
+            f'fisheye {width}x{height}, {diagonal} deg diagonal, '
             f'{focal * math.radians(1):.2f} px/°, '
-            f'수평 {math.degrees(width / focal):.1f}° '
-            f'수직 {math.degrees(height / focal):.1f}°')
+            f'horizontal {math.degrees(width / focal):.1f} deg '
+            f'vertical {math.degrees(height / focal):.1f} deg')
         period = float(self.get_parameter('report_period_sec').value)
         if period > 0.0:
             self.create_timer(period, self.report)
@@ -333,11 +333,11 @@ class FisheyeAssembler(Node):
         for e in self.ends:
             skew = (f'{np.median(e.skew_ns) / 1e6:.1f}ms' if e.skew_ns else '-')
             spent = (f'{np.median(e.spent_ms):.1f}ms' if e.spent_ms else '-')
-            parts.append(f'{e.end} {e.made} 장 (버림 {e.dropped}, '
-                         f'스탬프차 {skew}, 합성 {spent})')
+            parts.append(f'{e.end} {e.made} frames ({e.dropped} dropped, '
+                         f'skew {skew}, assembly {spent})')
             e.skew_ns.clear()
             e.spent_ms.clear()
-        self.get_logger().info('발행: ' + ', '.join(parts))
+        self.get_logger().info('published: ' + ', '.join(parts))
 
 
 def main(args=None):

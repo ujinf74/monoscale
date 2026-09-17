@@ -7,9 +7,9 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# The CUDA path builds the same kernel monoscale_fast runs, from the same
-# source, so the C++ node and the python reference share the arithmetic. If no
-# CUDA compiler is present the Sweep falls back to the CPU path in sweep.cpp.
+# The CUDA path builds the kernel in src/sweep_kernels.cu, which is the same
+# source the python reference was checked against, so the two share the
+# arithmetic. Without a CUDA compiler the Sweep falls back to sweep.cpp.
 include(CheckLanguage)
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
@@ -28,14 +28,16 @@ find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 
 set(SWEEP_SOURCES src/sweep.cpp src/publish.cpp)
-# Overridable: the kernel source lives in monoscale_fast, which is not part of
-# this repository. Without it (or without a CUDA compiler) the CPU path in
-# sweep.cpp serves, bit-compatible per the parity log in the port session.
-set(MONOSCALE_FAST_SRC
-  /home/i/ros2_ws/hero-release/src/monoscale_fast/src/sweep_kernels.cu
-  CACHE FILEPATH "monoscale_fast sweep_kernels.cu for the CUDA backend")
-if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_FAST_SRC})
-  list(APPEND SWEEP_SOURCES src/cuda_backend.cpp ${MONOSCALE_FAST_SRC})
+# The kernel lives here. It used to be pulled from a sibling workspace by an
+# absolute path, which meant a fresh clone silently built the CPU path -- 28
+# minutes for 674 keyframes against the CUDA path's 0.2 s each -- while the
+# README advertised the GPU one. Vendored 2026-09-17 so the repository builds
+# what it documents. Still overridable, for a tree that keeps its own copy.
+set(MONOSCALE_SWEEP_KERNELS
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/sweep_kernels.cu
+  CACHE FILEPATH "CUDA kernels for the plane sweep")
+if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_SWEEP_KERNELS})
+  list(APPEND SWEEP_SOURCES src/cuda_backend.cpp ${MONOSCALE_SWEEP_KERNELS})
   add_compile_definitions(MONOSCALE_OCCUPANCY_HAS_CUDA)
 endif()
 
@@ -46,14 +48,14 @@ target_include_directories(monoscale_occupancy_core PUBLIC
   ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(monoscale_occupancy_core ${OpenCV_LIBS}
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>)
-if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_FAST_SRC})
+if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_SWEEP_KERNELS})
   set_target_properties(monoscale_occupancy_core PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
   find_package(CUDAToolkit REQUIRED)
   target_link_libraries(monoscale_occupancy_core CUDA::cudart)
 endif()
 
 # Static core: the CUDA runtime it pulls in must reach the executable too.
-if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_FAST_SRC})
+if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_SWEEP_KERNELS})
   set(SWEEP_CUDART CUDA::cudart)
 endif()
 

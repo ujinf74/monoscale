@@ -119,13 +119,13 @@ if __name__=="__main__":
             return flow(cam,pix,s,t,f=cam.f*(1+rel))
         return p
     import math
-    tests=[("높이 +10mm", mk_height(0.010), 1.0),
+    tests=[("height +10mm", mk_height(0.010), 1.0),
            ("pitch +0.5deg", mk_pitch(math.radians(0.5)), 1.0),
            ("roll +0.5deg",  mk_roll(math.radians(0.5)), 1.0),
-           ("초점 +1%",      mk_focal(0.01), 1.0)]
-    meas={"높이 +10mm":(1.123,0.794),"pitch +0.5deg":(0.520,-0.534),
-          "roll +0.5deg":(0.082,-0.159),"초점 +1%":(-0.234,-0.319)}
-    print(f"{'섭동':16s} {'해석 front':>11s} {'실측 front':>11s} {'해석 rear':>11s} {'실측 rear':>11s}")
+           ("focal +1%",      mk_focal(0.01), 1.0)]
+    meas={"height +10mm":(1.123,0.794),"pitch +0.5deg":(0.520,-0.534),
+          "roll +0.5deg":(0.082,-0.159),"focal +1%":(-0.234,-0.319)}
+    print(f"{'perturbation':16s} {'pred front':>11s} {'meas front':>11s} {'pred rear':>11s} {'meas rear':>11s}")
     for name,p,_ in tests:
         gf=step_leak(front,band,S,T,p)
         gr=step_leak(rear,band,S,T,p)
