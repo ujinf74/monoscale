@@ -177,6 +177,18 @@ against truth on `approach_hd60_occ_b`: G1 (calling the vehicle free) 0, G2
 ghosts 0. A Python reference under the same conditions gives G2 2 / G3 0.829 /
 G4 39, so cover and false positives are ahead here.
 
+![Scored occupancy grid](media/occupancy.png)
+
+Four numbers are not a map, so here is the map they are scored over. White is
+ground the sweep carved free, dark grey is what it called occupied, blue is
+ground that truly is blocked and pale grey is never observed; the parked cars
+are magenta and the parts of them the sweep found are green. The three failure
+predicates have their own colours, and what the scores above say is that **there
+is no red at all** -- not one cell of a vehicle was called free -- with three
+yellow cells and a thin orange rim. Regenerate it with
+`monoscale_evaluation/render_map.py`; the truth archives it scores against are
+too large to ship, and `sim/` is what makes them.
+
 ## Building and running
 
 ```bash
