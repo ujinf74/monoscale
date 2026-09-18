@@ -83,6 +83,7 @@ ros2 launch ioniq_carla_bridge carla_vehicle.launch.py \
   fixed_delta_seconds:="$fixed_delta" \
   max_real_delta_seconds:="$max_real_delta" \
   spawn_point:="$spawn_point" \
+  ${BRIDGE_EXTRA:-} \
   > "$logs/$name.bridge.log" 2>&1 &
 
 # Every extrinsic in the kit is measured against one car: the camera heights
@@ -209,11 +210,23 @@ echo "== ground truth"
 ros2 run monoscale_carla carla_ground_truth --ros-args \
   -p use_sim_time:=true > "$logs/$name.truth.log" 2>&1 &
 
-# The traffic manager is not usable from here: in a synchronous world it only
-# applies its commands when the client that owns the tick has put it into
-# synchronous mode, and the tick belongs to the bridge. ego_pilot drives
-# through the actuation topics the bridge already subscribes to, which also
-# makes the manoeuvre repeatable.
+# ego_pilot drives through the actuation topics the bridge already subscribes
+# to, which is what makes the manoeuvre repeatable.
+#
+# The note here used to say the traffic manager was unusable, because in a
+# synchronous world it only applies its commands when the client owning the
+# tick has put it into synchronous mode, and the tick belongs to the bridge.
+# That is no longer true: the bridge does exactly that under
+# use_traffic_manager, and seeds both the manager and `random`, so a drive with
+# NPC traffic is reproducible. With publish_ground_truth_objects it also
+# publishes every CARLA vehicle but the ego to
+# /perception/object_recognition/detection/objects, which is the only way the
+# occupancy grid can be scored against something that moves. Both reach the
+# bridge through BRIDGE_EXTRA:
+#
+#   BRIDGE_EXTRA="use_traffic_manager:=True publish_ground_truth_objects:=True" \
+#   RECORD_EXTRA=/perception/object_recognition/detection/objects \
+#     ./rec_straight.sh <name> <speed> <seconds>
 echo "== pilot at $speed m/s"
 ros2 run monoscale_carla ego_pilot --ros-args \
   -p use_sim_time:=true \
