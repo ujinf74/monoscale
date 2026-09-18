@@ -527,6 +527,11 @@
     # against the 0.375 m the pose lost while the map was warming up. With
     # that offset gone the bias is what is left, and 8 m puts scale on 1.000 at
     # both speeds: 0.091 m RMSE at 8 m/s and 0.103 m at 2.5.
+    # The band's two edges set the angular extent of road the plane fit sees,
+    # and that extent is what its precision is made of: 49.6 deg here reads
+    # 0.39% step noise, 24.3 deg reads 1.15%, 10.2 deg reads 3.09% and 5.5 deg
+    # reads 23.73%, all on one drive at its recorded rate. See
+    # docs/road-patch-angle.md before moving either edge.
     ground_max_distance_m: 8.0
     # Off. The near edge of the road band stays where the camera block puts it.
     #

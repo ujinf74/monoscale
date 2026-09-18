@@ -205,3 +205,46 @@ its numbers came from.
 | `jacobian.py` | the error Jacobian of the ground projection: which extrinsic or intrinsic enters range, and in which direction. |
 | `nullspace.py` | the rank and nullspace of that Jacobian: what is observable and what cannot be told apart. |
 | `bag_gate.py` | whether a fresh recording is usable: collisions, drift out of the lane, and the PhysX substep artefact. |
+
+
+## What sets the precision of the plane scale
+
+The scale comes from a plane-induced homography between two views of the road,
+so the fit is conditioned by how much road it sees -- not in metres and not in
+pixels, but in **angle**. A patch subtending a wide vertical angle constrains
+the height and the tilt separately; a narrow one lets the two trade against each
+other, and what comes out is a step whose individual estimates are worth little.
+
+One drive, `straight120_v2_r2`, at its recorded 60 Hz throughout. Only the band
+moves, and the angle is what it subtends at the front camera's 0.889 m:
+
+| band | angular extent | step noise | ATE |
+| --- | ---: | ---: | ---: |
+| 0.6 - 8 m | 49.6 deg | 0.39 % | 0.0136 m |
+| 1.5 - 8 m | 24.3 deg | 1.15 % | 0.0651 m |
+| 3.0 - 8 m | 10.2 deg | 3.09 % | 0.0866 m |
+| 4.5 - 9 m | 5.5 deg | 23.73 % | 2.2667 m |
+
+Halving the angle roughly triples the noise, and below about ten degrees it
+stops being a trend and becomes a cliff.
+
+**What it explains.** A KITTI drive reads 20.7 % step noise and nothing in this
+stack's parameters moves it: not the band, the RANSAC threshold, the solve
+interval, the processing width, the attitude source or the feature gates. Its
+forward camera sits 1.657 m up and cannot see road closer than 5.9 m, so its
+band is 7-30 m -- 10.2 degrees, the same place on the curve where this rig's own
+recording reads 3.09 %. Real asphalt, one camera and a 10 Hz shutter account for
+the rest. That measurement was never going to be precise, and no tuning was
+going to make it so.
+
+It also says where this rig's numbers come from: two cameras pitched 30 degrees
+down at 0.89 and 1.26 m see the road from directly beneath out to grazing, fifty
+degrees of it. That, not the lens and not the frame rate, is the 0.02 % ATE.
+
+**The rule that follows.** What a deployment has to hold is
+
+    extent = atan(h / d_near) - atan(h / d_far)
+
+Twenty degrees still reads near one percent. Ten is the knee. Five is not a
+measurement. A camera that cannot reach twenty degrees is not short of tuning,
+it is short of geometry: mount it lower, pitch it down, or widen the lens.
