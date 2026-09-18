@@ -1055,6 +1055,61 @@ void Estimator::ingest_imu(const ImuSample & measured)
   try_process_pairs();
 }
 
+void Estimator::emit_interpolated(double stamp)
+{
+  // Nothing to reckon from until a solve has landed, and nothing worth
+  // reporting while the pose is still pinned at the origin.
+  if (!settings_.emit_between_solves || !map_ready_ || !last_accept_stamp_.has_value()) {
+    return;
+  }
+  const double dt = stamp - *last_accept_stamp_;
+  if (dt <= 0.0) {
+    return;
+  }
+
+  Update update;
+  update.stamp = stamp;
+  update.pose = pose_;
+  update.interpolated = true;
+  update.pose_valid = true;
+
+  // Heading as a difference, not as an absolute: the instrument's yaw and the
+  // pose's yaw are measured from different zeros, and only their change over
+  // the interval is common to both.
+  const auto yaw_now = imu_yaw_at(stamp);
+  const auto yaw_then = imu_yaw_at(*last_accept_stamp_);
+  if (yaw_now.has_value() && yaw_then.has_value()) {
+    update.pose.yaw = wrap_pi(pose_.yaw + wrap_pi(*yaw_now - *yaw_then));
+  }
+
+  // Carried forward on the last hop the solve accepted rather than on the
+  // velocity filter: at a low frame rate the filter is the noisier of the two,
+  // and the hop is the quantity this stack actually measures.
+  if (last_hop_dt_ > 1e-6) {
+    // Bounded at one hop. A prediction that runs further than the interval it
+    // was measured over is replaced by the next solve anyway, and the pose it
+    // traced on the way there is a detour the trajectory then has to undo.
+    const double reach = std::min(dt / last_hop_dt_, 1.0);
+    const Eigen::Vector2d body = last_hop_body_ * reach;
+    const double c = std::cos(pose_.yaw);
+    const double s = std::sin(pose_.yaw);
+    update.pose.x += c * body.x() - s * body.y();
+    update.pose.y += s * body.x() + c * body.y();
+    update.twist = Eigen::Vector3d(
+      last_hop_body_.x() / last_hop_dt_, last_hop_body_.y() / last_hop_dt_, 0.0);
+  }
+
+  if (attitude_) {
+    update.roll = attitude_->roll();
+    update.pitch = attitude_->pitch();
+    update.tilt_valid = true;
+  }
+  update.pose_covariance = pose_covariance_;
+  update.covariance_valid = true;
+  ++diagnostics_.interpolated_updates;
+  pending_updates_.push_back(std::move(update));
+}
+
 std::vector<Update> Estimator::take_updates()
 {
   std::vector<Update> updates;
@@ -1201,12 +1256,16 @@ void Estimator::try_process_pairs()
 
     ++diagnostics_.pairs_seen;
     ++frames_since_solve_;
+    const double frame_stamp =
+      *std::max_element(best_stamps.begin(), best_stamps.end());
     if (settings_.adaptive_solve_interval && !ready_to_solve()) {
+      emit_interpolated(frame_stamp);
       continue;
     }
     if (!settings_.adaptive_solve_interval &&
       diagnostics_.pairs_seen % settings_.frame_decimation != 0)
     {
+      emit_interpolated(frame_stamp);
       continue;
     }
     process_pair();
@@ -1566,7 +1625,23 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // scale at 0.776 against 0.110 m and 0.996 held fixed -- and it was left
   // switched off ever since, which is a way of carrying code that has never
   // run.
-  const double band = settings_.ground_max_distance_m;
+  // The near edge clears the hop (see ground_min_distance_hops), and the band
+  // slides out with it rather than narrowing: the far edge carries the same
+  // width, so pushing the window off the vehicle does not also starve it.
+  //
+  // This is the adaptive band above tried again on a different quantity, and
+  // the difference is the point. Keying it on speed moved the window on drives
+  // whose near road was never in danger, which is what cost park 2.4 m. Keying
+  // it on the hop moves nothing until the hop is long enough to drive past the
+  // near edge between the two views a solve compares, which at 60 Hz it never
+  // is: four hops of a 0.12 m hop is 0.49 m against a 0.6 m edge. It is off by
+  // default all the same, because where it does bite it takes the fast bench
+  // drive with it (0.0416 -> 0.0850 m).
+  const double near_limit = std::max(
+    camera.settings.ground_min_distance_m,
+    settings_.ground_min_distance_hops * std::abs(last_fused_length_));
+  const double band_shift = near_limit - camera.settings.ground_min_distance_m;
+  const double band = settings_.ground_max_distance_m + band_shift;
 
   // Both views, always. Projecting only the current one and leaving the earlier
   // frame for the paths that need it looks like a saving of half the work, and
@@ -1578,7 +1653,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   {
     Stopwatch watch(diagnostics_, "ground");
     pixels_to_ground(
-      current_pixels, camera.model, band, camera.settings.ground_min_distance_m,
+      current_pixels, camera.model, band, near_limit,
       tilt_ptr, camera.settings.range_scale * camera.range_scale_learned * imu_scale_,
       solved.current_ground, valid_current, settings_.pitch_centre_x_m,
       tilt_moves_camera);
@@ -1588,7 +1663,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       then_ptr = &camera.solve_tilt.value();
     }
     pixels_to_ground(
-      previous_pixels, camera.model, band, camera.settings.ground_min_distance_m,
+      previous_pixels, camera.model, band, near_limit,
       then_ptr, camera.settings.range_scale * camera.range_scale_learned * imu_scale_,
       solved.previous_ground, valid_previous, settings_.pitch_centre_x_m,
       tilt_moves_camera);
@@ -1651,7 +1726,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // registers worse than it maps. Bounding the solve alone keeps the grid's
   // reach, which is what ground_max_distance_m is for.
   const double solve_band = settings_.solve_max_distance_m > 0.0
-    ? settings_.solve_max_distance_m : std::numeric_limits<double>::infinity();
+    ? settings_.solve_max_distance_m + band_shift : std::numeric_limits<double>::infinity();
   // The near edge of the same band, for asking what one annulus of ground says
   // on its own. Zero in deployment, and the reason it exists is that a cap
   // alone cannot answer the question: every capped run contains all the ground
@@ -3534,6 +3609,8 @@ void Estimator::process_pair()
     // see a heading error. Correcting the heading from it feeds the estimate
     // back into itself.
     last_accept_stamp_ = current_stamp;
+    last_hop_body_ = Eigen::Vector2d(motion->x, motion->y);
+    last_hop_dt_ = dt;
 
     double vx = 0.0;
     double vy = 0.0;

@@ -176,6 +176,33 @@ struct EstimatorSettings
   double imu_max_gap_sec = 0.12;
 
   double ground_max_distance_m = 25.0;
+  // How many hop lengths of clearance the near edge of the road band needs.
+  //
+  // The road nearest the camera is the best conditioned ground there is, right
+  // up until the vehicle drives past it between the two views: a point a hop
+  // away from the lens is in one frame and gone in the next, and what the fit
+  // gets from that annulus is the residue of features that left. Decimating a
+  // 60 Hz bench drive shows the cliff -- at 20 Hz the hop is 0.37 m against a
+  // 0.6 m near edge and the step noise is 0.66%, at 15 Hz it is 0.49 m and the
+  // noise is 27.67%, at 10 Hz 0.74 m and 47.46%. Moving the near edge out to
+  // four hops takes the 15 Hz case back to 2.43% and its drift from 0.19% to
+  // 0.06%. Zero keeps the fixed band.
+  double ground_min_distance_hops = 0.0;
+
+  // Report a pose on the frames between two solves, dead reckoned from the
+  // last solved one.
+  //
+  // A solve runs every few frames (see solve_min_frames and
+  // solve_trigger_disparity_px), and until now nothing came out on the frames
+  // in between: a 10 Hz drive of 447 frames reported 196 poses. A consumer
+  // that wants a pose per image -- an occupancy grid projecting that image,
+  // say -- had to hold the last one and pretend the vehicle stood still.
+  //
+  // These poses carry the heading the instrument reports and the last velocity
+  // carried forward, and they never feed back: `pose_` stays where the last
+  // solve left it, because the next solve measures the whole interval since
+  // that solve and would otherwise count the interpolated part twice.
+  bool emit_between_solves = false;
   double ground_ransac_threshold_m = 0.12;
   double ground_align_softness_m = 0.0;
   // Far limit for points entering the pose solve. 0 uses ground_max_distance_m.
@@ -787,6 +814,11 @@ struct Update
   // origin. Whoever consumes this is better served by no pose than by one that
   // is knowingly standing still while the car is not.
   bool pose_valid = false;
+  // Dead reckoned between two solves rather than measured by one (see
+  // emit_between_solves). The pose is the last solved one carried forward on
+  // the instrument's heading and the last velocity, so it is worth having and
+  // worth knowing about.
+  bool interpolated = false;
   std::vector<LabelledPoint> points;
   // What each camera made of this hop, in the body frame of the pose held at
   // `previous_stamp`, and what they fused to before any filter touched it.
@@ -873,6 +905,7 @@ struct Diagnostics
   int64_t fail_translation = 0;
   int64_t fail_yaw = 0;
   int64_t yaw_only_updates = 0;
+  int64_t interpolated_updates = 0;
   int64_t coasted = 0;
   int64_t filter_rejections = 0;
   int64_t imu_yaw_misses = 0;
@@ -1060,6 +1093,8 @@ public:
 
   // Drain whatever the ingests produced. One ingest can close several pairs.
   std::vector<Update> take_updates();
+  // A dead-reckoned pose for a frame no solve will run on.
+  void emit_interpolated(double stamp);
 
   const Diagnostics & diagnostics() const {return diagnostics_;}
 
@@ -1178,6 +1213,10 @@ private:
   Eigen::Vector3d filtered_twist_ = Eigen::Vector3d::Zero();
   // Accumulated dead-reckoning covariance for the absolute pose.
   Eigen::Matrix3d pose_covariance_ = Eigen::Matrix3d::Zero();
+  // The last hop this stack accepted, and how long it took: what a frame
+  // between two solves is carried forward on.
+  Eigen::Vector2d last_hop_body_ = Eigen::Vector2d::Zero();
+  double last_hop_dt_ = 0.0;
   bool map_ready_ = false;
 
   std::deque<std::pair<double, double>> imu_yaw_samples_;

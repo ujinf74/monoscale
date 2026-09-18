@@ -230,6 +230,9 @@ Configuration declare_and_read(rclcpp::Node & node)
   declare_int("detection_grid_rows", 0);
 
   settings.ground_max_distance_m = declare_double("ground_max_distance_m", 25.0);
+  settings.ground_min_distance_hops =
+    declare_double("ground_min_distance_hops", 0.0);
+  settings.emit_between_solves = declare_bool("emit_between_solves", false);
   // `min_ground_flow_px` is not declared. The adaptive ground band it keyed
   // was measured against the original recordings and lost to the fixed one, so
   // it shipped switched off and stayed that way. Parameter files that still

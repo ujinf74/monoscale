@@ -528,6 +528,47 @@
     # that offset gone the bias is what is left, and 8 m puts scale on 1.000 at
     # both speeds: 0.091 m RMSE at 8 m/s and 0.103 m at 2.5.
     ground_max_distance_m: 8.0
+    # Off. The near edge of the road band stays where the camera block puts it.
+    #
+    # What this is for: the road nearest the lens is the best conditioned ground
+    # there is, right up until the vehicle drives past it between the two views
+    # a solve compares. Decimating straight120_v2_r2 from 60 Hz shows the cliff,
+    # with the band left at 0.6-8 m throughout:
+    #
+    #   rate    hop     step noise   ATE
+    #   60 Hz   0.12 m    0.36%     0.0192 m
+    #   30 Hz   0.25 m    0.44%     0.0160 m
+    #   20 Hz   0.37 m    0.66%     0.0382 m
+    #   15 Hz   0.49 m   27.67%     0.0855 m
+    #   10 Hz   0.74 m   47.46%     4.41 m
+    #
+    # Setting this to 4 moves the near edge to four hops and slides the far edge
+    # out with it, which takes the 15 Hz case to 2.34% and 0.0101 m -- better
+    # than the 60 Hz recording it was decimated from.
+    #
+    # It is off by default because the same 4 costs the drives that do not have
+    # the problem: straight_s8_t01_r3 at 60 Hz goes 0.0416 -> 0.0850 m, and a
+    # KITTI drive (hop 1.68 m, band already 7-30 m) goes 2.98 -> 5.90 m. The
+    # near road is worth keeping until the hop is long enough to eat it, and
+    # where that happens depends on the rig. Choose it against the rig's own
+    # recordings; 0 reproduces every number this bench reports.
+    ground_min_distance_hops: 0.0
+
+    # Off. A pose comes out only on the frames a solve ran on.
+    #
+    # A solve runs every few frames, so a 60 Hz drive reports 898 poses for 1802
+    # images and a 10 Hz one 196 for 447. Turning this on reports the frames in
+    # between too, dead reckoned from the last solved pose on the instrument's
+    # heading and the last accepted hop, bounded at one hop's reach. Nothing
+    # feeds back: the next solve measures the whole interval since the last one.
+    #
+    # What it costs, measured: on this bench nothing at all (straight120_v2_r2
+    # 0.0192 m either way, park_clean_r2 0.0861 -> 0.0832), and on a 10 Hz KITTI
+    # drive the segment error is unchanged (2.16% -> 2.17%) while the endpoint
+    # drift goes 1.21% -> 1.38%, which is the price of reporting a prediction
+    # the next solve has not corrected yet. Updates carry `interpolated` so a
+    # consumer can tell the two apart.
+    emit_between_solves: false
     # Off. The adaptive band below was measured against bags re-recorded in
     # this environment and helped there, but on the original recordings it
     # hurts: park comes out at 2.518 m with scale 0.776 against 0.110 m and
