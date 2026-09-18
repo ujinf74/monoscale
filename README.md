@@ -204,11 +204,18 @@ Odometry needs no CUDA. `monoscale_tracker` has a GPU path for the optical flow
 default.
 
 **The occupancy grid does need it.** The CPU sweep takes 28 minutes over 674
-keyframes and cannot ship; the CUDA path takes 0.2 s per keyframe. The kernel is
+keyframes and cannot ship; the CUDA path takes **34 ms** per keyframe, both
+cameras counted, with the card 95 % busy. The kernel is
 `src/monoscale_occupancy_grid_map/src/sweep_kernels.cu` and CMake compiles it
-when `nvcc` is present. Without `nvcc` the build quietly falls back to the CPU
-path, so a successful build is not a deployable one -- check the first run for
+when `nvcc` is present. Without `nvcc` the build falls back to the CPU path,
+so a successful build is not a deployable one -- check the first run for
 `cuda backend: available=1`.
+
+Until 2026-09-18 that fallback did not exist: `cuda_match` was declared
+unconditionally and defined only in the CUDA translation unit, so a machine
+without `nvcc` failed at the link rather than falling back. It went unseen
+because this machine's CMake finds `/usr/local/cuda` whether or not `nvcc` is
+on PATH; a build of a tree made only of the tracked files is what surfaced it.
 
 ## Number of cameras
 
