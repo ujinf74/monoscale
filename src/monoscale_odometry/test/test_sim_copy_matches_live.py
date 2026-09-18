@@ -25,6 +25,18 @@ import pytest
 LIVE = os.environ.get('MONOSCALE_SIM_LIVE', '/home/i/ros2_ws/hero-release/sim')
 VENDORED = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'sim')
 
+# The bridge package that is actually built and installed, which is a different
+# tree again: `MONOSCALE_SIM_LIVE` is itself a copy kept beside the recording
+# scripts, so comparing the vendored copy only against that compares a copy
+# with a copy. On 2026-09-18 the two copies agreed on
+# `actor_origin_height_m: 0.03635` while the package every workspace installs
+# still carried the 0.0372 corrected on 09-11 -- eleven months of nothing
+# noticing, because `test_sensor_kit_consistency` reads the installed package
+# share first and therefore only ran against it on a machine with that
+# workspace sourced. It failed at once when one was.
+BRIDGE_SRC = os.environ.get(
+    'MONOSCALE_BRIDGE_SRC', '/home/i/ros2_ws/src/ioniq_carla_bridge')
+
 
 def _digest(path):
     with open(path, 'rb') as handle:
@@ -76,3 +88,25 @@ def test_the_kit_the_odometry_reads_is_the_vendored_one():
     assert sim_at < absolute_at, (
         'the absolute path is searched before the vendored copy, so this '
         "machine would read the live kit and every other machine the copy")
+
+
+def test_the_vendored_kit_matches_the_bridge_package_that_builds():
+    """The kit in the package, not only the kit in the recording tree.
+
+    Nothing in the bridge reads `actor_origin_height_m` -- it is monoscale's
+    own bookkeeping, and the cameras spawn at the `transform` entries whatever
+    it says -- so a divergence does not change a recording. It changes what
+    `vision_fisheye.param.yaml`'s heights are derived from, and 0.85 mm of
+    that moved the benchmark by half.
+    """
+    kit = os.path.join(BRIDGE_SRC, 'config', 'sensor_kit_calibration.yaml')
+    if not os.path.exists(kit):
+        pytest.skip(f'no bridge package source at {BRIDGE_SRC}')
+    vendored = os.path.normpath(
+        os.path.join(VENDORED, 'ioniq_carla_bridge', 'config',
+                     'sensor_kit_calibration.yaml'))
+    assert _digest(vendored) == _digest(kit), (
+        f'{kit} has drifted from the vendored copy. That package is what every '
+        f'workspace installs and what test_sensor_kit_consistency reads first, '
+        f'so the odometry extrinsics would be derived from one file and checked '
+        f'against another')
