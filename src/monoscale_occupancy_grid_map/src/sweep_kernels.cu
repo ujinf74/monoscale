@@ -509,6 +509,9 @@ namespace
 void expect(const char * what)
 {
   if (getenv("SWEEP_CUDA_SYNC") != nullptr) {
+    // Device wide, not per stream: this is the debug path, it runs before the
+    // per-thread scratch is even declared, and waiting for everything is the
+    // point of it.
     cudaDeviceSynchronize();
   }
   const cudaError_t error = cudaGetLastError();
@@ -548,13 +551,34 @@ struct Scratch
   float * best_cost = nullptr;
   float * road_cost = nullptr;
   float * second_cost = nullptr;
+  // This thread's stream. Everything below ran on the legacy default stream,
+  // which is shared by every thread in the process and serialises against
+  // itself: with the two cameras sweeping at once, one camera's kernels could
+  // not overlap the other's, and `cudaDeviceSynchronize` waited for the whole
+  // device rather than for this camera's own work. Measured: the match phase
+  // took 44.9 ms per keyframe with one camera running and 72.1 ms with two,
+  // for the same arithmetic, while the card sat at 56 per cent.
+  cudaStream_t stream = nullptr;
 };
 
-Scratch g_scratch;
+// Per thread, so the two cameras can sweep at the same time.
+//
+// These were file-scope globals, which made the backend safe for exactly one
+// caller: two threads entering `plane_sweep_cuda_impl` would hand each other
+// the same device buffers and the same `g_last_volume`. The sweeps themselves
+// are independent until the grids are published, and a single sweep leaves the
+// device about 37 per cent idle -- measured by running two of them at once,
+// where two full sweeps finish in 143.6 s against the 227.8 s they take one
+// after another. `thread_local` is the whole of the fix; not one line of the
+// arithmetic moves, and the output is bit identical.
+//
+// The cost is one scratch per thread, so the volume is held twice: 81 MB at
+// 22 planes and 1280x720, against the card's own memory.
+thread_local Scratch g_scratch;
 // The volume of the call just made, so a caller that decides afterwards that
 // it wants the whole cost profile can have it without sweeping twice.
-const float * g_last_volume = nullptr;
-size_t g_last_elements = 0;
+thread_local const float * g_last_volume = nullptr;
+thread_local size_t g_last_elements = 0;
 
 template <typename T>
 void ensure(T ** pointer, size_t & held, size_t wanted)
@@ -585,7 +609,13 @@ void plane_sweep_cuda_volume(float * out, size_t count)
   if (g_last_volume == nullptr || count > g_last_elements) {
     throw std::runtime_error("no volume from the last sweep");
   }
-  cudaMemcpy(out, g_last_volume, count * sizeof(float), cudaMemcpyDeviceToHost);
+  // No caller anywhere in the tree, as of 2026-09-18. Left alone, but taken
+  // along when the stream model changed: the volume it reads was written on
+  // the calling thread's stream, and a copy on the default stream is not
+  // ordered against it.
+  cudaMemcpyAsync(out, g_last_volume, count * sizeof(float),
+                  cudaMemcpyDeviceToHost, g_scratch.stream);
+  cudaStreamSynchronize(g_scratch.stream);
   expect("volume download");
 }
 
@@ -608,6 +638,13 @@ void plane_sweep_cuda_impl(
   const float * geometry, const float * offsets)
 {
   Scratch & s = g_scratch;
+  if (s.stream == nullptr) {
+    const cudaError_t made = cudaStreamCreate(&s.stream);
+    if (made != cudaSuccess) {
+      throw std::runtime_error(
+        std::string("CUDA could not create a stream: ") + cudaGetErrorString(made));
+    }
+  }
   const size_t pixels = static_cast<size_t>(rows) * cols;
   const size_t elements = pixels * planes;
 
@@ -639,9 +676,9 @@ void plane_sweep_cuda_impl(
   ensure(&s.homographies, s.homography_count,
          static_cast<size_t>(source_count) * planes * 9);
 
-  cudaMemcpy(s.reference, reference, pixels * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(s.source_stack, sources, pixels * source_count * sizeof(float),
-             cudaMemcpyHostToDevice);
+  cudaMemcpyAsync(s.reference, reference, pixels * sizeof(float), cudaMemcpyHostToDevice, s.stream);
+  cudaMemcpyAsync(s.source_stack, sources, pixels * source_count * sizeof(float),
+                  cudaMemcpyHostToDevice, s.stream);
   const bool fisheye = geometry != nullptr && offsets != nullptr;
   if (fisheye) {
     size_t geometry_held = s.geometry_count;
@@ -650,15 +687,15 @@ void plane_sweep_cuda_impl(
     size_t offsets_held = s.offset_count;
     ensure(&s.offsets, offsets_held, static_cast<size_t>(planes));
     s.offset_count = offsets_held;
-    cudaMemcpy(s.geometry, geometry,
-               static_cast<size_t>(source_count) * 30 * sizeof(float),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(s.offsets, offsets, static_cast<size_t>(planes) * sizeof(float),
-               cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(s.geometry, geometry,
+                    static_cast<size_t>(source_count) * 30 * sizeof(float),
+                    cudaMemcpyHostToDevice, s.stream);
+    cudaMemcpyAsync(s.offsets, offsets, static_cast<size_t>(planes) * sizeof(float),
+                    cudaMemcpyHostToDevice, s.stream);
   } else {
-    cudaMemcpy(s.homographies, homographies,
-               static_cast<size_t>(source_count) * planes * 9 * sizeof(float),
-               cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(s.homographies, homographies,
+                    static_cast<size_t>(source_count) * planes * 9 * sizeof(float),
+                    cudaMemcpyHostToDevice, s.stream);
   }
   expect("upload");
 
@@ -675,17 +712,17 @@ void plane_sweep_cuda_impl(
   }
   if (cost_kind == 0) {
     expect("before sweep_accumulate");
-  sweep_accumulate<<<blocks, threads>>>(
+  sweep_accumulate<<<blocks, threads, 0, s.stream>>>(
       s.reference, s.source_stack, s.homographies, source_count, planes, rows,
       cols, s.cost, s.seen);
     expect("before box_horizontal");
-  box_horizontal<<<blocks, threads>>>(s.cost, planes, rows, cols, radius_x, s.scratch);
+  box_horizontal<<<blocks, threads, 0, s.stream>>>(s.cost, planes, rows, cols, radius_x, s.scratch);
     expect("before box_vertical");
-  box_vertical<<<blocks, threads>>>(s.scratch, planes, rows, cols, radius_y, s.blurred_cost);
+  box_vertical<<<blocks, threads, 0, s.stream>>>(s.scratch, planes, rows, cols, radius_y, s.blurred_cost);
     expect("before box_horizontal");
-  box_horizontal<<<blocks, threads>>>(s.seen, planes, rows, cols, radius_x, s.scratch);
+  box_horizontal<<<blocks, threads, 0, s.stream>>>(s.seen, planes, rows, cols, radius_x, s.scratch);
     expect("before box_vertical");
-  box_vertical<<<blocks, threads>>>(s.scratch, planes, rows, cols, radius_y, s.blurred_seen);
+  box_vertical<<<blocks, threads, 0, s.stream>>>(s.scratch, planes, rows, cols, radius_y, s.blurred_seen);
   } else {
     // Correlation cannot share a filter between sources, so each one lays down
     // its six window sums, is filtered, and is folded into the running cost.
@@ -707,29 +744,29 @@ void plane_sweep_cuda_impl(
     for (int source = 0; source < source_count; ++source) {
       expect("before zncc_accumulate");
       if (fisheye) {
-        zncc_accumulate_fisheye<<<blocks, threads>>>(
+        zncc_accumulate_fisheye<<<blocks, threads, 0, s.stream>>>(
           s.reference, s.source_stack + static_cast<size_t>(source) * pixels,
           s.geometry + static_cast<size_t>(source) * 30, s.offsets,
           planes, rows, cols, s.stats);
       } else {
-        zncc_accumulate<<<blocks, threads>>>(
+        zncc_accumulate<<<blocks, threads, 0, s.stream>>>(
           s.reference, s.source_stack + static_cast<size_t>(source) * pixels,
           s.homographies + static_cast<size_t>(source) * planes * 9,
           planes, rows, cols, s.stats);
       }
       expect("before box_horizontal");
-  box_horizontal<<<wide, threads>>>(
+  box_horizontal<<<wide, threads, 0, s.stream>>>(
         s.stats, planes * 6, rows, cols, radius_x, s.stats_scratch);
       expect("before box_vertical");
-  box_vertical<<<wide, threads>>>(
+  box_vertical<<<wide, threads, 0, s.stream>>>(
         s.stats_scratch, planes * 6, rows, cols, radius_y, s.stats);
       expect("before zncc_reduce");
-  zncc_reduce<<<blocks, threads>>>(
+  zncc_reduce<<<blocks, threads, 0, s.stream>>>(
         s.stats, planes, rows, cols, s.blurred_cost, s.blurred_seen);
     }
   }
 
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(s.stream);
   expect("matching");
 
   // The validity bar: what fraction of (window x sources) samples a pixel
@@ -745,7 +782,7 @@ void plane_sweep_cuda_impl(
   const float unseen = static_cast<float>(window_x) * window_y *
     seen_fraction * static_cast<float>(source_count);
   expect("before sweep_finalise");
-  sweep_finalise<<<blocks, threads>>>(
+  sweep_finalise<<<blocks, threads, 0, s.stream>>>(
     s.blurred_cost, s.blurred_seen, planes, rows, cols, unseen, s.volume, s.valid);
 
   const float * chosen = s.volume;
@@ -754,19 +791,19 @@ void plane_sweep_cuda_impl(
     const size_t shared = (static_cast<size_t>(planes) + 1) * sizeof(float);
     const int block_threads = planes;
     expect("before sweep_aggregate");
-    sweep_aggregate<<<rows, block_threads, shared>>>(
+    sweep_aggregate<<<rows, block_threads, shared, s.stream>>>(
       s.volume, planes, static_cast<int>(pixels), cols, cols, 0, 1,
       small_step, big_step, s.total);
     expect("before sweep_aggregate");
-    sweep_aggregate<<<rows, block_threads, shared>>>(
+    sweep_aggregate<<<rows, block_threads, shared, s.stream>>>(
       s.volume, planes, static_cast<int>(pixels), cols, cols, cols - 1, -1,
       small_step, big_step, s.total);
     expect("before sweep_aggregate");
-    sweep_aggregate<<<cols, block_threads, shared>>>(
+    sweep_aggregate<<<cols, block_threads, shared, s.stream>>>(
       s.volume, planes, static_cast<int>(pixels), rows, 1, 0, cols,
       small_step, big_step, s.total);
     expect("before sweep_aggregate");
-    sweep_aggregate<<<cols, block_threads, shared>>>(
+    sweep_aggregate<<<cols, block_threads, shared, s.stream>>>(
       s.volume, planes, static_cast<int>(pixels), rows, 1,
       static_cast<long long>(rows - 1) * cols, -cols,
       small_step, big_step, s.total);
@@ -775,21 +812,25 @@ void plane_sweep_cuda_impl(
 
   const int pixel_blocks = static_cast<int>((pixels + threads - 1) / threads);
   expect("before sweep_argmin");
-  sweep_argmin<<<pixel_blocks, threads>>>(
+  sweep_argmin<<<pixel_blocks, threads, 0, s.stream>>>(
     chosen, s.valid, planes, static_cast<int>(pixels), road_plane,
     s.best_index, s.best_cost, s.road_cost, s.second_cost);
 
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(s.stream);
   expect("reduction");
 
-  cudaMemcpy(best_index, s.best_index, pixels * sizeof(int), cudaMemcpyDeviceToHost);
-  cudaMemcpy(best_cost, s.best_cost, pixels * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaMemcpy(road_cost, s.road_cost, pixels * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaMemcpy(second_cost, s.second_cost, pixels * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpyAsync(best_index, s.best_index, pixels * sizeof(int), cudaMemcpyDeviceToHost, s.stream);
+  cudaMemcpyAsync(best_cost, s.best_cost, pixels * sizeof(float), cudaMemcpyDeviceToHost, s.stream);
+  cudaMemcpyAsync(road_cost, s.road_cost, pixels * sizeof(float), cudaMemcpyDeviceToHost, s.stream);
+  cudaMemcpyAsync(second_cost, s.second_cost, pixels * sizeof(float), cudaMemcpyDeviceToHost, s.stream);
   if (volume_out != nullptr) {
-    cudaMemcpy(volume_out, chosen, elements * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(volume_out, chosen, elements * sizeof(float),
+                    cudaMemcpyDeviceToHost, s.stream);
   }
+  // The caller reads these arrays the moment this returns. A device-to-host
+  // copy out of pageable memory is synchronous whatever it is called, so this
+  // is not what makes it safe -- it is what makes it safe to say so.
+  cudaStreamSynchronize(s.stream);
   g_last_volume = chosen;
   g_last_elements = elements;
   expect("download");

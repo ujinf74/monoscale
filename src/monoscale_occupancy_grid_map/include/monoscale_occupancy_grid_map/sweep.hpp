@@ -259,11 +259,67 @@ public:
 
   // Feed one keyframe: the reference gray image, its pose, and the source
   // frames with theirs. Updates the grid in place.
+  // Where a keyframe's time goes: the GPU match against everything after it.
+  // Accumulated over the run, so the timing costs two clock reads a keyframe.
+  double match_ms() const {return match_ms_;}
+  // The part of `match` that is the device: the kernels and the transfers,
+  // with the host-side staging of the reference and source stack left out.
+  // Measured 2026-09-18: of a 41.9 ms match, 36.1 ms is the device and 5.8 ms
+  // is the staging, so the 25 MB of host memcpy a keyframe is not where the
+  // time is. The device total over a run is what bounds the sweep -- 22 s of
+  // it against 38 s of wall clock, the difference being the card waiting.
+  double gpu_ms() const {return gpu_ms_;}
+  double rest_ms() const {return rest_ms_;}
+
   void keyframe(
     const cv::Mat & reference_gray, const Pose5 & reference_pose,
     const std::vector<cv::Mat> & source_grays,
     const std::vector<Pose5> & source_poses,
     CameraGrid & grid) const;
+
+  // A keyframe in flight: what `match` produced and `finish` consumes.
+  //
+  // The two halves are separated so they can run at the same time on
+  // different keyframes -- the device half of keyframe N+1 alongside the host
+  // half of keyframe N. Running one keyframe at a time leaves the card idle
+  // for the whole host half, and with a thread per camera it was idle 17 s of
+  // a 38 s run. Nothing is reordered by this: `finish` is called in keyframe
+  // order, so the grid accumulates in the order it always did and the map is
+  // bit identical.
+  //
+  // `empty` marks a keyframe that was never swept (fewer than two sources).
+  struct Stage
+  {
+    bool empty = true;
+    bool did_cuda = false;
+    int width = 0;
+    int height = 0;
+    int planes = 0;
+    int road = 0;
+    std::vector<double> heights;
+    Eigen::Vector3d normal;
+    cv::Mat dot_normal;
+    cv::Mat reference32;
+    cv::Mat sq_ref;
+    std::vector<cv::Mat> source32;
+    std::vector<cv::Mat> volume;
+    cv::Mat best;
+    cv::Mat best_cost;
+    cv::Mat road_cost;
+    cv::Mat second_cost;
+    Pose5 reference_pose;
+    std::vector<Pose5> source_poses;
+  };
+
+  // The device half. Safe to run while `finish` works on an earlier stage.
+  Stage match(
+    const cv::Mat & reference_gray, const Pose5 & reference_pose,
+    const std::vector<cv::Mat> & source_grays,
+    const std::vector<Pose5> & source_poses) const;
+
+  // The host half, including the accumulation into `grid`. Must be called
+  // once per stage, in the order the stages were produced.
+  void finish(Stage & stage, CameraGrid & grid) const;
 
   const SweepSettings & settings() const {return settings_;}
 
@@ -311,6 +367,10 @@ private:
   // Unit rays through every pixel, in base_link; built on first use for the
   // frame size seen.
   mutable cv::Mat ray_base_;  // CV_64FC3
+  mutable double match_ms_ = 0.0;
+  mutable double gpu_ms_ = 0.0;
+  mutable double rest_ms_ = 0.0;
+
   void ensure_rays(int width, int height) const;
 };
 

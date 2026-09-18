@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
 #include <algorithm>
@@ -11,13 +13,37 @@ namespace monoscale_occupancy
 
 // The CUDA backend, in cuda_backend.cpp. Fills best/costs (and the volume when
 // asked) from the CUDA kernel; returns false when CUDA is not linked.
+//
+// CMake compiles cuda_backend.cpp only when it finds a CUDA compiler, so
+// without one there was no definition to link against and the whole package
+// failed at the link step -- `undefined reference to cuda_match`. The README
+// said the opposite, that the build "quietly falls back to the CPU path", and
+// nothing here ever caught it because this machine's CMake finds
+// /usr/local/cuda whether or not nvcc is on PATH. Found 2026-09-18 by building
+// a tree made only of the tracked files.
+//
+// The fallback below is what makes that sentence true: the CPU path in
+// `finish` is a complete parity implementation and it is what runs.
+#ifdef MONOSCALE_OCCUPANCY_HAS_CUDA
 bool cuda_match(
   const Lens & lens, const SweepSettings & settings,
   const cv::Mat & reference32, const std::vector<cv::Mat> & source32,
   const Pose5 & reference_pose, const std::vector<Pose5> & source_poses,
   const std::vector<double> & heights, int road,
   cv::Mat & best, cv::Mat & best_cost, cv::Mat & road_cost, cv::Mat & second_cost,
-  std::vector<cv::Mat> & volume, bool want_volume);
+  std::vector<cv::Mat> & volume, bool want_volume, double * gpu_ms);
+#else
+inline bool cuda_match(
+  const Lens &, const SweepSettings &,
+  const cv::Mat &, const std::vector<cv::Mat> &,
+  const Pose5 &, const std::vector<Pose5> &,
+  const std::vector<double> &, int,
+  cv::Mat &, cv::Mat &, cv::Mat &, cv::Mat &,
+  std::vector<cv::Mat> &, bool, double *)
+{
+  return false;
+}
+#endif
 
 namespace
 {
@@ -292,9 +318,22 @@ void Sweep::keyframe(
   const std::vector<Pose5> & source_poses,
   CameraGrid & grid) const
 {
+  Stage stage = match(reference_gray, reference_pose, source_grays, source_poses);
+  finish(stage, grid);
+}
+
+Sweep::Stage Sweep::match(
+  const cv::Mat & reference_gray, const Pose5 & reference_pose,
+  const std::vector<cv::Mat> & source_grays,
+  const std::vector<Pose5> & source_poses) const
+{
+  Stage stage;
   if (source_grays.size() < 2) {
-    return;
+    return stage;
   }
+  stage.empty = false;
+  stage.reference_pose = reference_pose;
+  stage.source_poses = source_poses;
   const_cast<Sweep *>(this)->width_ = reference_gray.cols;
   const_cast<Sweep *>(this)->height_ = reference_gray.rows;
   ensure_rays(width_, height_);
@@ -311,8 +350,14 @@ void Sweep::keyframe(
   for (int i = 1; i < planes; ++i) {
     if (std::abs(heights[i]) < std::abs(heights[road])) {road = i;}
   }
+  stage.heights = heights;
+  stage.planes = planes;
+  stage.road = road;
+  stage.width = width_;
+  stage.height = height_;
 
   const Eigen::Vector3d normal = attitude(reference_pose).transpose() * kEz;
+  stage.normal = normal;
   // normal . ray_base, per pixel: fixed across the ladder.
   cv::Mat dot_normal(height_, width_, CV_64F);
   for (int v = 0; v < height_; ++v) {
@@ -323,18 +368,10 @@ void Sweep::keyframe(
     }
   }
 
-  const cv::Mat reference32_full = reference_gray;
   cv::Mat reference32;
   reference_gray.convertTo(reference32, CV_32F);
-  const cv::Size box(settings_.window_x, settings_.window_y);
   cv::Mat sq_ref;
   cv::multiply(reference32, reference32, sq_ref);
-
-  std::vector<cv::Mat> volume;
-  cv::Mat best;
-  cv::Mat best_cost;
-  cv::Mat road_cost;
-  cv::Mat second_cost;
 
   std::vector<cv::Mat> source32;
   source32.reserve(source_grays.size());
@@ -343,15 +380,63 @@ void Sweep::keyframe(
     g.convertTo(f, CV_32F);
     source32.push_back(f);
   }
+  stage.dot_normal = dot_normal;
+  stage.reference32 = reference32;
+  stage.sq_ref = sq_ref;
+  stage.source32 = source32;
 
   // The CUDA kernel does the whole match-aggregate-reduce when it is linked --
   // the same one plane_sweep.py runs, so this is not a re-implementation but a
   // shared arithmetic. It also returns the aggregated volume, which subplane
   // needs. The CPU path below is the parity reference and the fallback.
-  const bool did_cuda = settings_.use_cuda && cuda_match(
-    lens_, settings_, reference32, source32, reference_pose, source_poses,
-    heights, road, best, best_cost, road_cost, second_cost, volume,
-    settings_.subplane);
+  const auto match_began = std::chrono::steady_clock::now();
+  stage.did_cuda = settings_.use_cuda && cuda_match(
+    lens_, settings_, stage.reference32, stage.source32, reference_pose,
+    source_poses, heights, road, stage.best, stage.best_cost, stage.road_cost,
+    stage.second_cost, stage.volume, settings_.subplane, &gpu_ms_);
+  match_ms_ += std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - match_began).count();
+  return stage;
+}
+
+void Sweep::finish(Stage & stage, CameraGrid & grid) const
+{
+  if (stage.empty) {
+    return;
+  }
+  // Names the body below already used, bound to the stage that carried them
+  // across the handoff.
+  const bool did_cuda = stage.did_cuda;
+  const int planes = stage.planes;
+  const int road = stage.road;
+  const std::vector<double> & heights = stage.heights;
+  const Eigen::Vector3d & normal = stage.normal;
+  const cv::Mat & dot_normal = stage.dot_normal;
+  const cv::Mat & reference32 = stage.reference32;
+  const cv::Mat & sq_ref = stage.sq_ref;
+  const std::vector<cv::Mat> & source32 = stage.source32;
+  const Pose5 & reference_pose = stage.reference_pose;
+  const std::vector<Pose5> & source_poses = stage.source_poses;
+  std::vector<cv::Mat> & volume = stage.volume;
+  cv::Mat & best = stage.best;
+  cv::Mat & best_cost = stage.best_cost;
+  cv::Mat & road_cost = stage.road_cost;
+  cv::Mat & second_cost = stage.second_cost;
+  const int height_ = stage.height;
+  const int width_ = stage.width;
+  const cv::Size box(settings_.window_x, settings_.window_y);
+
+  const auto rest_began = std::chrono::steady_clock::now();
+  struct RestTimer
+  {
+    const std::chrono::steady_clock::time_point began;
+    double & into;
+    ~RestTimer()
+    {
+      into += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - began).count();
+    }
+  } rest_timer{rest_began, rest_ms_};
 
   if (!did_cuda) {
     // ZNCC cost volume, summed over sources, x100 * count -- the same scaling

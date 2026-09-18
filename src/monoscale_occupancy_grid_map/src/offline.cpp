@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -25,10 +26,15 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
@@ -52,12 +58,21 @@ constexpr double kFrontRotation[9] = {
   0.0, -0.5, 0.8660254,
   -1.0, 0.0, 0.0,
   0.0, -0.8660254, -0.5};
-constexpr double kFrontTranslation[3] = {3.694, 0.0, 0.89};
+// The heights were 0.89 and 1.26 until 2026-09-18 -- the kit's mounts
+// rounded to the centimetre, where the odometry derives 0.88915 and
+// 1.25915 by taking actor_origin_height_m 0.03635 off them. Both were
+// short by the same 0.85 mm.
+//
+// This is the third copy of the same geometry: `occupancy.param.yaml` for
+// the node, `vision_fisheye.param.yaml` for the odometry, and here. The
+// duplication is the reason all three could disagree; having this runner
+// read the node's config instead would remove it, and that is not done.
+constexpr double kFrontTranslation[3] = {3.694, 0.0, 0.88915};
 constexpr double kRearRotation[9] = {
   0.0, 0.5, -0.8660254,
   1.0, 0.0, 0.0,
   0.0, -0.8660254, -0.5};
-constexpr double kRearTranslation[3] = {-0.82, 0.0, 1.26};
+constexpr double kRearTranslation[3] = {-0.82, 0.0, 1.25915};
 
 monoscale_occupancy::Lens make_lens(
   const double rotation[9], const double translation[3], double width_px)
@@ -450,11 +465,79 @@ std::size_t run_camera(
 
   const monoscale_occupancy::SweepSettings & settings = sweep.settings();
   const std::uint8_t * stack = grays.u8();
+  // `SWEEP_SCALE` shrinks every frame before the sweep sees it, so the cost
+  // axis that is quadratic in pixels can be measured without rebuilding the
+  // frames archive. The lens is scaled to match in main(), or the geometry
+  // would be read at one resolution and the image at another.
+  double scale = 1.0;
+  if (const char * v = std::getenv("SWEEP_SCALE")) {
+    scale = std::atof(v);
+    if (!(scale > 0.0) || scale > 1.0) {scale = 1.0;}
+  }
   auto slice = [&](std::size_t frame) {
-    return cv::Mat(
+    cv::Mat full(
       height, width, CV_8U,
       const_cast<std::uint8_t *>(stack + frame * pixels));
+    if (scale >= 1.0) {
+      return full;
+    }
+    cv::Mat small;
+    cv::resize(full, small, cv::Size(), scale, scale, cv::INTER_AREA);
+    return small;
   };
+
+  // A finisher thread behind this one, so the card is not waiting on the host.
+  //
+  // A keyframe is a device half and a host half of roughly equal length -- 36
+  // ms against 37 -- and running them one after another leaves the GPU idle
+  // for half of every keyframe. With a thread per camera that came to 17 s of
+  // a 38 s run, measured against a device total of 22 s, which is the floor
+  // this run can reach.
+  //
+  // The handoff is one stage deep. Deeper buys nothing: the two halves are the
+  // same length, so a second slot would only be filled if the host fell behind
+  // for a while, and each stage holds a reference image, six sources and the
+  // four cost planes. `finish` is called in the order the stages were made, so
+  // the grid accumulates exactly as it did before and the map is unchanged.
+  //
+  // SWEEP_NOPIPE=1 does them in order again, which is how that is checked.
+  const bool pipelined = std::getenv("SWEEP_NOPIPE") == nullptr;
+  std::mutex handoff;
+  std::condition_variable ready;
+  std::deque<monoscale_occupancy::Sweep::Stage> queue;
+  bool closed = false;
+  std::exception_ptr finisher_failure;
+  std::thread finisher;
+  if (pipelined) {
+    finisher = std::thread([&]() {
+        for (;;) {
+          monoscale_occupancy::Sweep::Stage stage;
+          {
+            std::unique_lock<std::mutex> lock(handoff);
+            ready.wait(lock, [&]() {return closed || !queue.empty();});
+            if (queue.empty()) {return;}
+            stage = std::move(queue.front());
+            queue.pop_front();
+          }
+          try {
+            sweep.finish(stage, grid);
+          } catch (...) {
+            std::unique_lock<std::mutex> lock(handoff);
+            finisher_failure = std::current_exception();
+            closed = true;
+            return;
+          }
+          ready.notify_all();
+        }
+      });
+  }
+  auto hand_over = [&](monoscale_occupancy::Sweep::Stage && stage) {
+      std::unique_lock<std::mutex> lock(handoff);
+      ready.wait(lock, [&]() {return queue.size() < 1 || closed;});
+      if (closed) {return;}
+      queue.push_back(std::move(stage));
+      ready.notify_all();
+    };
 
   std::size_t keyframes = 0;
   double next_at = 0.0;
@@ -484,11 +567,25 @@ std::size_t run_camera(
       source_grays.push_back(slice(other));
       source_poses.push_back(frame_poses[other]);
     }
-    sweep.keyframe(slice(index), frame_poses[index], source_grays, source_poses, grid);
+    if (pipelined) {
+      hand_over(sweep.match(
+          slice(index), frame_poses[index], source_grays, source_poses));
+    } else {
+      sweep.keyframe(slice(index), frame_poses[index], source_grays, source_poses, grid);
+    }
     if (keyframes % 20 == 0) {
       std::cerr << "  keyframe " << keyframes << " @ frame " << index
                 << "/" << frames << std::endl;
     }
+  }
+  if (finisher.joinable()) {
+    {
+      std::unique_lock<std::mutex> lock(handoff);
+      closed = true;
+      ready.notify_all();
+    }
+    finisher.join();
+    if (finisher_failure) {std::rethrow_exception(finisher_failure);}
   }
   return keyframes;
 }
@@ -526,14 +623,42 @@ int main(int argc, char ** argv)
     monoscale_occupancy::SweepSettings settings;  // defaults ARE the operating point
     // One knob reachable from the environment, so a parity hunt does not need
     // a rebuild per value. Nothing reads it in the node.
+    // The two axes the cost is linear in, opened for the same reason
+    // SWEEP_MIN_BLOB is: a runner that cannot be swept cannot be optimised.
+    if (const char * v = std::getenv("SWEEP_HEIGHT_STEP")) {
+      settings.height_step = std::atof(v);
+    }
+    if (const char * v = std::getenv("SWEEP_KEYFRAME_TRAVEL")) {
+      settings.keyframe_travel = std::atof(v);
+    }
+    if (const char * v = std::getenv("SWEEP_SOURCE_OFFSETS")) {
+      std::vector<double> offsets;
+      std::stringstream parts(v);
+      std::string item;
+      while (std::getline(parts, item, ',')) {
+        if (!item.empty()) {offsets.push_back(std::atof(item.c_str()));}
+      }
+      if (!offsets.empty()) {settings.source_offsets = offsets;}
+    }
     if (const char * v = std::getenv("SWEEP_MIN_BLOB")) {
       settings.min_blob = std::atoi(v);
     }
+    // The sub-plane parabola. On by default, and it is the only consumer of
+    // the aggregated volume, so switching it off also drops an 81 MB download
+    // per keyframe on top of its own 921600-pixel loop.
+    if (const char * v = std::getenv("SWEEP_SUBPLANE")) {
+      settings.subplane = std::atoi(v) != 0;
+    }
 
-    const double front_width =
-      front_grays.shape[0] ? static_cast<double>(front_grays.shape[2]) : 1280.0;
-    const double rear_width =
-      rear_grays.shape[0] ? static_cast<double>(rear_grays.shape[2]) : 1280.0;
+    double image_scale = 1.0;
+    if (const char * v = std::getenv("SWEEP_SCALE")) {
+      const double asked = std::atof(v);
+      if (asked > 0.0 && asked <= 1.0) {image_scale = asked;}
+    }
+    const double front_width = image_scale *
+      (front_grays.shape[0] ? static_cast<double>(front_grays.shape[2]) : 1280.0);
+    const double rear_width = image_scale *
+      (rear_grays.shape[0] ? static_cast<double>(rear_grays.shape[2]) : 1280.0);
     const monoscale_occupancy::Sweep front_sweep(
       settings, make_lens(kFrontRotation, kFrontTranslation, front_width));
     const monoscale_occupancy::Sweep rear_sweep(
@@ -544,9 +669,44 @@ int main(int argc, char ** argv)
     front_grid.reset(settings);
     rear_grid.reset(settings);
 
+    // Timed, because the sweep's cost is the thing this package is judged on
+    // and a wall clock over the whole run hides the archive decode inside it.
+    // The decode is paid once by this runner and never by the node.
+    const auto sweep_began = std::chrono::steady_clock::now();
+    // The two cameras at the same time by default.
+    //
+    // They were sequential, and the device was idle for about 37 per cent of
+    // one sweep: running two of these processes at once finishes two sweeps in
+    // 143.6 s against the 227.8 s they take one after another, so a single
+    // sweep is not saturating the card. Nothing is shared -- `run_camera`
+    // takes a const `Sweep` and writes only into its own grid -- and the CUDA
+    // backend's scratch is now `thread_local`, which is what made this legal.
+    //
+    // SWEEP_SERIAL=1 puts them back in order, which is how the output is held
+    // bit identical: the grids are merged by `publish` afterwards, so the
+    // order the two sweeps run in cannot reach the answer.
     std::size_t keyframes = 0;
-    keyframes += run_camera(front_sweep, front_grays, front_stamps, table, front_grid);
-    keyframes += run_camera(rear_sweep, rear_grays, rear_stamps, table, rear_grid);
+    if (std::getenv("SWEEP_SERIAL")) {
+      keyframes += run_camera(front_sweep, front_grays, front_stamps, table, front_grid);
+      keyframes += run_camera(rear_sweep, rear_grays, rear_stamps, table, rear_grid);
+    } else {
+      std::size_t rear_keyframes = 0;
+      std::exception_ptr failure;
+      std::thread rear_thread([&]() {
+          try {
+            rear_keyframes = run_camera(
+              rear_sweep, rear_grays, rear_stamps, table, rear_grid);
+          } catch (...) {
+            failure = std::current_exception();
+          }
+        });
+      keyframes += run_camera(front_sweep, front_grays, front_stamps, table, front_grid);
+      rear_thread.join();
+      if (failure) {std::rethrow_exception(failure);}
+      keyframes += rear_keyframes;
+    }
+    const double sweep_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - sweep_began).count();
 
     // The legacy fixed extent: this writes a bare .npy with no origin in it,
     // and the scoring reference reads it as 600 x 600 at (-30, -30).
@@ -569,7 +729,19 @@ int main(int argc, char ** argv)
     }
     write_npy_int8(out_path, map);
     std::cout << "keyframes=" << keyframes << " free=" << free_cells
-              << " occupied=" << occupied_cells << std::endl;
+              << " occupied=" << occupied_cells
+              << " sweep=" << sweep_ms / 1000.0 << "s ("
+              << (keyframes > 0 ? sweep_ms / static_cast<double>(keyframes) : 0.0)
+              << " ms/keyframe: match "
+              << (keyframes > 0
+                  ? (front_sweep.match_ms() + rear_sweep.match_ms()) / keyframes : 0.0)
+              << " (device "
+              << (keyframes > 0
+                  ? (front_sweep.gpu_ms() + rear_sweep.gpu_ms()) / keyframes : 0.0)
+              << ") rest "
+              << (keyframes > 0
+                  ? (front_sweep.rest_ms() + rear_sweep.rest_ms()) / keyframes : 0.0)
+              << ")" << std::endl;
   } catch (const std::exception & error) {
     std::cerr << "offline: " << error.what() << std::endl;
     return 1;

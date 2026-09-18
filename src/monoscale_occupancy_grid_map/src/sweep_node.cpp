@@ -11,6 +11,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
+#include <thread>
 #include <optional>
 #include <string>
 #include <vector>
@@ -47,6 +49,34 @@ struct Frame
 };
 
 }  // namespace
+
+// One camera's sweep of one keyframe, lifted out of the node's lock.
+//
+// The keyframe is 160 ms of work and it used to run with `mutex_` held, so the
+// two cameras took turns at it even under a multi-threaded executor. Nothing in
+// it is shared between cameras: the `Sweep` and the `CameraGrid` are per camera,
+// and the images are refcounted `cv::Mat` handles the sweep only reads. So the
+// selection stays under the lock -- it walks the ring, which the odometry
+// callback mutates -- and the sweep itself is carried out here, after it.
+//
+// The pointers are resolved under the lock too. `sweeps_` is a node-based map
+// that `ensure_sweep` inserts into, so a reference to one camera's entry
+// survives another camera's insertion, but only if the lookup itself did not
+// race with it.
+struct Job
+{
+  monoscale_occupancy::Sweep * sweep = nullptr;
+  monoscale_occupancy::CameraGrid * grid = nullptr;
+  cv::Mat gray;
+  monoscale_occupancy::Pose5 pose;
+  std::vector<cv::Mat> source_grays;
+  std::vector<monoscale_occupancy::Pose5> source_poses;
+
+  void run() const
+  {
+    sweep->keyframe(gray, pose, source_grays, source_poses, *grid);
+  }
+};
 
 class SweepNode : public rclcpp::Node
 {
@@ -115,18 +145,35 @@ public:
     sensor.best_effort();
     for (size_t i = 0; i < cameras_.size(); ++i) {
       const std::string name = cameras_[i];
+      // A group per camera, so a sweep on one does not stop frames arriving
+      // on the other, and so a frame keeps being ingested while a sweep runs.
+      // The node's default group is mutually exclusive, so without this the
+      // multi-threaded executor below would change nothing: a keyframe holds
+      // its callback for about 110 ms, and at 22 Hz on a best-effort queue ten
+      // deep the sweep would drop the frames it is about to need.
+      auto group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+      image_groups_.push_back(group);
+      rclcpp::SubscriptionOptions image_options;
+      image_options.callback_group = group;
       image_subs_.push_back(create_subscription<sensor_msgs::msg::Image>(
         image_topics_[i], sensor,
-        [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {on_image(name, *m);}));
+        [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {on_image(name, *m);},
+        image_options));
       info_subs_.push_back(create_subscription<sensor_msgs::msg::CameraInfo>(
         info_topics_[i], sensor,
         [this, name](sensor_msgs::msg::CameraInfo::ConstSharedPtr m) {on_info(name, *m);}));
     }
     rclcpp::QoS reliable(50);
     reliable.reliable();
+    // Its own group as well: this is the callback that actually sweeps, since
+    // every frame arrives before the pose that places it.
+    odometry_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions odometry_options;
+    odometry_options.callback_group = odometry_group_;
     odometry_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       odometry_topic_, reliable,
-      [this](nav_msgs::msg::Odometry::ConstSharedPtr m) {on_odometry(*m);});
+      [this](nav_msgs::msg::Odometry::ConstSharedPtr m) {on_odometry(*m);},
+      odometry_options);
 
     rclcpp::QoS latched(1);
     latched.reliable().transient_local();
@@ -150,6 +197,8 @@ private:
 
   void on_odometry(const nav_msgs::msg::Odometry & message)
   {
+    std::vector<Job> jobs;
+    {
     std::lock_guard<std::mutex> guard(mutex_);
     const double stamp = rclcpp::Time(message.header.stamp).seconds();
     // Anchor the map to the first pose, the way the offline path does: the
@@ -183,7 +232,15 @@ private:
     odometry_.push_back({stamp, pose});
     while (odometry_.size() > 4000) {odometry_.pop_front();}
     // The pose that just arrived is what the held frames were waiting for.
-    for (const auto & name : cameras_) {drain(name);}
+    //
+    // And this is where the sweeps actually happen in deployment, not in
+    // `on_image`: the odometry is solved from these very images, so every
+    // frame arrives ahead of the newest pose -- 400 of 400, by a median of
+    // 0.70 s -- and is held until a pose reaches it. So both cameras keyframe
+    // from this one callback, which is why it has to be the concurrent one.
+    for (const auto & name : cameras_) {drain(name, jobs);}
+    }
+    run_jobs(jobs);
   }
 
   // The pose at an image stamp, interpolated from the odometry ring. Nullopt
@@ -228,6 +285,8 @@ private:
     cv::Mat gray32;
     resized.convertTo(gray32, CV_32F);
 
+    std::vector<Job> jobs;
+    {
     std::lock_guard<std::mutex> guard(mutex_);
     // Hold the frame rather than resolving its pose now. The odometry is
     // solved from these very images, so its stamps can never lead them: at
@@ -240,12 +299,43 @@ private:
     auto & queue = pending_[name];
     queue.push_back({stamp, gray32});
     while (queue.size() > kPendingFrames) {queue.pop_front();}
-    drain(name);
+    drain(name, jobs);
+    }
+    run_jobs(jobs);
+  }
+
+  // The collected sweeps, one thread each, the first on this one.
+  //
+  // In deployment both cameras keyframe out of the same odometry callback, so
+  // running the list in order is what made the two cameras take turns. They
+  // write disjoint grids, and the device is not saturated by one of them:
+  // offline, the identical change took a 674-keyframe run from 129.2 s to
+  // 74.5 s -- 1.735x -- with the published map bit identical, 0 of 360000
+  // cells moved.
+  //
+  // `publish_shared_` is held across them, which excludes the publisher and
+  // not each other: two keyframes touch two different `CameraGrid`s, but
+  // `publish` reads both and must not read one mid-write.
+  //
+  // A thread per keyframe, against 160 ms of work in it. That is about 20
+  // creations a second for tens of microseconds each; a pool would be tidier
+  // and would save nothing measurable.
+  void run_jobs(std::vector<Job> & jobs)
+  {
+    if (jobs.empty()) {return;}
+    std::shared_lock<std::shared_mutex> hold(publish_shared_);
+    std::vector<std::thread> workers;
+    workers.reserve(jobs.size() - 1);
+    for (size_t i = 1; i < jobs.size(); ++i) {
+      workers.emplace_back([&jobs, i]() {jobs[i].run();});
+    }
+    jobs[0].run();
+    for (auto & worker : workers) {worker.join();}
   }
 
   // Admit every held frame the odometry can now place, oldest first so the
   // ring stays ordered and `travelled` keeps accumulating along the path.
-  void drain(const std::string & name)
+  void drain(const std::string & name, std::vector<Job> & jobs)
   {
     auto & queue = pending_[name];
     while (!queue.empty()) {
@@ -259,14 +349,14 @@ private:
         }
         return;  // Newer than the newest pose. Wait for the odometry.
       }
-      admit(name, stamp, queue.front().second, *pose);
+      admit(name, stamp, queue.front().second, *pose, jobs);
       queue.pop_front();
     }
   }
 
   void admit(
     const std::string & name, const double stamp, const cv::Mat & gray,
-    const monoscale_occupancy::Pose5 & pose)
+    const monoscale_occupancy::Pose5 & pose, std::vector<Job> & jobs)
   {
     auto & ring = rings_[name];
     double travelled = 0.0;
@@ -303,7 +393,7 @@ private:
     while (ring.size() > kRingFrames) {ring.pop_front();}
     ++placed_;
     ensure_sweep(name);
-    maybe_keyframe(name);
+    maybe_keyframe(name, jobs);
   }
 
   void ensure_sweep(const std::string & name)
@@ -318,7 +408,7 @@ private:
     sweeps_.emplace(name, std::make_unique<monoscale_occupancy::Sweep>(settings_, lens));
   }
 
-  void maybe_keyframe(const std::string & name)
+  void maybe_keyframe(const std::string & name, std::vector<Job> & jobs)
   {
     auto & ring = rings_[name];
     const Frame & reference = ring.back();
@@ -345,8 +435,9 @@ private:
     }
     if (source_grays.size() < 2) {return;}
     next_at_[name] = reference.travelled + settings_.keyframe_travel;
-    sweeps_[name]->keyframe(
-      reference.gray, reference.pose, source_grays, source_poses, grids_[name]);
+    jobs.push_back(
+      {sweeps_[name].get(), &grids_[name], reference.gray, reference.pose,
+        std::move(source_grays), std::move(source_poses)});
     ++keyframes_;
     last_stamp_ = reference.stamp;
     have_stamp_ = true;
@@ -354,6 +445,7 @@ private:
 
   void publish()
   {
+    std::unique_lock<std::shared_mutex> alone(publish_shared_);
     std::lock_guard<std::mutex> guard(mutex_);
     if (!have_stamp_) {return;}
     std::vector<monoscale_occupancy::CameraGrid *> grids;
@@ -423,6 +515,8 @@ private:
   std::map<std::string, double> next_at_;
   std::deque<std::pair<double, monoscale_occupancy::Pose5>> odometry_;
 
+  std::vector<rclcpp::CallbackGroup::SharedPtr> image_groups_;
+  rclcpp::CallbackGroup::SharedPtr odometry_group_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> image_subs_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr> info_subs_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
@@ -431,6 +525,10 @@ private:
   rclcpp::TimerBase::SharedPtr report_;
 
   std::mutex mutex_;
+  // Excludes `publish` against the sweeps. A sweep takes it shared -- the
+  // sweeps do not exclude one another -- and `publish` takes it alone. Never
+  // taken while `mutex_` is held, which is why the two cannot deadlock.
+  std::shared_mutex publish_shared_;
   int64_t keyframes_ = 0;
   int64_t placed_ = 0;
   double last_stamp_ = 0.0;
@@ -445,7 +543,14 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<SweepNode>());
+  // Multi-threaded, because a keyframe holds its callback for about 110 ms and
+  // the frames arriving in that window are what the next one sweeps. The
+  // groups above are what make it concurrent; the sweeps themselves are made
+  // concurrent by `run_jobs`, which works under either executor.
+  auto node = std::make_shared<SweepNode>();
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(node);
+  executor.spin();
   rclcpp::shutdown();
   return 0;
 }

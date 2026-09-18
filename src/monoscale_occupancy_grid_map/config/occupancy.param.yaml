@@ -30,9 +30,16 @@
       k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
       calibration_width: 2560.0
       rotation_base_from_camera: [0.0, -0.5, 0.8660254, -1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
-      translation_base_from_camera: [3.694, 0.0, 0.89]
+      # 0.89 until 2026-09-18, rounded to the centimetre where the odometry
+      # derives 0.88915 from the kit -- the mount minus actor_origin_height_m
+      # 0.03635. Both cameras were short by the same 0.85 mm. The sweep
+      # decides a height against planes 0.05 m apart, so 0.85 mm is 1.7 per
+      # cent of one step and its effect here has not been measured; it is
+      # corrected because the grid and the odometry project from one
+      # geometry or the heights they report are not the same quantity.
+      translation_base_from_camera: [3.694, 0.0, 0.88915]
     rear:
       k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
       calibration_width: 2560.0
       rotation_base_from_camera: [0.0, 0.5, -0.8660254, 1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
-      translation_base_from_camera: [-0.82, 0.0, 1.26]
+      translation_base_from_camera: [-0.82, 0.0, 1.25915]

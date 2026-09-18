@@ -84,4 +84,12 @@ for n, text in enumerate(legend):
     cv2.putText(canvas, text, (12, 56 + 22 * n), cv2.FONT_HERSHEY_SIMPLEX,
                 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 cv2.imwrite(args.out, canvas)
-print(f'{args.out}  free={said_free.sum():,} occupied={said_occupied.sum():,}')
+# The same predicates the colours use, counted. Printed beside the picture so
+# a change that moves one moves the other, and neither can drift from the other.
+g1 = int((car & said_free).sum())
+g2 = int((blocked & said_free & near).sum())
+g4 = int((free_truth & said_occupied & near).sum())
+reachable = blocked & near
+g3 = float((reachable & said_occupied).sum()) / max(int(reachable.sum()), 1)
+print(f'{args.out}  free={said_free.sum():,} occupied={said_occupied.sum():,}  '
+      f'G1={g1} G2={g2} G3={g3:.3f} G4={g4}')

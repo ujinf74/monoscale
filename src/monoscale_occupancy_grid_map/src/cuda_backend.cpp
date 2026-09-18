@@ -9,6 +9,9 @@
 
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
+#include <atomic>
+#include <mutex>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -77,13 +80,14 @@ bool cuda_match(
   const Pose5 & reference_pose, const std::vector<Pose5> & source_poses,
   const std::vector<double> & heights, int road,
   cv::Mat & best, cv::Mat & best_cost, cv::Mat & road_cost, cv::Mat & second_cost,
-  std::vector<cv::Mat> & volume, bool want_volume)
+  std::vector<cv::Mat> & volume, bool want_volume, double * gpu_ms)
 {
-  static bool announced = false;
-  if (!announced) {
+  // Atomic because the two cameras enter this from two threads. The race was
+  // benign -- at worst the line printed twice -- but it was still a race.
+  static std::atomic<bool> announced{false};
+  if (!announced.exchange(true)) {
     std::fprintf(stderr, "[occupancy] cuda backend: available=%d\n",
       plane_sweep_cuda_available() ? 1 : 0);
-    announced = true;
   }
   if (!cuda_available()) {
     return false;
@@ -124,19 +128,26 @@ bool cuda_match(
 
   // seen_fraction reaches the kernel only through the environment, the same
   // channel plane_sweep.py uses. Set it to our setting for this call.
-  static bool set_env = false;
-  if (!set_env) {
-    std::string v = std::to_string(settings.seen_fraction);
-    setenv("SWEEP_SEEN_FRACTION", v.c_str(), 1);
-    set_env = true;
-  }
+  // `setenv` is not thread safe and the two cameras arrive here from two
+  // threads. `call_once` makes the one write happen once; the value is the
+  // same from either camera, so which of them wins does not matter.
+  static std::once_flag env_once;
+  std::call_once(env_once, [&settings]() {
+      setenv("SWEEP_SEEN_FRACTION",
+        std::to_string(settings.seen_fraction).c_str(), 1);
+    });
 
+  const auto gpu_began = std::chrono::steady_clock::now();
   plane_sweep_cuda_impl(
     ref.data(), src.data(), sources, nullptr, planes, rows, cols,
     settings.window_x, settings.window_y, /*cost_kind=*/1, road,
     static_cast<float>(settings.small_step), static_cast<float>(settings.big_step),
     best.ptr<int>(0), best_cost.ptr<float>(0), road_cost.ptr<float>(0),
     second_cost.ptr<float>(0), vol_ptr, geometry.data(), offsets.data());
+  if (gpu_ms != nullptr) {
+    *gpu_ms += std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - gpu_began).count();
+  }
 
   if (want_volume) {
     volume.resize(planes);
