@@ -1017,8 +1017,31 @@ void Estimator::ingest_imu(const ImuSample & measured)
 
 
   if (settings_.use_inertial_prediction) {
+    // Turned into the frame the estimator's pose lives in, not the one the
+    // instrument reports.
+    //
+    // The propagator rotates the accelerometer by the whole reported
+    // orientation, so it integrates in the instrument's world. The estimator's
+    // world starts at zero heading, and everything that compares the two --
+    // `correct_velocity`, `inertial_gate_m`, the scale learner -- was therefore
+    // comparing across the drive's initial heading. Measured on KITTI by
+    // accumulating the cross product of the two velocity changes, the angle
+    // between the frames comes out +177.6, -30.7 and -17.3 degrees on
+    // sequences 06, 07 and 10 against initial OXTS headings of -175.0, -31.9
+    // and -15.7. It is the datum, and on a simulator that spawns the vehicle
+    // facing zero it is zero, which is why it has never shown.
+    Eigen::Vector4d oriented = sample.orientation;
+    if (imu_yaw_datum_.has_value()) {
+      const double half = -0.5 * *imu_yaw_datum_;
+      const double cz = std::cos(half);
+      const double sz = std::sin(half);
+      const Eigen::Vector4d & q = sample.orientation;
+      // (0, 0, sz, cz) composed on the left, in (x, y, z, w).
+      oriented << cz * q(0) - sz * q(1), cz * q(1) + sz * q(0),
+        cz * q(2) + sz * q(3), cz * q(3) - sz * q(2);
+    }
     const auto step = inertial_.add_sample(
-      sample.stamp, sample.orientation, sample.linear_acceleration);
+      sample.stamp, oriented, sample.linear_acceleration);
     Eigen::Vector2d acceleration = step.acceleration;
     if (!settings_.inertial_use_acceleration) {
       acceleration.setZero();
@@ -2584,6 +2607,7 @@ void Estimator::process_pair()
   }
   diagnostics_.pair_radial_samples.assign(count, 0);
   diagnostics_.radial_samples.assign(count, 0);
+  diagnostics_.imu_scale = imu_scale_;
   for (size_t i = 0; i < count; ++i) {
     const Camera & camera = *cameras_[i];
     diagnostics_.radial_samples[i] = camera.radial_samples;
@@ -3576,9 +3600,47 @@ void Estimator::process_pair()
       if (!velocity_filter_.update(*measured, motion->inliers, extra, velocity_shape_ptr)) {
         ++diagnostics_.filter_rejections;
       }
+      // What the accelerometer integrated since the last correction, against
+      // what vision says changed over the same stretch. See
+      // `inertial_scale_gain`.
+      if (settings_.inertial_scale_gain != 0.0 && inertial_.corrected() &&
+        scale_last_correction_.has_value() && scale_last_measured_.has_value())
+      {
+        const Eigen::Vector2d delta_imu = inertial_.velocity() - *scale_last_correction_;
+        const Eigen::Vector2d delta_vision = *measured - *scale_last_measured_;
+        // Divided by the accelerometer's own integral, because that is the
+        // quiet one.
+        //
+        // Errors in the regressor attenuate the ratio by
+        // |dv|^2 / (|dv|^2 + sigma^2), so the noisier of the two has to go in
+        // the numerator. Measured over a drive, the correlation between the two
+        // velocity changes is 0.35 to 0.54, and the ratio of the two one-sided
+        // regressions puts only 12 to 29 per cent of the vision difference's
+        // variance in the signal: a hop carrying 15 per cent noise at 8 m/s is
+        // 1.2 m/s of velocity error, differenced to 1.7, against the 0.4 m/s a
+        // 2 m/s^2 stretch actually produces. The accelerometer integrated over
+        // the same fifth of a second is worth far more here than the pictures.
+        const double reach = delta_imu.norm();
+        if (reach > settings_.inertial_scale_excitation_m_s) {
+          diagnostics_.scale_uu += delta_vision.squaredNorm();
+          diagnostics_.scale_uw += delta_vision.dot(delta_imu);
+          diagnostics_.scale_ww += delta_imu.squaredNorm();
+          diagnostics_.scale_cross +=
+            delta_vision.x() * delta_imu.y() - delta_vision.y() * delta_imu.x();
+          const double relative = (delta_vision - delta_imu).dot(delta_imu) / (reach * reach);
+          if (std::isfinite(relative)) {
+            const double step =
+              std::clamp(settings_.inertial_scale_gain * relative, -0.005, 0.005);
+            imu_scale_ = std::clamp(imu_scale_ * (1.0 + step), 0.9, 1.1);
+            ++diagnostics_.inertial_scale_samples;
+          }
+        }
+      }
       // The propagator withholds spawn/drop acceleration until a vision
       // velocity has fixed its integration constant.
       inertial_.correct_velocity(velocity_filter_.velocity());
+      scale_last_correction_ = velocity_filter_.velocity();
+      scale_last_measured_ = *measured;
     }
     const Eigen::Vector2d fused =
       velocity_filter_.body_translation(dt, previous_pose.yaw);

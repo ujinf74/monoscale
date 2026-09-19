@@ -1565,6 +1565,13 @@ int main(int argc, char ** argv)
         outcome.radial_only_sum / static_cast<double>(outcome.radial_pitch_n) * 180.0 / M_PI,
         outcome.radial_pitch_n);
     }
+    if (diagnostics.inertial_scale_samples > 0) {
+      std::printf(
+        "inertial scale: %.5f from %ld stretches  uu=%.2f uw=%.2f ww=%.2f  frame offset %+.1f deg\n",
+        diagnostics.imu_scale, diagnostics.inertial_scale_samples,
+        diagnostics.scale_uu, diagnostics.scale_uw, diagnostics.scale_ww,
+        std::atan2(diagnostics.scale_cross, diagnostics.scale_uw) * 180.0 / M_PI);
+    }
     std::printf(
       "slip: %ld usable, %ld with baseline, %ld no slip, %ld out of band, %ld placed\n",
       diagnostics.obstacle_usable, diagnostics.obstacle_ready,

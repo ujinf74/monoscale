@@ -242,6 +242,27 @@ struct EstimatorSettings
   double imu_scale_gain = 0.0;
   // Hops shorter than this carry more noise than signal in that ratio.
   double imu_scale_min_hop_m = 0.05;
+  // The same scale, learned from the accelerometer without the filter.
+  //
+  // `imu_scale_gain` reads the displacement filter's innovation and therefore
+  // only exists on a rig that runs that filter; on a `velocity` rig it is
+  // unreachable. The observable does not need a filter. Between two vision
+  // velocities the propagator has integrated the accelerometer, so
+  //
+  //     integral(a dt) = v_true(now) - v_true(then) = s (v_v(now) - v_v(then))
+  //
+  // where `s` is how much longer the truth is than what vision measured. No
+  // double integration and no constant of integration: the unknown initial
+  // velocity cancels in the difference. It is observable only where the vehicle
+  // actually accelerates, which is the trade this file's inertial header
+  // already states -- the plane sees scale at constant velocity and the
+  // accelerometer does not. They are complements, and this is the half the
+  // plane cannot supply, because a scale error in the plane satisfies its own
+  // map and the accelerometer does not care what the anchors think.
+  double inertial_scale_gain = 0.0;
+  // How much the velocity has to have changed for the ratio above to be signal.
+  // Over a 0.2 s solve interval this is the acceleration times that interval.
+  double inertial_scale_excitation_m_s = 0.2;
   // How far a translation may sit from what inertial propagation expects.
   double inertial_gate_m = 0.0;
   // How fast the per-camera range scale follows the measured radial residual.
@@ -1036,6 +1057,19 @@ struct Diagnostics
   double last_nis = 0.0;
   double nis_total = 0.0;
   int64_t nis_samples = 0;
+  // How many accelerating stretches the inertial scale learner could use, and
+  // where it left the ground scale.
+  int64_t inertial_scale_samples = 0;
+  double imu_scale = 1.0;
+  // The three moments of (vision velocity change, accelerometer velocity
+  // change). Both regressions and the orthogonal one fall out of these, and so
+  // do the two noise levels -- which is what says which regression to believe.
+  double scale_uu = 0.0;
+  double scale_uw = 0.0;
+  double scale_ww = 0.0;
+  // The cross product of the same pair. With the dot it gives the angle between
+  // the two frames, which is the thing that has to be zero for any of this.
+  double scale_cross = 0.0;
   // The one-sided part of vision's yaw residual, in radians per hop: how far
   // the reported heading is pulling the estimate away from the ground.
   // How many times the heading filter was actually folded in.
@@ -1248,6 +1282,11 @@ private:
   std::vector<double> camera_travel_;
   // Ground scale correction learned against inertial propagation.
   double imu_scale_ = 1.0;
+  // What was handed to the propagator, and what vision measured, at the last
+  // correction. The difference of each against now is the pair the scale is
+  // read from.
+  std::optional<Eigen::Vector2d> scale_last_correction_;
+  std::optional<Eigen::Vector2d> scale_last_measured_;
   std::optional<Eigen::Vector2d> expected_hop_;
   std::vector<int64_t> camera_solves_;
   std::vector<double> camera_inliers_;
