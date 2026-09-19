@@ -2685,7 +2685,13 @@ private:
     //
     // `detection_road_share` is the fraction of the budget the cells over the
     // road get instead. Zero keeps the flat quota, which is what every recorded
-    // number came from.
+    // number came from -- and on the full benchmark that is the right default.
+    // On the seven sequences that had finished downloading, 0.85 read 5.666%
+    // against 5.621% and five of seven improved; on all nine that a hop can be
+    // measured over it reads 5.676% against 5.782%, five of nine, and the mean
+    // turns over. Sequences 02 and 08 are the two that arrived last and both
+    // lose by it. The aim is right and the size of the win was two sequences'
+    // worth of luck.
     std::vector<int> quotas(static_cast<size_t>(columns * rows), 0);
     {
       const int flat = std::max(state.target, 1) / (columns * rows) + 1;
