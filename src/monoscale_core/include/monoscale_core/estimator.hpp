@@ -807,6 +807,13 @@ struct Update
   double roll = 0.0;
   double pitch = 0.0;
   bool tilt_valid = false;
+  // Elevation, integrated from the hop and the road's inclination.
+  //
+  // The projection levels the road against gravity, so the hop it returns is
+  // the horizontal advance and the rise over it is `d tan(grade)`. The attitude
+  // filter already holds the grade, so nothing new has to be observed. Zero
+  // until the attitude starts, and it never feeds back into the planar solve.
+  double z = 0.0;
   // The yaw correction the first camera's anchors last asked for, raw. With an
   // exact heading in front of it this is the measurement's own noise and
   // nothing else, which is what says whether the map could carry the heading.
@@ -1234,6 +1241,7 @@ private:
   // The last hop's error shape, normalised to trace 2, and whether the fit
   // supplied one. Identity is the isotropic noise every recorded number
   // came from.
+  double pose_z_ = 0.0;
   Eigen::Matrix2d last_hop_shape_ = Eigen::Matrix2d::Identity();
   bool last_hop_shape_valid_ = false;
   // The last hop this stack accepted, and how long it took: what a frame

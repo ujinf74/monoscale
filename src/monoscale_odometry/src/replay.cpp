@@ -50,7 +50,35 @@ struct Sample
   double x;
   double y;
   double yaw;
+  // The part of the pose the planar solve does not own. Zero on everything the
+  // replay composes for itself -- the alignment, the truth it writes back --
+  // and filled only on the estimator's own output, where it comes from the
+  // attitude filter and the elevation it integrates.
+  double z = 0.0;
+  double roll = 0.0;
+  double pitch = 0.0;
 };
+
+// One TUM row. The quaternion is the full roll-pitch-yaw and not the heading
+// alone: the benchmark scores the camera, the camera sits ahead of and above
+// the point being estimated, and a lever arm carried by a heading-only rotation
+// arrives in the wrong place the moment the vehicle is on a slope.
+void write_tum(std::ofstream & file, const Sample & pose)
+{
+  const double cr = std::cos(0.5 * pose.roll);
+  const double sr = std::sin(0.5 * pose.roll);
+  const double cp = std::cos(0.5 * pose.pitch);
+  const double sp = std::sin(0.5 * pose.pitch);
+  const double cy = std::cos(0.5 * wrap_pi(pose.yaw));
+  const double sy = std::sin(0.5 * wrap_pi(pose.yaw));
+  file << std::fixed;
+  file.precision(6);
+  file << pose.stamp << " " << pose.x << " " << pose.y << " " << pose.z << " "
+       << sr * cp * cy - cr * sp * sy << " "
+       << cr * sp * cy + sr * cp * sy << " "
+       << cr * cp * sy - sr * sp * cy << " "
+       << cr * cp * cy + sr * sp * sy << "\n";
+}
 
 double yaw_of(const geometry_msgs::msg::Quaternion & q)
 {
@@ -383,7 +411,10 @@ void replay_into(
         continue;
       }
       outcome.estimates.push_back(
-        Sample{update.stamp, update.pose.x, update.pose.y, update.pose.yaw});
+        Sample{
+          update.stamp, update.pose.x, update.pose.y, update.pose.yaw, update.z,
+          update.tilt_valid ? update.roll : 0.0,
+          update.tilt_valid ? update.pitch : 0.0});
       if (update.covariance_valid) {
         outcome.claimed_position = std::sqrt(
           std::max(update.pose_covariance(0, 0) + update.pose_covariance(1, 1), 0.0));
@@ -707,16 +738,8 @@ int main(int argc, char ** argv)
         const double dy = estimate.y - aligned.y;
         square += dx * dx + dy * dy;
         ++matched;
-        const auto write = [](std::ofstream & file, const Sample & pose) {
-            const double yaw = wrap_pi(pose.yaw);
-            file << std::fixed;
-            file.precision(6);
-            file << pose.stamp << " " << pose.x << " " << pose.y
-                 << " 0.000000 0.000000 0.000000 " << std::sin(0.5 * yaw) << " "
-                 << std::cos(0.5 * yaw) << "\n";
-          };
-        write(estimate_file, estimate);
-        write(truth_file, aligned);
+        write_tum(estimate_file, estimate);
+        write_tum(truth_file, aligned);
       }
       std::printf(
         "%d ate_rmse=%.6f n=%zu\n", index,
@@ -1587,16 +1610,8 @@ int main(int argc, char ** argv)
     std::ofstream estimate_file(tum_directory + "/estimate.tum");
     std::ofstream truth_file(tum_directory + "/truth.tum");
     for (const auto & [estimate, aligned] : rows) {
-      const auto line = [](std::ofstream & file, const Sample & pose) {
-          const double yaw = wrap_pi(pose.yaw);
-          file << std::fixed;
-          file.precision(6);
-          file << pose.stamp << " " << pose.x << " " << pose.y
-               << " 0.000000 0.000000 0.000000 " << std::sin(0.5 * yaw) << " "
-               << std::cos(0.5 * yaw) << "\n";
-        };
-      line(estimate_file, estimate);
-      line(truth_file, aligned);
+      write_tum(estimate_file, estimate);
+      write_tum(truth_file, aligned);
     }
   }
   return 0;

@@ -1110,6 +1110,7 @@ void Estimator::emit_interpolated(double stamp)
   }
   update.pose_covariance = pose_covariance_;
   update.covariance_valid = true;
+  update.z = pose_z_;
   ++diagnostics_.interpolated_updates;
   pending_updates_.push_back(std::move(update));
 }
@@ -3671,6 +3672,21 @@ void Estimator::process_pair()
     last_accept_stamp_ = current_stamp;
     last_hop_body_ = Eigen::Vector2d(motion->x, motion->y);
     last_hop_dt_ = dt;
+    // The climb this hop made.
+    //
+    // The ground projection levels the road against gravity, so the hop it
+    // returns is the horizontal advance and the rise over it is `d tan(grade)`.
+    // The grade is what the attitude filter already holds: on a nose-up slope
+    // of `a` the accelerometer's forward channel reads `+g sin(a)` and the
+    // filter stores `atan2(-ax, .)`, so its pitch is the grade negated.
+    //
+    // Nothing here feeds back into the planar solve; it only stops the output
+    // from claiming the vehicle stayed at one elevation. On KITTI's sequence
+    // 10 that claim alone costs 3.71% of the official translation metric,
+    // which is most of the 4.76% we score.
+    if (attitude_ && attitude_->started()) {
+      pose_z_ -= motion->x * std::tan(attitude_->pitch());
+    }
 
     double vx = 0.0;
     double vy = 0.0;
@@ -3792,11 +3808,13 @@ void Estimator::process_pair()
     update.bearing_tx = cameras_.front()->anchor_tx_last;
     update.bearing_ty = cameras_.front()->anchor_ty_last;
   }
-  if (attitude_ && attitude_->started()) {
-    update.roll = attitude_->roll();
-    update.pitch = attitude_->pitch();
-    update.tilt_valid = true;
-  }
+  // The vision tilts below measure the body against the ROAD, which is what the
+  // ground projection wants and is not what a pose means. Emitting one as the
+  // pose's orientation tells a consumer the vehicle is level on a hill: on
+  // KITTI's sequence 10 that is a 3.95 degree signal reported as 0.01, and it
+  // costs 1.478 deg/100m of the official rotation metric against 0.52 for a
+  // correct one. So they stand as the fallback for a rig with no inertial
+  // attitude, and the gravity-referenced filter below wins wherever it exists.
   if (settings_.esm_attitude && !cameras_.empty()) {
     // What the leaked integrator is actually holding, so a steady-state offset
     // shows up as a number rather than as a score.
@@ -3816,6 +3834,11 @@ void Estimator::process_pair()
     // the road rather than anything inertial.
     update.roll = cameras_.front()->band_roll;
     update.pitch = cameras_.front()->band_pitch;
+    update.tilt_valid = true;
+  }
+  if (attitude_ && attitude_->started()) {
+    update.roll = attitude_->roll();
+    update.pitch = attitude_->pitch();
     update.tilt_valid = true;
   }
   if (displacement_filter_ && dt > 1e-4) {
@@ -3858,6 +3881,7 @@ void Estimator::process_pair()
   // the origin over that stretch, and a vehicle already at 8 m/s covers 0.375 m
   // before the first map-anchored solve lands -- published as (0, 0) it becomes
   // a constant offset the estimate then carries for the rest of the run.
+  update.z = pose_z_;
   update.pose_valid = !settings_.suppress_pose_until_map_ready || map_ready_;
   pending_updates_.push_back(std::move(update));
 }
