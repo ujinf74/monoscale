@@ -911,6 +911,8 @@ public:
     // 4x3 is enough to keep the horizon from crowding out the near ground,
     // and no finer: 8x5 tracked just as well and cost 50 ms a frame against
     // 15, all of it per-cell detection overhead rather than pixels.
+    // See the note at the quota. 0 keeps the flat one.
+    road_share_ = declare_parameter<double>("detection_road_share", 0.0);
     grid_columns_ = declare_parameter<int>("detection_grid_columns", 4);
     grid_rows_ = declare_parameter<int>("detection_grid_rows", 3);
     warm_start_ = declare_parameter<bool>("lk_warm_start", true);
@@ -2668,9 +2670,51 @@ private:
     // cornerSubPix on top, as TrackKLT does, cost 5 ms and bought nothing.
     const int columns = std::max(grid_columns_, 1);
     const int rows = std::max(grid_rows_, 1);
-    const int quota = std::max(state.target, 1) / (columns * rows) + 1;
     const double cell_width = static_cast<double>(gray.cols) / columns;
     const double cell_height = static_cast<double>(gray.rows) / rows;
+    // Where the budget goes, rather than spreading it over the whole picture.
+    //
+    // The estimator keeps a feature only if it lands on the road between the
+    // band's two edges, and on a forward monocular rig that region is about a
+    // tenth of the frame -- at 960x290 the 7 to 30 m band inside a 3 m corridor
+    // runs rows 174 to 274 and tapers from 474 px wide to 110. A flat quota
+    // therefore spends nine tenths of the detector on sky, trees and buildings
+    // that are tracked at full cost and then thrown away: 1341 tracks a frame
+    // on KITTI sequence 04 arrive at the solve as 42 usable points, and the
+    // solve wants 30 inliers and fails 56% of the time.
+    //
+    // `detection_road_share` is the fraction of the budget the cells over the
+    // road get instead. Zero keeps the flat quota, which is what every recorded
+    // number came from.
+    std::vector<int> quotas(static_cast<size_t>(columns * rows), 0);
+    {
+      const int flat = std::max(state.target, 1) / (columns * rows) + 1;
+      if (road_share_ <= 0.0) {
+        std::fill(quotas.begin(), quotas.end(), flat);
+      } else {
+        int inside = 0;
+        std::vector<bool> on_road(static_cast<size_t>(columns * rows), false);
+        for (int cy = 0; cy < rows; ++cy) {
+          for (int cx = 0; cx < columns; ++cx) {
+            const double mx = (cx + 0.5) / columns;
+            const double my = (cy + 0.5) / rows;
+            const bool hit = mx >= road_roi_[0] && mx <= road_roi_[2] &&
+              my >= road_roi_[1] && my <= road_roi_[3];
+            on_road[static_cast<size_t>(cy * columns + cx)] = hit;
+            inside += hit ? 1 : 0;
+          }
+        }
+        const int outside = columns * rows - inside;
+        const double target = std::max(state.target, 1);
+        for (size_t i = 0; i < quotas.size(); ++i) {
+          quotas[i] = inside == 0 ? flat
+            : (on_road[i]
+              ? static_cast<int>(road_share_ * target / inside) + 1
+              : (outside > 0
+                ? static_cast<int>((1.0 - road_share_) * target / outside) + 1 : 1));
+        }
+      }
+    }
 
     std::vector<int> occupancy(static_cast<size_t>(columns * rows), 0);
     for (const auto & point : state.points) {
@@ -2691,6 +2735,7 @@ private:
     std::vector<int> room;
     for (int cy = 0; cy < rows; ++cy) {
       for (int cx = 0; cx < columns; ++cx) {
+        const int quota = quotas[static_cast<size_t>(cy * columns + cx)];
         const int held = occupancy[static_cast<size_t>(cy * columns + cx)];
         if (held > refill_ratio_ * quota) {
           continue;
@@ -5008,6 +5053,7 @@ private:
   std::map<std::string, double> drifted_;
   double frame_budget_ms_ = 14.0;
   int min_features_ = 500;
+  double road_share_ = 0.0;
   int grid_columns_ = 4;
   int grid_rows_ = 3;
   std::string dump_dir_;
