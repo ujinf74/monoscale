@@ -376,6 +376,12 @@ struct Outcome
   std::vector<monoscale::LabelledPoint> points;
   double claimed_position = 0.0;
   double claimed_yaw = 0.0;
+  // The mean of the alignment's radial residual split into a pitch term, over
+  // the run. The estimator publishes it per frame and nothing acts on it; it
+  // is the only observable this stack has for the MEAN tilt the projection is
+  // using, which is what a scale bias is made of.
+  double radial_pitch_sum = 0.0;
+  int64_t radial_pitch_n = 0;
 };
 
 void replay_into(
@@ -406,6 +412,12 @@ void replay_into(
       }
       if (update.hops_valid && update.previous_stamp > 0.0) {
         outcome.hops.push_back(update);
+      }
+      if (!update.radial_pitch.empty() && std::isfinite(update.radial_pitch[0]) &&
+        update.radial_pitch[0] != 0.0)
+      {
+        outcome.radial_pitch_sum += update.radial_pitch[0];
+        ++outcome.radial_pitch_n;
       }
       if (!update.pose_valid) {
         continue;
@@ -1539,6 +1551,13 @@ int main(int argc, char ** argv)
     // What the slip path had to work with. It is the only thing in this stack
     // that places a feature off the plane, so it is the only measure of how
     // much material an off-plane anchor would have.
+    if (outcome.radial_pitch_n > 0) {
+      std::printf(
+        "radial pitch[0]: %+.5f rad (%+.4f deg)  n=%ld\n",
+        outcome.radial_pitch_sum / static_cast<double>(outcome.radial_pitch_n),
+        outcome.radial_pitch_sum / static_cast<double>(outcome.radial_pitch_n) * 180.0 / M_PI,
+        outcome.radial_pitch_n);
+    }
     std::printf(
       "slip: %ld usable, %ld with baseline, %ld no slip, %ld out of band, %ld placed\n",
       diagnostics.obstacle_usable, diagnostics.obstacle_ready,
