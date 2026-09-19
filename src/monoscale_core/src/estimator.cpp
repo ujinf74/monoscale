@@ -3103,6 +3103,22 @@ void Estimator::process_pair()
       // quantity -- how far a scale may be off before it stops being a
       // measurement -- so it gates here too rather than introducing a second
       // number to tune.
+      //
+      // Which of the two the gate is protecting from depends on the rig, and on
+      // KITTI it is the other one. The photometric length is applied on 17 to
+      // 24 per cent of its chances there and rejected on the rest, and opening
+      // the bound does not recover a better measurement: over seven sequences
+      // the official translation metric reads 5.682, 5.666, 5.876, 5.927 and
+      // 7.605 per cent at 0.08, 0.10, 0.20, 0.40 and 0.80. Switching the
+      // photometric length off entirely costs almost nothing, 5.666 to 5.710.
+      //
+      // The reason is the same one the corner detector runs into. The ESM
+      // aligns a road patch at 7 to 30 m whose texture is near the sampling
+      // limit, where the four-parameter warp is barely conditioned; at 0.6 to
+      // 8 m on the simulator's rendered road it is the sharper of the two
+      // instruments by an order of magnitude. Both routes to a hop -- corners
+      // and direct photometry -- are limited by the same road surface at the
+      // same ranges.
       const double disagreement = std::abs(measured / length - 1.0);
       if (settings_.max_scale_error > 0.0 && disagreement > settings_.max_scale_error) {
         ++diagnostics_.photometric_rejected;
