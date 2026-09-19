@@ -563,6 +563,14 @@ struct EstimatorSettings
   bool photometric_when_mapless = false;
   bool rebuild_measure_only = false;
   double anchor_link_radius_m = 0.0;
+  // Added per metre of range; see GroundAnchorMap::Settings.
+  double anchor_link_radius_per_m = 0.0;
+
+  // Weigh each ground correspondence's vote by the ellipse it carries rather
+  // than by a scalar. See estimate_planar_motion_with_yaw: the error of a
+  // ground point runs (R^2+h^2)/h along the line of sight against R across it,
+  // and a scalar weight lets the radial half in at full strength.
+  bool elliptical_pair_weights = false;
   bool anchor_link_cross_source_only = false;
   bool anchor_bearing_nonholonomic = false;
   // See `align_to_anchors`. 0 is off; the physical value is the bearing noise.
@@ -1213,6 +1221,11 @@ private:
   Eigen::Vector3d filtered_twist_ = Eigen::Vector3d::Zero();
   // Accumulated dead-reckoning covariance for the absolute pose.
   Eigen::Matrix3d pose_covariance_ = Eigen::Matrix3d::Zero();
+  // The last hop's error shape, normalised to trace 2, and whether the fit
+  // supplied one. Identity is the isotropic noise every recorded number
+  // came from.
+  Eigen::Matrix2d last_hop_shape_ = Eigen::Matrix2d::Identity();
+  bool last_hop_shape_valid_ = false;
   // The last hop this stack accepted, and how long it took: what a frame
   // between two solves is carried forward on.
   Eigen::Vector2d last_hop_body_ = Eigen::Vector2d::Zero();

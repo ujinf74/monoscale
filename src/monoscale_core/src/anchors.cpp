@@ -128,20 +128,25 @@ void GroundAnchorMap::grid_erase(int64_t slot)
   }
 }
 
-int64_t GroundAnchorMap::adoptable(int source, double x, double y) const
+int64_t GroundAnchorMap::adoptable(int source, double x, double y, double range) const
 {
   if (settings_.link_radius_m <= 0.0) {
     return -1;
   }
 
+  // The grid is built at the absolute radius, so a query that reaches further
+  // has to look through more of its cells rather than resize them.
   const double size = std::max(settings_.link_radius_m, 1e-3);
-  const double limit = settings_.link_radius_m * settings_.link_radius_m;
+  const double radius = settings_.link_radius_m +
+    settings_.link_radius_per_m * std::max(range, 0.0);
+  const double limit = radius * radius;
+  const int64_t reach = static_cast<int64_t>(std::ceil(radius / size));
   const int64_t cx = static_cast<int64_t>(std::floor(x / size));
   const int64_t cy = static_cast<int64_t>(std::floor(y / size));
   int64_t best = -1;
   double best_distance = limit;
-  for (int64_t dy = -1; dy <= 1; ++dy) {
-    for (int64_t dx = -1; dx <= 1; ++dx) {
+  for (int64_t dy = -reach; dy <= reach; ++dy) {
+    for (int64_t dx = -reach; dx <= reach; ++dx) {
       const auto found = grid_.find(((cx + dx) << 32) ^ ((cy + dy) & 0xffffffffLL));
       if (found == grid_.end()) {
         continue;
@@ -489,7 +494,18 @@ void GroundAnchorMap::update(
   const Weights & information, const Points2 & body_points, int32_t pose_index,
   const Weights & clarity)
 {
+  // The range each sighting was taken at, for the link radius. Held rather than
+  // passed because the plain update is the one that adopts, and it is also
+  // called from paths that have no body points to offer.
+  pending_ranges_.clear();
+  if (body_points.rows() == ids.size()) {
+    pending_ranges_.reserve(static_cast<size_t>(ids.size()));
+    for (Eigen::Index i = 0; i < ids.size(); ++i) {
+      pending_ranges_.push_back(std::hypot(body_points(i, 0), body_points(i, 1)));
+    }
+  }
   update(source, ids, world_points, allow_new, information, clarity);
+  pending_ranges_.clear();
   const Eigen::Index count = ids.size();
   if (body_points.rows() != count) {
     return;
@@ -620,7 +636,9 @@ void GroundAnchorMap::update(
     if (slot < 0) {
       // A camera meeting ground another camera already anchored adopts that
       // anchor instead of founding a rival one in the same place.
-      const int64_t adopted = adoptable(source, x, y);
+      const double range = i < static_cast<Eigen::Index>(pending_ranges_.size())
+        ? pending_ranges_[static_cast<size_t>(i)] : 0.0;
+      const int64_t adopted = adoptable(source, x, y, range);
       if (adopted >= 0) {
         // The crossing, read as a length. Positive along-track means this
         // camera puts the ground further on than the anchor does, which is a

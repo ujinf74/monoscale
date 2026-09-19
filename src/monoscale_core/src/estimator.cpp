@@ -307,6 +307,9 @@ struct Estimator::Solved
   // The rotation this hop turned through, whether it was handed in or solved
   // from the road. NaN where neither was available.
   double solved_yaw = std::numeric_limits<double>::quiet_NaN();
+  // The error shape this camera's fit reported, normalised to trace 2.
+  Eigen::Matrix2d motion_shape = Eigen::Matrix2d::Identity();
+  bool motion_shape_valid = false;
 };
 
 // The information the ground points carry about a translation, as a 2x2.
@@ -430,6 +433,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.max_anchors = settings.max_ground_anchors;
   anchor_settings.rebuild_measure_only = settings.rebuild_measure_only;
   anchor_settings.link_radius_m = settings.anchor_link_radius_m;
+  anchor_settings.link_radius_per_m = settings.anchor_link_radius_per_m;
   anchor_settings.link_cross_source_only = settings.anchor_link_cross_source_only;
   anchor_settings.link_adopter_writes = settings.anchor_link_adopter_writes;
   anchor_settings.max_age_frames = settings.anchor_max_age_frames;
@@ -2180,13 +2184,35 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         identity_weight(pairs[static_cast<size_t>(i)]);
     }
   }
+  // The ellipse each vote actually carries, when asked for. Built here because
+  // this is where the lens and the mount height are known; see
+  // estimate_planar_motion_with_yaw.
+  Eigen::MatrixXd pair_directions;
+  if (settings_.elliptical_pair_weights) {
+    const Eigen::Vector2d lens = camera.model.translation_base_from_camera.head<2>();
+    const double height = std::max(camera.model.translation_base_from_camera.z(), 0.05);
+    pair_directions.resize(paired, 4);
+    for (Eigen::Index i = 0; i < paired; ++i) {
+      const Eigen::Vector2d ray(
+        current_ground(i, 0) - lens.x(), current_ground(i, 1) - lens.y());
+      const double range = ray.norm();
+      if (!(range > 1e-6)) {
+        pair_directions.row(i) << 1.0, 0.0, 0.0, 0.0;
+        continue;
+      }
+      pair_directions.row(i) << ray.x() / range, ray.y() / range,
+        (range * range + height * height) / height, range;
+    }
+  }
   const auto estimate = estimate_planar_motion_with_yaw(
     previous_ground, current_ground, *yaw_for_solve, gate,
     settings_.ground_min_inliers, softness_for(camera, settings_.ground_pair_softness_m),
     pair_weights,
-    settings_.ground_pair_passes);
+    settings_.ground_pair_passes, pair_directions);
   if (estimate.has_value()) {
     solved.motion = estimate->motion;
+    solved.motion_shape = estimate->shape;
+    solved.motion_shape_valid = estimate->shape_valid;
     // The road's own length for this interval, where the hop really is one.
     if (settings_.photometric_on_pairs && settings_.photometric_step_gain > 0.0 &&
       camera.photometric_valid && !camera.photometric_broken &&
@@ -2614,6 +2640,23 @@ void Estimator::process_pair()
     fusion_weights.clear();
   }
   auto motion = fuse_planar_motions(motions, fusion_weights);
+  // The hop's error shape, averaged over whichever cameras answered. They are
+  // normalised, so the mean is a shape and not a magnitude; the magnitude is
+  // still the votes' own scatter, downstream.
+  {
+    Eigen::Matrix2d shape = Eigen::Matrix2d::Zero();
+    int shaped = 0;
+    for (const auto & entry : solved) {
+      if (entry.has_value() && entry->motion_shape_valid) {
+        shape += entry->motion_shape;
+        ++shaped;
+      }
+    }
+    last_hop_shape_valid_ = shaped > 0;
+    last_hop_shape_ = last_hop_shape_valid_
+      ? Eigen::Matrix2d(shape / static_cast<double>(shaped))
+      : Eigen::Matrix2d::Identity();
+  }
 
 
 
@@ -3408,7 +3451,14 @@ void Estimator::process_pair()
     // anchors think. This is the observability Ground-VIO gets from its
     // non-ground features, taken from the only other metric source we have.
     const bool learn_scale = settings_.imu_scale_gain != 0.0;
-    if (!displacement_filter_->update(world, motion->inliers, extra, spread)) {
+    Eigen::Matrix2d world_shape = Eigen::Matrix2d::Identity();
+    if (last_hop_shape_valid_) {
+      Eigen::Matrix2d turn_matrix;
+      turn_matrix << c, -s, s, c;
+      world_shape = turn_matrix * last_hop_shape_ * turn_matrix.transpose();
+    }
+    const Eigen::Matrix2d * shape_ptr = last_hop_shape_valid_ ? &world_shape : nullptr;
+    if (!displacement_filter_->update(world, motion->inliers, extra, spread, shape_ptr)) {
       ++diagnostics_.filter_rejections;
     }
     if (learn_scale) {
@@ -3450,7 +3500,17 @@ void Estimator::process_pair()
       const double extra = motions.size() >= 2
         ? std::pow(disagreement / dt, 2)
         : settings_.single_camera_variance;
-      if (!velocity_filter_.update(*measured, motion->inliers, extra)) {
+      Eigen::Matrix2d velocity_shape = Eigen::Matrix2d::Identity();
+      const Eigen::Matrix2d * velocity_shape_ptr = nullptr;
+      if (last_hop_shape_valid_) {
+        const double cy = std::cos(previous_pose.yaw);
+        const double sy = std::sin(previous_pose.yaw);
+        Eigen::Matrix2d turn_matrix;
+        turn_matrix << cy, -sy, sy, cy;
+        velocity_shape = turn_matrix * last_hop_shape_ * turn_matrix.transpose();
+        velocity_shape_ptr = &velocity_shape;
+      }
+      if (!velocity_filter_.update(*measured, motion->inliers, extra, velocity_shape_ptr)) {
         ++diagnostics_.filter_rejections;
       }
       // The propagator withholds spawn/drop acceleration until a vision
@@ -3779,8 +3839,10 @@ void Estimator::process_pair()
     // takes as R.
     const double hop_variance =
       displacement_filter_->measurement_variance(motion->inliers, solve_spread);
-    pose_covariance_.topLeftCorner<2, 2>() +=
-      turn * (Eigen::Matrix2d::Identity() * hop_variance) * turn.transpose();
+    const Eigen::Matrix2d hop_noise = last_hop_shape_valid_
+      ? Eigen::Matrix2d(hop_variance * last_hop_shape_)
+      : Eigen::Matrix2d(Eigen::Matrix2d::Identity() * hop_variance);
+    pose_covariance_.topLeftCorner<2, 2>() += turn * hop_noise * turn.transpose();
     // Heading is carried by the gyro between solves and trimmed by the ground
     // where it answers, so its variance grows at the instrument's noise.
     const double gyro = settings_.gyro_noise_sigma_rad_s;

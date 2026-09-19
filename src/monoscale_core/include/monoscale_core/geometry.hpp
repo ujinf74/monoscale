@@ -161,6 +161,14 @@ struct MotionEstimate
 {
   PlanarMotion motion;
   Mask inliers;
+  // The shape of this hop's error, normalised to unit mean variance: the
+  // inverse of the summed per-point information, scaled so its trace is 2.
+  // The magnitude belongs to the measured scatter of the votes, which the
+  // filter already has; what the votes cannot tell it is that the ellipse is
+  // 13 to 1 and which way it points. Identity unless the fit was given the
+  // lines of sight.
+  Eigen::Matrix2d shape = Eigen::Matrix2d::Identity();
+  bool shape_valid = false;
 };
 
 // Similarity fit through RANSAC, for the frames before the anchor map can
@@ -172,10 +180,21 @@ std::optional<MotionEstimate> estimate_planar_motion(
 
 // The same fit with the heading taken as known, which turns the search into a
 // robust average: each correspondence votes for one translation.
+// `directions` turns the average into a weighted least squares. Each row is
+// the unit line of sight to that point and its two sigmas -- (ux, uy,
+// sigma_along, sigma_across) -- and the vote is then weighed by the inverse of
+// the ellipse it actually carries rather than by a scalar. A ground point is a
+// bearing crossed with a plane, so its error runs (R^2+h^2)/h along the line of
+// sight against R across it: 13 to 1 at twenty metres under a camera 1.66 m up.
+// Collapsed to a scalar, that radial error enters the translation at full
+// strength, and where the road subtends a narrow angle every line of sight
+// points nearly the same way -- so it lands on one axis, which is the direction
+// of travel. Empty keeps the scalar average.
 std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
   const Points2 & previous_points, const Points2 & current_points, double yaw,
   double ransac_threshold, int min_inliers, double softness = 0.0,
-  const Weights & weights = Weights(), int passes = 1);
+  const Weights & weights = Weights(), int passes = 1,
+  const Eigen::MatrixXd & directions = Eigen::MatrixXd());
 
 // Combine what several cameras made of the same hop.
 //

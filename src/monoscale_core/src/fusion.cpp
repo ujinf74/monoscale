@@ -49,11 +49,16 @@ double PlanarVelocityFilter::measurement_variance(int inliers) const
 }
 
 bool PlanarVelocityFilter::update(
-  const Eigen::Vector2d & measured, int inliers, double extra_variance)
+  const Eigen::Vector2d & measured, int inliers, double extra_variance,
+  const Eigen::Matrix2d * noise_shape)
 {
   const double variance = measurement_variance(inliers) + std::max(extra_variance, 0.0);
+  Eigen::Matrix2d noise = Eigen::Matrix2d::Identity() * variance;
+  if (noise_shape != nullptr) {
+    noise = variance * *noise_shape;
+  }
   const Eigen::Vector2d innovation = measured - velocity_;
-  Eigen::Matrix2d innovation_covariance = covariance_ + Eigen::Matrix2d::Identity() * variance;
+  Eigen::Matrix2d innovation_covariance = covariance_ + noise;
 
   Eigen::Matrix2d inverse;
   bool invertible = false;
@@ -174,10 +179,14 @@ double PlanarDisplacementFilter::measurement_variance(int inliers, double spread
 
 bool PlanarDisplacementFilter::update(
   const Eigen::Vector2d & displacement_world, int inliers, double extra_variance,
-  double spread)
+  double spread, const Eigen::Matrix2d * noise_shape)
 {
   const double variance =
     measurement_variance(inliers, spread) + std::max(extra_variance, 0.0);
+  Eigen::Matrix2d noise = Eigen::Matrix2d::Identity() * variance;
+  if (noise_shape != nullptr) {
+    noise = variance * *noise_shape;
+  }
 
   // H picks out p - a.
   Eigen::Matrix<double, 2, 8> model = Eigen::Matrix<double, 2, 8>::Zero();
@@ -188,7 +197,7 @@ bool PlanarDisplacementFilter::update(
     state_.segment<2>(kPosition) - state_.segment<2>(kAnchor);
   const Eigen::Vector2d innovation = displacement_world - predicted;
   const Eigen::Matrix2d prior = model * covariance_ * model.transpose();
-  Eigen::Matrix2d block = prior + Eigen::Matrix2d::Identity() * variance;
+  Eigen::Matrix2d block = prior + noise;
 
   Eigen::Matrix2d inverse;
   bool invertible = false;
@@ -203,7 +212,7 @@ bool PlanarDisplacementFilter::update(
   if (settled() && nis > settings_.innovation_gate) {
     ++rejected_;
     accepted = false;
-    block = prior + Eigen::Matrix2d::Identity() * (variance * settings_.outlier_inflation);
+    block = prior + noise * settings_.outlier_inflation;
     block.computeInverseAndDetWithCheck(inverse, determinant, invertible);
     if (!invertible) {
       return false;

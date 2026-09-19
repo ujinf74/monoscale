@@ -52,6 +52,13 @@ struct AnchorSettings
   // second sighting starts a second anchor carrying whatever pose error the
   // estimate had at that moment. 0 keeps each camera to its own anchors.
   double link_radius_m = 0.0;
+  // Added to link_radius_m per metre of range, because the error in where a
+  // re-detected ground point lands is not a constant: a pixel of it is
+  // d^2/(f h) metres on the road, so 5 cm at 8 m and 75 cm at 30 m for a
+  // forward camera 1.65 m up. A radius that fits the near road cannot reach
+  // the far road, and one that reaches the far road folds the near road
+  // together.
+  double link_radius_per_m = 0.0;
   // ...and only past this range as well. Both conditions, not either.
   //
   // Bearing alone is wrong and the mistake is expensive: the rear camera looks
@@ -430,7 +437,7 @@ private:
   void grid_insert(int64_t slot);
   void grid_erase(int64_t slot);
   // Nearest anchor within link_radius_m that this source has not bound yet.
-  int64_t adoptable(int source, double x, double y) const;
+  int64_t adoptable(int source, double x, double y, double range) const;
   double weight_at(int64_t slot) const;
   double longitudinal_information(int64_t slot) const;
   double predicted_variance(int64_t slot) const;
@@ -535,6 +542,8 @@ private:
   double travel_squared_ = 0.0;
   double cross_ = 0.0;
   int64_t crossings_ = 0;
+  // Ranges of the sightings being folded in, for the link radius.
+  std::vector<double> pending_ranges_;
   double path_ = 0.0;
   double yaw_ = 0.0;
   // Path length when each anchor was founded, so a crossing knows how far the

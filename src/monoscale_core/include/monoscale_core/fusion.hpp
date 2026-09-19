@@ -72,7 +72,11 @@ public:
   // and rear cameras look at different ground and solve independently, so how
   // far apart their answers are is a measure of how much either can be trusted,
   // and no amount of internal agreement inside one of them reveals it.
-  bool update(const Eigen::Vector2d & measured, int inliers, double extra_variance = 0.0);
+  // `noise_shape`, when given, is the measurement noise's shape normalised to
+  // unit mean variance. Null keeps the isotropic noise.
+  bool update(
+    const Eigen::Vector2d & measured, int inliers, double extra_variance = 0.0,
+    const Eigen::Matrix2d * noise_shape = nullptr);
 
   // Travel over dt at the fused velocity, in the body frame at `yaw`.
   Eigen::Vector2d body_translation(double dt, double yaw) const;
@@ -171,9 +175,13 @@ public:
   // exact, they can still be wrong together.
   double measurement_variance(int inliers, double spread = 0.0) const;
 
+  // `noise_shape`, when given, is the measurement noise's shape normalised to
+  // unit mean variance (trace 2). The magnitude still comes from the votes'
+  // own scatter; the shape is the geometry the votes cannot see. Null keeps
+  // the isotropic noise every recorded number came from.
   bool update(
     const Eigen::Vector2d & displacement_world, int inliers, double extra_variance = 0.0,
-    double spread = 0.0);
+    double spread = 0.0, const Eigen::Matrix2d * noise_shape = nullptr);
 
   // The vehicle is standing still. Say so.
   //

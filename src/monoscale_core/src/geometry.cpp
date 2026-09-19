@@ -315,9 +315,11 @@ std::optional<MotionEstimate> estimate_planar_motion(
 std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
   const Points2 & previous_points, const Points2 & current_points, double yaw,
   double ransac_threshold, int min_inliers, double softness, const Weights & weights,
-  int passes)
+  int passes, const Eigen::MatrixXd & directions)
 {
   const bool weighted = weights.size() == previous_points.rows();
+  const bool elliptical =
+    directions.rows() == previous_points.rows() && directions.cols() == 4;
   const Eigen::Index count = previous_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || current_points.rows() != count) {
     return std::nullopt;
@@ -409,11 +411,15 @@ std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
   // anchor path, which has been weighted since the same fix was made there,
   // stays near +0.7%.
   const double soft_squared = 2.0 * softness * softness;
+  Eigen::Matrix2d information_sum = Eigen::Matrix2d::Zero();
+  Eigen::Vector2d information_moment = Eigen::Vector2d::Zero();
   for (int pass = 0; pass < std::max(passes, 1); ++pass) {
   inliers = 0;
   total = 0.0;
   sum_x = 0.0;
   sum_y = 0.0;
+  information_sum.setZero();
+  information_moment.setZero();
   for (Eigen::Index i = 0; i < count; ++i) {
     const double dx = offsets(i, 0) - translation.x();
     const double dy = offsets(i, 1) - translation.y();
@@ -432,16 +438,54 @@ std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
       total += weight;
       sum_x += weight * offsets(i, 0);
       sum_y += weight * offsets(i, 1);
+      if (elliptical) {
+        const Eigen::Vector2d along(directions(i, 0), directions(i, 1));
+        const Eigen::Vector2d across(-along.y(), along.x());
+        const double sigma_along = directions(i, 2);
+        const double sigma_across = directions(i, 3);
+        if (sigma_along > 1e-9 && sigma_across > 1e-9) {
+          const Eigen::Matrix2d omega =
+            along * along.transpose() / (sigma_along * sigma_along) +
+            across * across.transpose() / (sigma_across * sigma_across);
+          information_sum += weight * omega;
+          information_moment += weight * omega * Eigen::Vector2d(offsets(i, 0), offsets(i, 1));
+        }
+      }
     }
   }
     if (inliers < min_inliers || !(total > 0.0)) {
       return std::nullopt;
     }
-    const Eigen::Vector2d moved(sum_x / total, sum_y / total);
+    Eigen::Vector2d moved(sum_x / total, sum_y / total);
+    if (elliptical) {
+      // Singular when every line of sight is parallel, which is the very case
+      // this is for; the scalar mean is the fallback rather than a failure.
+      const double determinant = information_sum.determinant();
+      const double scale = information_sum.diagonal().maxCoeff();
+      if (std::isfinite(determinant) && scale > 0.0 &&
+        determinant > 1e-12 * scale * scale)
+      {
+        moved = information_sum.ldlt().solve(information_moment);
+      }
+    }
     const double step = (moved - translation).norm();
     translation = moved;
     if (step < 1e-6) {
       break;
+    }
+  }
+  if (elliptical) {
+    const double determinant = information_sum.determinant();
+    const double scale = information_sum.diagonal().maxCoeff();
+    if (std::isfinite(determinant) && scale > 0.0 &&
+      determinant > 1e-12 * scale * scale)
+    {
+      const Eigen::Matrix2d covariance = information_sum.inverse();
+      const double mean_variance = 0.5 * covariance.trace();
+      if (mean_variance > 0.0 && std::isfinite(mean_variance)) {
+        result.shape = covariance / mean_variance;
+        result.shape_valid = true;
+      }
     }
   }
   result.motion = PlanarMotion{
