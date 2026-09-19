@@ -259,6 +259,21 @@ struct EstimatorSettings
   // accelerometer does not. They are complements, and this is the half the
   // plane cannot supply, because a scale error in the plane satisfies its own
   // map and the accelerometer does not care what the anchors think.
+  //
+  // It runs and it converges, and it is still not good enough to switch on.
+  // Over a drive the two velocity changes correlate at only 0.35 to 0.54, and
+  // the ratio of the two one-sided regressions puts 12 to 29 per cent of the
+  // vision difference's variance in the signal: a hop carrying 15 per cent
+  // noise at 8 m/s is 1.2 m/s of velocity error, differenced to 1.7, against
+  // the 0.4 m/s a 2 m/s^2 stretch produces over a fifth of a second. Each
+  // one-sided regression is attenuated by whichever noise sits in its
+  // denominator -- 0.48 and 1.10 on sequence 06 where the answer is near 0.96
+  // -- so the learner settles at 0.979, 0.955 and 0.993 on sequences 06, 07
+  // and 10 and the official translation metric goes 5.771% to 6.03%.
+  //
+  // The observable is sound and the baseline is too short. Accumulating the
+  // velocity change over a braking event rather than over one solve interval
+  // grows the signal and leaves the vision noise where it is.
   double inertial_scale_gain = 0.0;
   // How much the velocity has to have changed for the ratio above to be signal.
   // Over a 0.2 s solve interval this is the acceleration times that interval.
