@@ -289,6 +289,18 @@ struct EstimatorSettings
   // Windows do not overlap, so the samples stay independent, and one that ends
   // without reaching the excitation is discarded rather than averaged in --
   // gating on the accelerometer's side is safe because it is the quiet one.
+  //
+  // Held on four sequences it was never shown. 20 was chosen on KITTI 04, 06,
+  // 07 and 10 because they were what had finished downloading; 00, 05 and 09
+  // arrived afterwards and were used for nothing:
+  //
+  //   seq          00     04     05     06     07     09     10    mean
+  //   off        3.49  13.03   5.46   3.50   3.91  10.32   2.65   6.052
+  //   window 20  3.23  13.05   4.70   3.40   3.81   8.97   2.50   5.666
+  //
+  // Six of seven improve and the two largest gains are on drives it had not
+  // seen. The seventh, 04, has 36 successful solves in 135 attempts and gives
+  // a scale learner nothing to hold on to.
   int inertial_scale_window = 1;
   // How much the velocity has to have changed for the ratio above to be signal.
   // Over a 0.2 s solve interval this is the acceleration times that interval.
