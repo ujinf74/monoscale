@@ -419,6 +419,18 @@ Estimator::Estimator(const EstimatorSettings & settings)
   inertial_(
     [&settings]() {
       PlanarInertialPropagator::Settings inertial;
+      // One physical constant, one value. The attitude filter removes gravity
+      // at 9.80665 and this was left at the struct's 9.81, so the two disagreed
+      // about the same vector by 3.4 mm/s^2.
+      //
+      // `max_gap_sec` is NOT wired to `imu_max_gap_sec` and should not be. The
+      // attitude filter's bound is about integrating a rate, where a missed
+      // sample is rotation that never gets back; this one integrates an
+      // acceleration that vision re-anchors every solve, so it can tolerate a
+      // longer gap. Sharing the number is not the same question, and measured,
+      // 0.12 costs the nine sequences 5.254% to 5.448% -- sequence 09 alone
+      // goes 7.94 to 9.57.
+      inertial.gravity = 9.80665;
       inertial.max_horizontal_acceleration = settings.inertial_max_acceleration_mps2;
       inertial.median_window = settings.inertial_acceleration_median_window;
       inertial.integration = settings.inertial_integration;
@@ -1468,7 +1480,14 @@ void Estimator::ingest_bands(Camera & camera, const TrackFrame & incoming)
     const double difference = incoming.band_right / incoming.band_left - 1.0;
     const double roll = -height * difference / across;
     if (std::isfinite(roll)) {
-      camera.band_roll += camera.band_ready ? gain * (roll - camera.band_roll) : roll;
+      // `: roll` stood here, which adds where the first update has to set.
+      // The pitch above gets it right -- `pitch - band_pitch` -- and only the
+      // pitch sets `band_ready`, so a frame where the left and right bands land
+      // and the near and far ones do not took the roll round the loop again
+      // every time, without bound.
+      camera.band_roll += camera.band_ready
+        ? gain * (roll - camera.band_roll) : roll - camera.band_roll;
+      camera.band_ready = true;
     }
   }
   camera.band_stamp = incoming.stamp;

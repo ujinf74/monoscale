@@ -209,10 +209,17 @@ bool PlanarDisplacementFilter::update(
 
   bool accepted = true;
   const double nis = innovation.dot(inverse * innovation);
+  // The R the gain is actually computed against, kept so the Joseph term can
+  // use the same one. It had `Identity() * variance` hard-coded, which is
+  // neither the shaped noise an elliptical solve hands in nor the inflated one
+  // a gated update runs on, so the posterior disagreed with its own gain
+  // exactly on the updates that needed it to agree.
+  Eigen::Matrix2d applied = noise;
   if (settled() && nis > settings_.innovation_gate) {
     ++rejected_;
     accepted = false;
-    block = prior + noise * settings_.outlier_inflation;
+    applied = noise * settings_.outlier_inflation;
+    block = prior + applied;
     block.computeInverseAndDetWithCheck(inverse, determinant, invertible);
     if (!invertible) {
       return false;
@@ -238,7 +245,7 @@ bool PlanarDisplacementFilter::update(
   // more product.
   const Covariance spread_matrix = Covariance::Identity() - gain * model;
   covariance_ = spread_matrix * covariance_ * spread_matrix.transpose() +
-    gain * (Eigen::Matrix2d::Identity() * variance) * gain.transpose();
+    gain * applied * gain.transpose();
   covariance_ = 0.5 * (covariance_ + covariance_.transpose()).eval();
 
   record.posterior = state_.segment<2>(kPosition) - state_.segment<2>(kAnchor);
