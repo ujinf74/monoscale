@@ -1149,6 +1149,12 @@ public:
     motion_warp_ = declare_parameter<bool>("motion_warp", false);
     motion_warp_min_step_ =
       declare_parameter<double>("motion_warp_min_step_m", 0.12);
+    if (cuda_active_ && motion_warp_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "motion_warp has no GPU path: the warped pyramid is built on the host "
+        "and the flow runs against the unwarped previous frame");
+    }
 
     const auto cameras = declare_parameter<std::vector<std::string>>(
       "cameras", std::vector<std::string>{"front", "rear"});
@@ -2492,17 +2498,31 @@ private:
     cv::Mat source = pinned(state.host_source, static_cast<int>(count), CV_32FC2);
     std::memcpy(source.ptr(), state.points.data(), count * sizeof(cv::Point2f));
 
-    // Start each search where the feature was heading, the same warm start the
-    // CPU path uses: the near ground sweeps fastest and carries most of the
-    // metric information, so those are the points that fall into a wrong local
-    // minimum without a guess.
+    // Start each search where the feature was heading: the near ground sweeps
+    // fastest and carries most of the metric information, so those are the
+    // points that fall into a wrong local minimum without a guess.
+    //
+    // In the same order the CPU path uses -- the ground-motion prediction
+    // first, the velocity warm start only where there is none. This path took
+    // the warm start and nothing else, so `motion_prediction` and
+    // `road_from_step` were computed every frame and then dropped whenever
+    // `use_cuda` was set, and the two paths quietly stopped being the same
+    // algorithm. The pyramid warp cannot follow here: `state.warped_pyramid`
+    // is built on the host and there is no device copy of it, so a GPU run
+    // with `motion_warp` still searches the unwarped previous frame. That half
+    // is reported at startup instead of differing in silence.
     cv::Mat guess = pinned(state.host_guess, static_cast<int>(count), CV_32FC2);
-    const bool warm = warm_start_ && state.velocities.size() == count;
+    const bool guided = state.predicted.size() == count && count > 0;
+    const bool warm = !guided && warm_start_ && state.velocities.size() == count;
     cv::Point2f * heading = guess.ptr<cv::Point2f>();
     for (size_t i = 0; i < count; ++i) {
-      heading[i] = warm
-        ? state.points[i] + state.velocities[i] * static_cast<float>(reach)
-        : state.points[i];
+      if (guided) {
+        heading[i] = state.predicted[i];
+      } else if (warm) {
+        heading[i] = state.points[i] + state.velocities[i] * static_cast<float>(reach);
+      } else {
+        heading[i] = state.points[i];
+      }
     }
 
     // The whole hop is queued on the camera's stream and waited on once. Every
@@ -2511,7 +2531,9 @@ private:
     // cost more than the flow it was carrying.
     state.device_source.upload(source, state.stream);
     state.device_forward.upload(guess, state.stream);
-    (warm ? forward_flow_ : backward_flow_)
+    // `forward_flow_` is the one built with `useInitialFlow`, so it is the one
+    // that reads the guess above.
+    ((guided || warm) ? forward_flow_ : backward_flow_)
     ->calc(
       state.previous_device_pyramid, pyramid, state.device_source,
       state.device_forward, state.device_status, state.device_error,

@@ -203,7 +203,13 @@ struct Estimator::Camera
   double band_pitch = 0.0;
   double band_roll = 0.0;
   double band_stamp = 0.0;
-  bool band_ready = false;
+  // One flag per axis, because the two are observed by different pairs of
+  // bands and either can land without the other. Sharing one flag let the
+  // first measurement of the axis that arrived second be folded in as a
+  // correction to a value nothing had ever set, so it crept in at `gain` a
+  // frame from zero instead of starting where it was measured.
+  bool band_pitch_ready = false;
+  bool band_roll_ready = false;
   // The same two angles from the anchor alignment's bearing residuals.
   double anchor_roll = 0.0;
   double anchor_pitch = 0.0;
@@ -1479,9 +1485,9 @@ void Estimator::ingest_bands(Camera & camera, const TrackFrame & incoming)
       lens_step_bias(incoming.band_near_range, height, settings_.band_lens_scale);
     const double pitch = height * difference / (2.0 * reach);
     if (std::isfinite(pitch)) {
-      camera.band_pitch += camera.band_ready ? gain * (pitch - camera.band_pitch)
-        : pitch - camera.band_pitch;
-      camera.band_ready = true;
+      camera.band_pitch += camera.band_pitch_ready
+        ? gain * (pitch - camera.band_pitch) : pitch - camera.band_pitch;
+      camera.band_pitch_ready = true;
     }
   }
 
@@ -1497,14 +1503,12 @@ void Estimator::ingest_bands(Camera & camera, const TrackFrame & incoming)
     const double difference = incoming.band_right / incoming.band_left - 1.0;
     const double roll = -height * difference / across;
     if (std::isfinite(roll)) {
-      // `: roll` stood here, which adds where the first update has to set.
-      // The pitch above gets it right -- `pitch - band_pitch` -- and only the
-      // pitch sets `band_ready`, so a frame where the left and right bands land
-      // and the near and far ones do not took the roll round the loop again
-      // every time, without bound.
-      camera.band_roll += camera.band_ready
+      // `: roll` stood here, which adds where the first update has to set, so
+      // a frame where the left and right bands land and the near and far ones
+      // do not took the roll round the loop again every time, without bound.
+      camera.band_roll += camera.band_roll_ready
         ? gain * (roll - camera.band_roll) : roll - camera.band_roll;
-      camera.band_ready = true;
+      camera.band_roll_ready = true;
     }
   }
   camera.band_stamp = incoming.stamp;
@@ -1534,12 +1538,14 @@ std::optional<Eigen::Matrix3d> Estimator::camera_tilt(const Camera & camera) con
   if (!settings_.band_attitude) {
     return body_tilt();
   }
-  if (!camera.band_ready) {
+  if (!camera.band_pitch_ready && !camera.band_roll_ready) {
     // Level until the road has said otherwise. Falling back to the inertial
     // attitude here would put the very term this replaces back into the first
     // seconds of every drive, which is where it peaks.
     return std::nullopt;
   }
+  // An axis that has not been measured is still zero, which is what "no tilt
+  // seen" means for an offset. So one axis is enough to answer with.
   return Eigen::Matrix3d(
     Eigen::AngleAxisd(camera.band_roll, Eigen::Vector3d::UnitX()) *
     Eigen::AngleAxisd(camera.band_pitch, Eigen::Vector3d::UnitY()));
@@ -3575,7 +3581,9 @@ void Estimator::process_pair()
         target_pitch = held->anchor_pitch;
         target_roll = held->anchor_roll;
         ++diagnostics_.consumer_fed[Diagnostics::kAnchorAttitude];
-      } else if (settings_.band_attitude && held->band_ready) {
+      } else if (settings_.band_attitude &&
+        (held->band_pitch_ready || held->band_roll_ready))
+      {
         target_pitch = held->band_pitch;
         target_roll = held->band_roll;
         ++diagnostics_.consumer_fed[Diagnostics::kBandAttitude];
@@ -4232,7 +4240,7 @@ void Estimator::process_pair()
     update.pitch = cameras_.front()->anchor_pitch;
     update.tilt_valid = true;
   } else if (settings_.band_attitude && !cameras_.empty() &&
-    cameras_.front()->band_ready)
+    (cameras_.front()->band_pitch_ready || cameras_.front()->band_roll_ready))
   {
     // The attitude actually in use, which is the first camera's own reading of
     // the road rather than anything inertial.
