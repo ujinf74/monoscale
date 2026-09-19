@@ -880,6 +880,9 @@ public:
     // Build the fit's Jacobian from the model's derivatives instead of from
     // warps. Off is what every recorded number came from.
     road_step_esm_analytic_ = declare_parameter<bool>("road_step_esm_analytic", false);
+    // Update the held Jacobian from each accepted step instead of only
+    // rebuilding it. Costs no warp; see the note at the acceptance.
+    esm_broyden_ = declare_parameter<bool>("road_step_esm_broyden", false);
     band_samples_ = declare_parameter<int>("road_step_band_samples", 9);
     arc_hop_ = declare_parameter<bool>("road_step_arc", false);
     esm_compare_ = declare_parameter<bool>("road_step_esm_compare", false);
@@ -3885,6 +3888,33 @@ private:
             cv::Mat next = moved_patch - target;
             const double trial_cost = next.dot(next);
             if (trial_cost < cost) {
+              // What the accepted step says about the Jacobian that proposed
+              // it, applied to the columns rather than thrown away.
+              //
+              // The rebuild policy above holds the Jacobian because re-deriving
+              // it costs two warps a parameter and it barely moves. Holding is
+              // not the only option: the step just accepted is a secant pair,
+              // and `dr - J dx` is exactly how wrong the held columns were
+              // along the direction the fit actually travelled. Broyden's
+              // first method puts that back at the cost of a few array
+              // operations over the patch and no warp at all. The frozen
+              // parameters take themselves out -- their proposal is zero.
+              if (esm_broyden_ && have_jacobian) {
+                const double denom = proposal.dot(proposal);
+                if (denom > 1e-24) {
+                  cv::Mat defect = next - residual;
+                  for (int k = 0; k < freedom; ++k) {
+                    if (proposal[k] != 0.0) {
+                      defect -= column[k] * proposal[k];
+                    }
+                  }
+                  for (int k = 0; k < freedom; ++k) {
+                    if (proposal[k] != 0.0) {
+                      column[k] += defect * (proposal[k] / denom);
+                    }
+                  }
+                }
+              }
               std::copy(trial, trial + 4, at);
               residual = next;
               cost = trial_cost;
@@ -4880,6 +4910,7 @@ private:
   int road_step_fit_stride_ = 0;
   int road_step_esm_rebuild_ = 1;
   bool road_step_esm_analytic_ = false;
+  bool esm_broyden_ = false;
   int band_samples_ = 9;
   // See `GroundModel::homography`: follow the arc rather than the chord.
   bool arc_hop_ = false;
