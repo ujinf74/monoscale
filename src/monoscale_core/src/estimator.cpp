@@ -916,7 +916,7 @@ ImuSample Estimator::shift_imu_to_base(const ImuSample & measured)
   // because of that, not as a tuning knob.
   if (imu_rate_stamp_.has_value()) {
     const double step = measured.stamp - *imu_rate_stamp_;
-    if (step > 1e-6 && step <= 0.1) {
+    if (step > 1e-6 && step <= settings_.imu_max_gap_sec) {
       const Eigen::Vector3d fresh = (rate - imu_rate_) / step;
       const double blend = settings_.imu_angular_accel_tau_sec > 0.0
         ? step / (settings_.imu_angular_accel_tau_sec + step) : 1.0;
@@ -955,7 +955,7 @@ void Estimator::ingest_imu(const ImuSample & measured)
       const double step = sample.stamp - *gyro_yaw_stamp_;
       // The same bound the attitude filter uses: a longer gap is a dropout,
       // and integrating across one invents rotation that was never measured.
-      if (step > 0.0 && step <= 0.1) {
+      if (step > 0.0 && step <= settings_.imu_max_gap_sec) {
         // The learned bias taken out at the source, which is where it belongs:
         // the hop rotation handed to the ground solve is then right, not only
         // the heading the pose accumulates. `set_source_corrected` below is
@@ -984,7 +984,7 @@ void Estimator::ingest_imu(const ImuSample & measured)
 
   if (attitude_) {
     const double step = imu_stamp_.has_value() ? sample.stamp - *imu_stamp_ : 0.0;
-    if (step >= 0.0 && step <= 0.1) {
+    if (step >= 0.0 && step <= settings_.imu_max_gap_sec) {
       attitude_->update(sample.angular_velocity, sample.linear_acceleration, step);
     }
     imu_stamp_ = sample.stamp;
@@ -1495,7 +1495,7 @@ void Estimator::replay_inertial(
   }
   if (last != nullptr) {
     const double tail = to - last->stamp;
-    if (tail > 0.0 && tail <= 0.1) {
+    if (tail > 0.0 && tail <= settings_.imu_max_gap_sec) {
       step(*last, tail);
     }
   }

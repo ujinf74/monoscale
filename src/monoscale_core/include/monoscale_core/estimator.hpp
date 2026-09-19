@@ -173,6 +173,16 @@ struct EstimatorSettings
   bool esm_attitude = false;
   double esm_attitude_leak_sec = 2.0;
   double imu_max_age_sec = 0.02;
+  // The longest gap between two IMU samples that still counts as a gap and not
+  // as a dropout. Everything inertial integrates over it: the attitude filter,
+  // the gyro's heading, the angular acceleration, the propagator and its tail.
+  //
+  // Four of those five used to test against a hard-coded 0.1 s instead, which
+  // is a bound written for a 60 Hz rig. KITTI's OXTS arrives at 9.6 Hz and only
+  // 32.6% of its gaps clear 0.1, so the attitude filter integrated a third of
+  // the rotation and its pitch came out at 0.35 of the truth's amplitude --
+  // the same 0.326. A bound stated in seconds has to be stated once, against
+  // the instrument's own rate.
   double imu_max_gap_sec = 0.12;
 
   double ground_max_distance_m = 25.0;
