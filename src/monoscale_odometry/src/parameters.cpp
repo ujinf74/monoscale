@@ -399,6 +399,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_attitude = declare_bool("anchor_attitude", false);
   settings.anchor_attitude_solves = declare_double("anchor_attitude_solves", 100.0);
   settings.anchor_attitude_gain = declare_double("anchor_attitude_gain", 1.0);
+  settings.anchor_attitude_imu_carry_sec =
+    declare_double("anchor_attitude_imu_carry_sec", 0.0);
   settings.attitude_slope_tau_sec = declare_double("attitude_slope_tau_sec", 0.0);
   settings.vision_scale = declare_double("vision_scale", 1.0);
   settings.imu_translation_base_from_imu = vector_of(

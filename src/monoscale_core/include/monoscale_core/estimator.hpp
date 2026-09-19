@@ -634,6 +634,21 @@ struct EstimatorSettings
   double anchor_attitude_solves = 100.0;
   // Sign and strength of what is applied. 1 takes the fit as it comes.
   double anchor_attitude_gain = 1.0;
+  // Carry the anchor's tilt between its own fixes on the gyro, over this long.
+  //
+  // The map answers on a fraction of the solves -- 41 of 570 on KITTI's
+  // sequence 10 -- and the tilt is averaged over a hundred of them, so what
+  // the projection uses is very nearly a constant. Every range in the frame
+  // goes as 1/tan(depression + tilt), which is -21% per degree at 20 m, so a
+  // brake or a crest between two fixes is a scale error on the whole hop.
+  //
+  // The gyro has the short term the map lacks and none of the absolute
+  // reference, so what is added is the attitude filter's change against a
+  // reference that leaks back towards it over this constant: a high pass whose
+  // corner says how long the inertial attitude is trusted for. Handing over the
+  // whole of it instead costs sequence 10 its hop noise, 33.9% to 68.2%, which
+  // is the filter's own 1.46 degree error arriving at -21% each. Zero is off.
+  double anchor_attitude_imu_carry_sec = 0.0;
   double attitude_slope_tau_sec = 0.0;
   double vision_scale = 1.0;
 

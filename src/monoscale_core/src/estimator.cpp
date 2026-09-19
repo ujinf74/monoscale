@@ -194,6 +194,11 @@ struct Estimator::Camera
   // The same two angles from the anchor alignment's bearing residuals.
   double anchor_roll = 0.0;
   double anchor_pitch = 0.0;
+  // The inertial attitude as it stood when the two angles above were last
+  // written, smoothed the same way, so the difference against it now is the
+  // change the map has not seen.
+  double anchor_imu_roll = 0.0;
+  double anchor_imu_pitch = 0.0;
   // The photometric solve's rotation, summed over the frames a solve spans --
   // the same accumulation the step needs, for the same reason.
   double esm_yaw_since_solve = 0.0;
@@ -986,6 +991,20 @@ void Estimator::ingest_imu(const ImuSample & measured)
     const double step = imu_stamp_.has_value() ? sample.stamp - *imu_stamp_ : 0.0;
     if (step >= 0.0 && step <= settings_.imu_max_gap_sec) {
       attitude_->update(sample.angular_velocity, sample.linear_acceleration, step);
+      // The reference the anchor tilt is carried against leaks back towards the
+      // filter, which turns the carry into a high pass: what reaches the
+      // projection is the attitude's change over the last
+      // `anchor_attitude_imu_carry_sec`, and its slower error does not.
+      if (settings_.anchor_attitude_imu_carry_sec > 0.0 && attitude_->started()) {
+        const double leak = std::min(
+          step / settings_.anchor_attitude_imu_carry_sec, 1.0);
+        for (auto & camera : cameras_) {
+          if (camera->anchor_ready) {
+            camera->anchor_imu_roll += leak * (attitude_->roll() - camera->anchor_imu_roll);
+            camera->anchor_imu_pitch += leak * (attitude_->pitch() - camera->anchor_imu_pitch);
+          }
+        }
+      }
     }
     imu_stamp_ = sample.stamp;
   }
@@ -1436,9 +1455,15 @@ std::optional<Eigen::Matrix3d> Estimator::camera_tilt(const Camera & camera) con
     if (!camera.anchor_ready) {
       return std::nullopt;
     }
+    double roll = camera.anchor_roll;
+    double pitch = camera.anchor_pitch;
+    if (settings_.anchor_attitude_imu_carry_sec > 0.0 && attitude_ && attitude_->started()) {
+      roll += attitude_->roll() - camera.anchor_imu_roll;
+      pitch += attitude_->pitch() - camera.anchor_imu_pitch;
+    }
     return Eigen::Matrix3d(
-      Eigen::AngleAxisd(camera.anchor_roll, Eigen::Vector3d::UnitX()) *
-      Eigen::AngleAxisd(camera.anchor_pitch, Eigen::Vector3d::UnitY()));
+      Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()) *
+      Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()));
   }
   if (!settings_.band_attitude) {
     return body_tilt();
@@ -2059,12 +2084,21 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         const double roll = settings_.anchor_attitude_gain * aligned->bearing_roll;
         const double pitch = settings_.anchor_attitude_gain * aligned->bearing_pitch;
         if (std::isfinite(roll) && std::isfinite(pitch)) {
+          // The inertial attitude rides along under the same smoothing, so
+          // that what is subtracted from it later is the same average the
+          // anchor angles are.
+          const double imu_roll = attitude_ ? attitude_->roll() : 0.0;
+          const double imu_pitch = attitude_ ? attitude_->pitch() : 0.0;
           if (camera.anchor_ready) {
             camera.anchor_roll += gain * (roll - camera.anchor_roll);
             camera.anchor_pitch += gain * (pitch - camera.anchor_pitch);
+            camera.anchor_imu_roll += gain * (imu_roll - camera.anchor_imu_roll);
+            camera.anchor_imu_pitch += gain * (imu_pitch - camera.anchor_imu_pitch);
           } else {
             camera.anchor_roll = roll;
             camera.anchor_pitch = pitch;
+            camera.anchor_imu_roll = imu_roll;
+            camera.anchor_imu_pitch = imu_pitch;
             camera.anchor_ready = true;
           }
         }
