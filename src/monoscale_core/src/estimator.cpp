@@ -1863,8 +1863,20 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   Stopwatch watch(diagnostics_, "solve");
 
   // Widened by whatever this hop turns through, for both solve paths.
-  const double gate = settings_.ground_ransac_threshold_m +
-    settings_.ground_rotation_threshold_m * std::abs(*yaw_for_solve);
+  //
+  // And carried with the learned range scale, because the residuals it judges
+  // are. That scale is a correction to the camera's height, so it multiplies
+  // every range out of the projection and every residual between two of them;
+  // a threshold fixed in metres therefore loosens by exactly the amount the
+  // learner has moved. At seq08's learned 0.9045 it sits 10.5 per cent wider
+  // than it was chosen to be, admitting matches it was put there to refuse --
+  // so the further the learner pushes the blunter the instrument it pushes on,
+  // which is why giving it more room cost seq08 8.29% -> 9.01%.
+  const double learned_scale = cameras_.empty()
+    ? 1.0 : cameras_.front()->range_scale_learned * imu_scale_;
+  const double gate = (settings_.ground_ransac_threshold_m +
+    settings_.ground_rotation_threshold_m * std::abs(*yaw_for_solve)) *
+    (learned_scale > 1e-6 ? learned_scale : 1.0);
 
   // Prefer the accumulated map; fall back to the previous frame alone. Matching
   // against anchors averaged over a feature's whole life is what stops a burst
