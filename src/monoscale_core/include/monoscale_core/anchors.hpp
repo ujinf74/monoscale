@@ -619,6 +619,8 @@ struct AnchorAlignment
   // 0.34-1.14 m it moves them 1.34 mm.
   double radial_height = 0.0;
   double radial_pitch = 0.0;
+  // The same fit with the height column dropped; see the note at the fit.
+  double radial_pitch_only = 0.0;
 
   // The same residuals read on the sphere instead of on the ground.
   //

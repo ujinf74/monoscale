@@ -381,6 +381,8 @@ struct Outcome
   // is the only observable this stack has for the MEAN tilt the projection is
   // using, which is what a scale bias is made of.
   double radial_pitch_sum = 0.0;
+  double radial_height_sum = 0.0;
+  double radial_only_sum = 0.0;
   int64_t radial_pitch_n = 0;
 };
 
@@ -417,6 +419,10 @@ void replay_into(
         update.radial_pitch[0] != 0.0)
       {
         outcome.radial_pitch_sum += update.radial_pitch[0];
+        outcome.radial_height_sum += update.radial_height.empty() ? 0.0
+          : update.radial_height[0];
+        outcome.radial_only_sum += update.radial_pitch_only.empty() ? 0.0
+          : update.radial_pitch_only[0];
         ++outcome.radial_pitch_n;
       }
       if (!update.pose_valid) {
@@ -1553,9 +1559,10 @@ int main(int argc, char ** argv)
     // much material an off-plane anchor would have.
     if (outcome.radial_pitch_n > 0) {
       std::printf(
-        "radial pitch[0]: %+.5f rad (%+.4f deg)  n=%ld\n",
-        outcome.radial_pitch_sum / static_cast<double>(outcome.radial_pitch_n),
+        "radial split[0]: pitch %+.4f deg  height %+.5f m  pitch-only %+.4f deg  n=%ld\n",
         outcome.radial_pitch_sum / static_cast<double>(outcome.radial_pitch_n) * 180.0 / M_PI,
+        outcome.radial_height_sum / static_cast<double>(outcome.radial_pitch_n),
+        outcome.radial_only_sum / static_cast<double>(outcome.radial_pitch_n) * 180.0 / M_PI,
         outcome.radial_pitch_n);
     }
     std::printf(

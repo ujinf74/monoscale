@@ -932,6 +932,7 @@ struct Update
   // term. Diagnostic; nothing acts on them.
   std::vector<double> radial_height;
   std::vector<double> radial_pitch;
+  std::vector<double> radial_pitch_only;
   double photometric_distance = 0.0;
   double fused_length = 0.0;
   // What the pose was actually moved by, after the filters and the rejection
@@ -1255,6 +1256,7 @@ private:
   std::vector<double> last_point_count_;
   std::vector<double> last_radial_height_;
   std::vector<double> last_radial_pitch_;
+  std::vector<double> last_radial_pitch_only_;
   double last_photometric_distance_ = 0.0;
   double last_fused_length_ = 0.0;
   // Shortest mean reach any camera had last frame, which is what

@@ -478,6 +478,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
     anchor_settings, std::max<int>(1, static_cast<int>(settings.cameras.size())));
   last_radial_height_.assign(settings.cameras.size(), 0.0);
   last_radial_pitch_.assign(settings.cameras.size(), 0.0);
+  last_radial_pitch_only_.assign(settings.cameras.size(), 0.0);
   camera_travel_.assign(settings.cameras.size(), 0.0);
   camera_solves_.assign(settings.cameras.size(), 0);
   camera_inliers_.assign(settings.cameras.size(), 0.0);
@@ -2113,6 +2114,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       ++camera.radial_terms;
       last_radial_height_[camera.source] = aligned->radial_height;
       last_radial_pitch_[camera.source] = aligned->radial_pitch;
+      last_radial_pitch_only_[camera.source] = aligned->radial_pitch_only;
       if (aligned->radial_reference > 0.0) {
         camera.radial_linear_sum += aligned->radial_linear;
         ++camera.radial_samples;
@@ -3619,6 +3621,7 @@ void Estimator::process_pair()
   update.camera_point_count = last_point_count_;
   update.radial_height = last_radial_height_;
   update.radial_pitch = last_radial_pitch_;
+  update.radial_pitch_only = last_radial_pitch_only_;
   update.photometric_distance = last_photometric_distance_;
   update.fused_length = last_fused_length_;
 
