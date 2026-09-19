@@ -3702,35 +3702,11 @@ void Estimator::process_pair()
     allowance *= std::max(1.0, std::min(since / dt, settings_.max_arrears_frames));
   }
 
-  Eigen::Vector3d twist = Eigen::Vector3d::Zero();
-  const bool rejected = !motion.has_value() || warming_up || dt <= 1e-4 ||
-    std::hypot(motion->x, motion->y) > allowance ||
-    std::abs(motion->yaw) > settings_.max_yaw_per_frame_rad;
-
-  Update update;
-  update.stamp = current_stamp;
-  update.previous_stamp = previous_stamp;
-  update.hops_valid = last_hops_valid_;
-  update.fused_hop = last_fused_hop_;
-  update.camera_hops = last_camera_hops_;
-  update.camera_from_map = last_from_map_;
-  update.camera_condition = last_condition_;
-  update.camera_weak_bearing = last_weak_bearing_;
-  update.camera_height_gain = last_height_gain_;
-  update.camera_pitch_gain = last_pitch_gain_;
-  update.camera_mean_range = last_mean_range_;
-  update.camera_point_count = last_point_count_;
-  update.radial_height = last_radial_height_;
-  update.radial_pitch = last_radial_pitch_;
-  update.radial_pitch_only = last_radial_pitch_only_;
-  update.photometric_distance = last_photometric_distance_;
-  update.fused_length = last_fused_length_;
-
   // The features the ground band threw away, carried as inverse-depth
   // landmarks and asked for the same hop. See landmarks.hpp for why they
   // cannot be placed by the plane and why this is a memory of the plane's
   // scale rather than a second source of it.
-  if (settings_.landmark_hop_gain != 0.0 && motion.has_value()) {
+  if (settings_.landmark_hop_gain != 0.0) {
     for (const auto & entry : solved) {
       if (!entry.has_value() || entry->current_pixels.rows() == 0) {
         continue;
@@ -3757,22 +3733,36 @@ void Estimator::process_pair()
       // The motion from the previous body frame into this one. A point fixed
       // in the world sits at `R (X - t)` after a hop of `t` and a turn of
       // `yaw`, so the rotation is by the turn's negative.
-      const double turn = motion->yaw;
+      // The turn is the gyro's on a filled frame, not zero. Taking zero there
+      // is the same mistake as freezing an unobserved landmark: the vehicle
+      // turned whether or not the road could say so, and a landmark map told
+      // otherwise reads every bearing in the wrong place. Measured, it took the
+      // official rotation metric from 0.49 to 4.60 deg/100m.
+      const double turn = motion.has_value() ? motion->yaw : yaw_delta.value_or(0.0);
       Eigen::Matrix3d rotation;
       rotation << std::cos(turn), std::sin(turn), 0.0,
         -std::sin(turn), std::cos(turn), 0.0,
         0.0, 0.0, 1.0;
-      const Eigen::Vector3d hop(motion->x, motion->y, 0.0);
+      const Eigen::Vector3d hop = motion.has_value()
+        ? Eigen::Vector3d(motion->x, motion->y, 0.0) : Eigen::Vector3d::Zero();
+      // Where the plane failed there is no hop to guess from, so the last one
+      // stands in. That is what the coast would have used anyway; the question
+      // is whether the landmarks can improve on it.
+      Eigen::Vector3d guess = hop;
+      if (!motion.has_value()) {
+        guess = Eigen::Vector3d(last_hop_body_.x(), last_hop_body_.y(), 0.0);
+      }
       int votes = 0;
       if (!landmarks_) {
         LandmarkSettings marks;
         marks.max_disagreement = settings_.landmark_max_disagreement_m;
         marks.converged_fraction = settings_.landmark_converged_fraction;
+        marks.bearing_sigma_rad = settings_.landmark_bearing_sigma_rad;
         landmarks_ = std::make_unique<LandmarkMap>(marks);
       }
       double residual_rms = 0.0;
       const auto solved_hop =
-        landmarks_->solve_hop(bearings, ids, rotation, hop, votes, &residual_rms);
+        landmarks_->solve_hop(bearings, ids, rotation, guess, votes, &residual_rms);
       diagnostics_.landmark_residual_sum += residual_rms;
       {
         // Three readings of the same residual, to separate a convention from a
@@ -3796,23 +3786,73 @@ void Estimator::process_pair()
       diagnostics_.landmark_votes_max = std::max<int64_t>(diagnostics_.landmark_votes_max, votes);
       if (solved_hop.has_value()) {
         ++diagnostics_.landmark_solved;
-        const double length = hop.head<2>().norm();
+        const double length = guess.head<2>().norm();
         if (length > 1e-6) {
           diagnostics_.landmark_ratio_sum += solved_hop->head<2>().norm() / length;
+          // Along and across the hop the plane solved, separately. A magnitude
+          // ratio cannot tell a hop that is too long from one carrying a
+          // spurious sideways component, and the bearings a forward camera
+          // sees are far more sensitive to the second.
+          const Eigen::Vector2d along = guess.head<2>() / length;
+          const Eigen::Vector2d across(-along.y(), along.x());
+          const double a = solved_hop->head<2>().dot(along) / length;
+          const double b = solved_hop->head<2>().dot(across) / length;
+          diagnostics_.landmark_along_sum += a;
+          diagnostics_.landmark_across_sum += b;
+          diagnostics_.landmark_along_sq += a * a;
+          diagnostics_.landmark_across_sq += b * b;
         }
-        if (settings_.landmark_hop_gain > 0.0) {
+        if (settings_.landmark_hop_gain > 0.0 && motion.has_value()) {
           const double gain = std::min(settings_.landmark_hop_gain, 1.0);
           motion->x += gain * (solved_hop->x() - motion->x);
           motion->y += gain * (solved_hop->y() - motion->y);
+        } else if (settings_.landmark_fill_gaps && !motion.has_value()) {
+          // The whole point of carrying them: a hop on a frame the road could
+          // not answer. The turn is the gyro's either way.
+          PlanarMotion filled;
+          filled.x = solved_hop->x();
+          filled.y = solved_hop->y();
+          filled.yaw = turn;
+          filled.inliers = votes;
+          filled.scale = 1.0;
+          motion = filled;
+          ++diagnostics_.landmark_filled;
         }
       }
-      landmarks_->observe(bearings, ids, rotation, Eigen::Vector3d(motion->x, motion->y, 0.0));
+      landmarks_->observe(
+        bearings, ids, rotation,
+        motion.has_value() ? Eigen::Vector3d(motion->x, motion->y, 0.0) : guess);
       diagnostics_.landmarks_held = landmarks_->size();
       diagnostics_.landmarks_converged = landmarks_->converged();
       diagnostics_.landmark_depth = landmarks_->median_depth();
       break;
     }
   }
+
+  Eigen::Vector3d twist = Eigen::Vector3d::Zero();
+  const bool rejected = !motion.has_value() || warming_up || dt <= 1e-4 ||
+    std::hypot(motion->x, motion->y) > allowance ||
+    std::abs(motion->yaw) > settings_.max_yaw_per_frame_rad;
+
+  Update update;
+  update.stamp = current_stamp;
+  update.previous_stamp = previous_stamp;
+  update.hops_valid = last_hops_valid_;
+  update.fused_hop = last_fused_hop_;
+  update.camera_hops = last_camera_hops_;
+  update.camera_from_map = last_from_map_;
+  update.camera_condition = last_condition_;
+  update.camera_weak_bearing = last_weak_bearing_;
+  update.camera_height_gain = last_height_gain_;
+  update.camera_pitch_gain = last_pitch_gain_;
+  update.camera_mean_range = last_mean_range_;
+  update.camera_point_count = last_point_count_;
+  update.radial_height = last_radial_height_;
+  update.radial_pitch = last_radial_pitch_;
+  update.radial_pitch_only = last_radial_pitch_only_;
+  update.photometric_distance = last_photometric_distance_;
+  update.fused_length = last_fused_length_;
+
 
   if (rejected) {
     ++diagnostics_.motion_failures;

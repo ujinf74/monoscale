@@ -1567,7 +1567,7 @@ int main(int argc, char ** argv)
     }
     if (diagnostics.landmark_asked > 0) {
       std::printf(
-        "landmarks: %ld held, %ld converged, answered %ld of %ld, votes mean %.1f max %ld, residual %.5f (전치 %.5f, 무회전 %.5f, 무이동 %.5f) rad, ratio %.4f, 깊이 중앙 %.1f m\n",
+        "landmarks: %ld held, %ld converged, answered %ld of %ld, votes mean %.1f max %ld, residual %.5f (전치 %.5f, 무회전 %.5f, 무이동 %.5f) rad, ratio %.4f (앞 %.4f±%.3f 옆 %+.4f±%.3f), 깊이 중앙 %.1f m\n",
         diagnostics.landmarks_held, diagnostics.landmarks_converged,
         diagnostics.landmark_solved, diagnostics.landmark_asked,
         diagnostics.landmark_asked > 0
@@ -1586,6 +1586,20 @@ int main(int argc, char ** argv)
         diagnostics.landmark_solved > 0
         ? diagnostics.landmark_ratio_sum / static_cast<double>(diagnostics.landmark_solved)
         : 0.0,
+        diagnostics.landmark_solved > 0
+        ? diagnostics.landmark_along_sum / static_cast<double>(diagnostics.landmark_solved) : 0.0,
+        diagnostics.landmark_solved > 0
+        ? std::sqrt(std::max(
+            diagnostics.landmark_along_sq / static_cast<double>(diagnostics.landmark_solved) -
+            std::pow(diagnostics.landmark_along_sum /
+              static_cast<double>(diagnostics.landmark_solved), 2), 0.0)) : 0.0,
+        diagnostics.landmark_solved > 0
+        ? diagnostics.landmark_across_sum / static_cast<double>(diagnostics.landmark_solved) : 0.0,
+        diagnostics.landmark_solved > 0
+        ? std::sqrt(std::max(
+            diagnostics.landmark_across_sq / static_cast<double>(diagnostics.landmark_solved) -
+            std::pow(diagnostics.landmark_across_sum /
+              static_cast<double>(diagnostics.landmark_solved), 2), 0.0)) : 0.0,
         diagnostics.landmark_depth);
     }
     if (diagnostics.inertial_scale_samples > 0) {

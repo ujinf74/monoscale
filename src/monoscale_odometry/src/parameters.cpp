@@ -304,6 +304,9 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_double("landmark_max_disagreement_m", 0.5);
   settings.landmark_converged_fraction =
     declare_double("landmark_converged_fraction", 0.25);
+  settings.landmark_bearing_sigma_rad =
+    declare_double("landmark_bearing_sigma_rad", 0.002);
+  settings.landmark_fill_gaps = declare_bool("landmark_fill_gaps", false);
   settings.obstacle_slip_patience = declare_int("obstacle_slip_patience", 30);
   // The occupancy grid is the deliverable, not part of the pose loop, and it
   // cost more per frame than the odometry it rode along with. A parking grid

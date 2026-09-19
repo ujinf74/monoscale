@@ -383,6 +383,19 @@ struct EstimatorSettings
   // to 0.25 s/d, which at a 0.8 m hop and 20 m is 0.57 degrees -- the size of
   // the residual this leaves.
   double landmark_converged_fraction = 0.25;
+  // What a bearing observation is actually worth, as an angle.
+  //
+  // One pixel is what the detector localises to and it is not what this filter
+  // sees: the prediction it is compared against is driven by the plane's hop,
+  // and that hop carries 15 to 35 per cent noise. Measured, the innovations run
+  // 0.018 to 0.038 rad where one pixel is 0.002, so a filter told the smaller
+  // number collapses its variance a hundredfold too fast -- and an
+  // over-confident inverse depth is a depth biased long, because the mean of
+  // 1/rho exceeds 1/mean(rho) by the variance over rho squared.
+  double landmark_bearing_sigma_rad = 0.002;
+  // Let the landmarks supply a hop on the frames the ground solve could not.
+  // This is what carrying them is for; everything above is the diagnostic.
+  bool landmark_fill_gaps = false;
 
 
 
@@ -1129,6 +1142,11 @@ struct Diagnostics
   double landmark_residual_none = 0.0;
   double landmark_residual_still = 0.0;
   double landmark_depth = 0.0;
+  double landmark_along_sum = 0.0;
+  double landmark_across_sum = 0.0;
+  int64_t landmark_filled = 0;
+  double landmark_along_sq = 0.0;
+  double landmark_across_sq = 0.0;
   double imu_scale = 1.0;
   // The three moments of (vision velocity change, accelerometer velocity
   // change). Both regressions and the orthogonal one fall out of these, and so
