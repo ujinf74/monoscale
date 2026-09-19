@@ -1521,6 +1521,39 @@ private:
       }
     }
 
+    // The same warp, from the homography the last pair measured for itself.
+    //
+    // The block above needs a step from the photometric search, and where that
+    // search is bracketed around its own last answer it can sit at 0.28 m on a
+    // drive whose hop is 0.77 -- a homography built from that adds deformation
+    // rather than removing it. `state.plane_motion` is a RANSAC fit to the
+    // previous pair's own correspondences, so it cannot latch, and it is the
+    // deformation itself rather than a model of it.
+    //
+    // It does not work either, and the reason is structural rather than a
+    // number. There is one homography and most of the frame is not on its
+    // plane: a detection grid over the whole image leaves the majority of
+    // features on buildings and parked cars, and warping them with the road's
+    // motion moves them somewhere they never went. Sequence 10 reads 4.16%
+    // against 2.63% with the warp off, and the sightings reaching 5-8 frames
+    // fall from 112 to 73 -- the same direction the photometric warp went.
+    // What the geometry actually asks for is a warp per feature, and the flow
+    // this calls has no input for one.
+    if (state.predicted.empty() && predict_by_plane_ && motion_warp_ &&
+      !state.plane_motion.empty() && !state.points.empty() &&
+      !state.previous_gray.empty() && state.previous_gray.size() == gray.size())
+    {
+      std::vector<cv::Point2f> moved;
+      cv::perspectiveTransform(state.points, moved, state.plane_motion);
+      cv::Mat warped;
+      cv::warpPerspective(
+        state.previous_gray, warped, state.plane_motion, gray.size(),
+        cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+      state.predicted = moved;
+      cv::buildOpticalFlowPyramid(
+        warped, state.warped_pyramid, cv::Size(window_, window_), levels_);
+    }
+
     if (cuda_active_) {
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
       if (have_previous && !state.previous_device_pyramid.empty()) {
@@ -1792,11 +1825,34 @@ private:
     if (predict_by_plane_ && previous_points.size() >= 12 &&
       previous_points.size() == current_points.size())
     {
-      // RANSAC because the horizon and anything standing up are not on the
-      // plane; they are the minority and the ground is the consensus.
-      cv::Mat fitted = cv::findHomography(previous_points, current_points, cv::RANSAC, 3.0);
-      if (!fitted.empty() && fitted.rows == 3 && fitted.cols == 3) {
-        state.plane_motion = fitted;
+      // Fitted to the road region alone, not to every tracked feature.
+      //
+      // The note here used to say the ground is the consensus and the things
+      // standing up are the minority. On this rig it is the other way round: a
+      // detection grid spread over the whole frame puts two thousand features
+      // on buildings, trees and parked cars and leaves ninety to two hundred on
+      // the road, so RANSAC's consensus is the distant background. Its
+      // homography is nearly the rotation's, and warping a frame with it leaves
+      // the ground further out of register than it started -- measured, it took
+      // the sightings that reached 5-8 frames from 112 down to 65.
+      std::vector<cv::Point2f> from;
+      std::vector<cv::Point2f> to;
+      const double x0 = road_roi_[0] * gray.cols;
+      const double y0 = road_roi_[1] * gray.rows;
+      const double x1 = road_roi_[2] * gray.cols;
+      const double y1 = road_roi_[3] * gray.rows;
+      for (size_t i = 0; i < current_points.size(); ++i) {
+        const cv::Point2f & q = current_points[i];
+        if (q.x >= x0 && q.x <= x1 && q.y >= y0 && q.y <= y1) {
+          from.push_back(previous_points[i]);
+          to.push_back(current_points[i]);
+        }
+      }
+      if (from.size() >= 12) {
+        cv::Mat fitted = cv::findHomography(from, to, cv::RANSAC, 3.0);
+        if (!fitted.empty() && fitted.rows == 3 && fitted.cols == 3) {
+          state.plane_motion = fitted;
+        }
       }
     }
     state.points = current_points;
