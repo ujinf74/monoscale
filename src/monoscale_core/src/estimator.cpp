@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace monoscale
@@ -68,7 +69,13 @@ FusionModel fusion_model_from_name(const std::string & name)
   if (name == "msckf6") {
     return FusionModel::Msckf6;
   }
-  return FusionModel::Displacement;
+  if (name == "displacement") {
+    return FusionModel::Displacement;
+  }
+  // Loudly, because Displacement is also the default: a silent fallback makes a
+  // typed `velocty` indistinguishable from asking for the default, and the run
+  // that results is a different estimator wearing the same command line.
+  throw std::invalid_argument("unknown fusion_model: " + name);
 }
 
 struct Estimator::Frame
@@ -205,6 +212,10 @@ struct Estimator::Camera
   double esm_pitch_since_solve = 0.0;
   double esm_roll_since_solve = 0.0;
   bool esm_valid = false;
+  // Sticky for the whole interval, the way `photometric_broken` is: one frame
+  // that did not solve leaves a hole in the sum, and the next frame that does
+  // solve cannot fill it. Without this the void lasts exactly one frame.
+  bool esm_broken = false;
   // The tilt those increments integrate to, leaked toward the absolute source.
   double esm_tilt_pitch = 0.0;
   double esm_tilt_roll = 0.0;
@@ -897,7 +908,7 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
     camera.esm_roll_since_solve += incoming.esm_roll;
     camera.esm_valid = true;
   } else {
-    camera.esm_valid = false;
+    camera.esm_broken = true;
   }
 
   Frame frame;
@@ -3563,7 +3574,7 @@ void Estimator::process_pair()
         target_roll = held->band_roll;
         ++diagnostics_.consumer_fed[Diagnostics::kBandAttitude];
       }
-      if (held->esm_valid) {
+      if (held->esm_valid && !held->esm_broken) {
         ++diagnostics_.consumer_fed[Diagnostics::kEsmAttitude];
         held->esm_tilt_pitch += held->esm_pitch_since_solve;
         held->esm_tilt_roll += held->esm_roll_since_solve;
@@ -3582,6 +3593,7 @@ void Estimator::process_pair()
     held->esm_pitch_since_solve = 0.0;
     held->esm_roll_since_solve = 0.0;
     held->esm_valid = false;
+    held->esm_broken = false;
   }
 
   // The lateral each camera's own scale error contributes through the turn,
