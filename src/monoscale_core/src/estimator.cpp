@@ -3726,6 +3726,94 @@ void Estimator::process_pair()
   update.photometric_distance = last_photometric_distance_;
   update.fused_length = last_fused_length_;
 
+  // The features the ground band threw away, carried as inverse-depth
+  // landmarks and asked for the same hop. See landmarks.hpp for why they
+  // cannot be placed by the plane and why this is a memory of the plane's
+  // scale rather than a second source of it.
+  if (settings_.landmark_hop_gain != 0.0 && motion.has_value()) {
+    for (const auto & entry : solved) {
+      if (!entry.has_value() || entry->current_pixels.rows() == 0) {
+        continue;
+      }
+      const Solved & seen = *entry;
+      std::vector<Eigen::Index> off;
+      for (Eigen::Index i = 0; i < seen.current_pixels.rows(); ++i) {
+        if (i >= seen.ground_valid.size() || !seen.ground_valid(i)) {
+          off.push_back(i);
+        }
+      }
+      if (off.size() < static_cast<size_t>(8)) {
+        continue;
+      }
+      Points2 pixels(static_cast<Eigen::Index>(off.size()), 2);
+      std::vector<int64_t> ids(off.size());
+      for (size_t k = 0; k < off.size(); ++k) {
+        pixels(static_cast<Eigen::Index>(k), 0) = seen.current_pixels(off[k], 0);
+        pixels(static_cast<Eigen::Index>(k), 1) = seen.current_pixels(off[k], 1);
+        ids[k] = seen.track_ids(off[k]);
+      }
+      const Camera & camera = *cameras_[static_cast<size_t>(&entry - &solved[0])];
+      const auto bearings = pixels_to_bearings(pixels, camera.model);
+      // The motion from the previous body frame into this one. A point fixed
+      // in the world sits at `R (X - t)` after a hop of `t` and a turn of
+      // `yaw`, so the rotation is by the turn's negative.
+      const double turn = motion->yaw;
+      Eigen::Matrix3d rotation;
+      rotation << std::cos(turn), std::sin(turn), 0.0,
+        -std::sin(turn), std::cos(turn), 0.0,
+        0.0, 0.0, 1.0;
+      const Eigen::Vector3d hop(motion->x, motion->y, 0.0);
+      int votes = 0;
+      if (!landmarks_) {
+        LandmarkSettings marks;
+        marks.max_disagreement = settings_.landmark_max_disagreement_m;
+        marks.converged_fraction = settings_.landmark_converged_fraction;
+        landmarks_ = std::make_unique<LandmarkMap>(marks);
+      }
+      double residual_rms = 0.0;
+      const auto solved_hop =
+        landmarks_->solve_hop(bearings, ids, rotation, hop, votes, &residual_rms);
+      diagnostics_.landmark_residual_sum += residual_rms;
+      {
+        // Three readings of the same residual, to separate a convention from a
+        // state: the rotation as handed in, its transpose, and none at all.
+        int scratch = 0;
+        double alt = 0.0;
+        landmarks_->solve_hop(
+          bearings, ids, rotation.transpose(), hop, scratch, &alt);
+        diagnostics_.landmark_residual_alt += alt;
+        double none = 0.0;
+        landmarks_->solve_hop(
+          bearings, ids, Eigen::Matrix3d::Identity(), hop, scratch, &none);
+        diagnostics_.landmark_residual_none += none;
+        double still = 0.0;
+        landmarks_->solve_hop(
+          bearings, ids, rotation, Eigen::Vector3d::Zero(), scratch, &still);
+        diagnostics_.landmark_residual_still += still;
+      }
+      ++diagnostics_.landmark_asked;
+      diagnostics_.landmark_votes_sum += votes;
+      diagnostics_.landmark_votes_max = std::max<int64_t>(diagnostics_.landmark_votes_max, votes);
+      if (solved_hop.has_value()) {
+        ++diagnostics_.landmark_solved;
+        const double length = hop.head<2>().norm();
+        if (length > 1e-6) {
+          diagnostics_.landmark_ratio_sum += solved_hop->head<2>().norm() / length;
+        }
+        if (settings_.landmark_hop_gain > 0.0) {
+          const double gain = std::min(settings_.landmark_hop_gain, 1.0);
+          motion->x += gain * (solved_hop->x() - motion->x);
+          motion->y += gain * (solved_hop->y() - motion->y);
+        }
+      }
+      landmarks_->observe(bearings, ids, rotation, Eigen::Vector3d(motion->x, motion->y, 0.0));
+      diagnostics_.landmarks_held = landmarks_->size();
+      diagnostics_.landmarks_converged = landmarks_->converged();
+      diagnostics_.landmark_depth = landmarks_->median_depth();
+      break;
+    }
+  }
+
   if (rejected) {
     ++diagnostics_.motion_failures;
     if (!motion.has_value()) {

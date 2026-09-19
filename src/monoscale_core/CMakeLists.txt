@@ -22,6 +22,7 @@ add_library(monoscale_core SHARED
   src/fusion.cpp
   src/inertial.cpp
   src/attitude.cpp
+  src/landmarks.cpp
   src/estimator.cpp
 )
 target_include_directories(monoscale_core PUBLIC

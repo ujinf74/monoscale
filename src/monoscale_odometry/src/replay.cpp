@@ -1565,6 +1565,29 @@ int main(int argc, char ** argv)
         outcome.radial_only_sum / static_cast<double>(outcome.radial_pitch_n) * 180.0 / M_PI,
         outcome.radial_pitch_n);
     }
+    if (diagnostics.landmark_asked > 0) {
+      std::printf(
+        "landmarks: %ld held, %ld converged, answered %ld of %ld, votes mean %.1f max %ld, residual %.5f (전치 %.5f, 무회전 %.5f, 무이동 %.5f) rad, ratio %.4f, 깊이 중앙 %.1f m\n",
+        diagnostics.landmarks_held, diagnostics.landmarks_converged,
+        diagnostics.landmark_solved, diagnostics.landmark_asked,
+        diagnostics.landmark_asked > 0
+        ? static_cast<double>(diagnostics.landmark_votes_sum) /
+          static_cast<double>(diagnostics.landmark_asked) : 0.0,
+        diagnostics.landmark_votes_max,
+        diagnostics.landmark_asked > 0
+        ? diagnostics.landmark_residual_sum / static_cast<double>(diagnostics.landmark_asked)
+        : 0.0,
+        diagnostics.landmark_asked > 0
+        ? diagnostics.landmark_residual_alt / static_cast<double>(diagnostics.landmark_asked) : 0.0,
+        diagnostics.landmark_asked > 0
+        ? diagnostics.landmark_residual_none / static_cast<double>(diagnostics.landmark_asked) : 0.0,
+        diagnostics.landmark_asked > 0
+        ? diagnostics.landmark_residual_still / static_cast<double>(diagnostics.landmark_asked) : 0.0,
+        diagnostics.landmark_solved > 0
+        ? diagnostics.landmark_ratio_sum / static_cast<double>(diagnostics.landmark_solved)
+        : 0.0,
+        diagnostics.landmark_depth);
+    }
     if (diagnostics.inertial_scale_samples > 0) {
       std::printf(
         "inertial scale: %.5f from %ld stretches  uu=%.2f uw=%.2f ww=%.2f  frame offset %+.1f deg\n",

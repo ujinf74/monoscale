@@ -30,6 +30,7 @@
 #include "monoscale_core/fusion.hpp"
 #include "monoscale_core/geometry.hpp"
 #include "monoscale_core/inertial.hpp"
+#include "monoscale_core/landmarks.hpp"
 
 namespace monoscale
 {
@@ -371,6 +372,17 @@ struct EstimatorSettings
   // that height, instead of at the plane crossing that is not where it stands.
   // See the note at the placement. Zero anchors are off the plane without it.
   bool anchor_off_plane = false;
+  // Carry the features the ground band throws away as inverse-depth landmarks,
+  // and let them answer for the hop where the road cannot. See landmarks.hpp.
+  // Zero is off; 1 takes the landmarks' hop outright where they have one.
+  double landmark_hop_gain = 0.0;
+  // How far the landmarks' hop may sit from the plane's before it is refused.
+  double landmark_max_disagreement_m = 0.5;
+  // How well a landmark's depth has to be known before it may vote, as a
+  // fraction of the inverse depth. A landmark known to 25% predicts a bearing
+  // to 0.25 s/d, which at a 0.8 m hop and 20 m is 0.57 degrees -- the size of
+  // the residual this leaves.
+  double landmark_converged_fraction = 0.25;
 
 
 
@@ -1102,6 +1114,21 @@ struct Diagnostics
   // How many accelerating stretches the inertial scale learner could use, and
   // where it left the ground scale.
   int64_t inertial_scale_samples = 0;
+  // How the off-plane landmarks are doing: how many are held, how many know
+  // their depth well enough to vote, and how often they could answer for a hop
+  // against how often they were asked.
+  int64_t landmarks_held = 0;
+  int64_t landmarks_converged = 0;
+  int64_t landmark_solved = 0;
+  int64_t landmark_asked = 0;
+  double landmark_ratio_sum = 0.0;
+  int64_t landmark_votes_sum = 0;
+  int64_t landmark_votes_max = 0;
+  double landmark_residual_sum = 0.0;
+  double landmark_residual_alt = 0.0;
+  double landmark_residual_none = 0.0;
+  double landmark_residual_still = 0.0;
+  double landmark_depth = 0.0;
   double imu_scale = 1.0;
   // The three moments of (vision velocity change, accelerometer velocity
   // change). Both regressions and the orthogonal one fall out of these, and so
@@ -1381,6 +1408,7 @@ private:
   // supplied one. Identity is the isotropic noise every recorded number
   // came from.
   double pose_z_ = 0.0;
+  std::unique_ptr<LandmarkMap> landmarks_;
   Eigen::Matrix2d last_hop_shape_ = Eigen::Matrix2d::Identity();
   bool last_hop_shape_valid_ = false;
   // The last hop this stack accepted, and how long it took: what a frame
