@@ -1049,9 +1049,15 @@ void Estimator::ingest_imu(const ImuSample & measured)
       // -- puts the prediction in the body frame while the state is in the
       // world one, and the two then disagree by however far the vehicle has
       // turned. On a straight they coincide, which is why it went unnoticed.
+      // The propagator is already handed the orientation with the datum taken
+      // out, so what comes back is in the estimator's world and not the
+      // instrument's. Rotating by the absolute yaw here would over-turn it by
+      // that same datum -- the body frame is the estimator's world turned by
+      // the estimator's heading, which is `yaw - datum`.
       const double datum = imu_yaw_datum_.value_or(yaw);
-      const double c = std::cos(yaw);
-      const double s = std::sin(yaw);
+      const double heading = std::remainder(yaw - datum, 2.0 * M_PI);
+      const double c = std::cos(heading);
+      const double s = std::sin(heading);
       const Eigen::Vector2d body(
         c * acceleration.x() + s * acceleration.y(),
         -s * acceleration.x() + c * acceleration.y());
@@ -1062,11 +1068,12 @@ void Estimator::ingest_imu(const ImuSample & measured)
       // measurement side hands it `R(pose.yaw) * motion_body`. The two differ
       // by a fixed rotation of yaw0, which is 89.8 deg on the Town10HD spawn
       // and 0.0 on the Town01 one.
-      const double cd = std::cos(datum);
-      const double sd = std::sin(datum);
-      acceleration = Eigen::Vector2d(
-        cd * acceleration.x() + sd * acceleration.y(),
-        -sd * acceleration.x() + cd * acceleration.y());
+      // A second rotation by the datum stood here. It was right while the
+      // propagator integrated in the instrument's world; once the orientation
+      // handed to `add_sample` had the datum composed out of it, this turned
+      // the acceleration by yaw0 twice. The comment below still describes the
+      // frames correctly -- it is the rotation that became redundant, not the
+      // argument for it.
       // The same screen the propagator applies, kept in the body frame so the
       // filter that owns its own attitude is not handed a vector somebody
       // else's attitude decided about. Gravity is along z on a road vehicle, so
@@ -1091,7 +1098,7 @@ void Estimator::ingest_imu(const ImuSample & measured)
           // bias rotated by the absolute yaw is wrong by yaw0 and the bias
           // state cannot converge. Same error as the acceleration had, one
           // line down.
-          std::remainder(yaw - datum, 2.0 * M_PI)});
+          heading});
       while (imu_window_.size() > 8000) {
         imu_window_.pop_front();
       }
@@ -1532,7 +1539,7 @@ void Estimator::replay_inertial(
     if (sample.stamp <= from || sample.stamp > to) {
       continue;
     }
-    double span = std::min(sample.dt, 0.1);
+    double span = std::min(sample.dt, settings_.imu_max_gap_sec);
     if (first) {
       span = std::min(span, sample.stamp - from);
       first = false;
@@ -2335,6 +2342,10 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     double solve_srr = 0.0;
     double solve_se = 0.0;
     double solve_sre = 0.0;
+    // Which way the band sits against the travel. A rearward mount watches its
+    // ground recede, so the same tilt error moves its hop the other way while
+    // the residual it leaves, measured along the ray, does not change sign.
+    double solve_forward = 0.0;
     for (Eigen::Index i = 0; i < paired; ++i) {
       if (!estimate->inliers(i)) {
         continue;
@@ -2357,6 +2368,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         solve_srr += range * range;
         solve_se += radial;
         solve_sre += range * radial;
+        solve_forward += (rx * estimate->motion.x + ry * estimate->motion.y) / range;
         camera.pair_n += 1.0;
         camera.pair_sr += range;
         camera.pair_srr += range * range;
@@ -2400,7 +2412,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       if (std::abs(d) > 1e-9) {
         const double slope = (solve_n * solve_sre - solve_sr * solve_se) / d;
         const double mean_range = solve_sr / solve_n;
-        const double excess = slope * mean_range;
+        const double excess = slope * mean_range * (solve_forward < 0.0 ? -1.0 : 1.0);
         const double length = std::hypot(estimate->motion.x, estimate->motion.y);
         if (std::isfinite(excess) && length > 1e-6 &&
           std::abs(excess) < 0.5 * length)
@@ -3501,6 +3513,21 @@ void Estimator::process_pair()
   // what stops it has to be a measurement of the angle itself rather than of
   // its rate. Where no absolute source is enabled the leak goes to level,
   // which for a road vehicle is the next best statement available.
+  // Armed outside the switch that consumes them, and once a frame.
+  //
+  // These three counters exist to catch a consumer that is quietly switched
+  // off, which is the failure `road_step_esm` hid for weeks at twice the ATE.
+  // They were nested inside `if (esm_attitude)`, which is false in deployment,
+  // so the one consumer that IS deployed -- `anchor_attitude` -- never armed
+  // and the detector was silent about itself. They were also incremented
+  // inside the camera loop while the first was outside it, which reads double
+  // on a two-camera rig.
+  if (settings_.anchor_attitude) {
+    ++diagnostics_.consumer_armed[Diagnostics::kAnchorAttitude];
+  }
+  if (settings_.band_attitude) {
+    ++diagnostics_.consumer_armed[Diagnostics::kBandAttitude];
+  }
   if (settings_.esm_attitude) {
     const double leak = settings_.esm_attitude_leak_sec > 0.0 && dt > 0.0
       ? std::min(1.0, dt / settings_.esm_attitude_leak_sec) : 1.0;
@@ -3508,12 +3535,6 @@ void Estimator::process_pair()
     for (auto & held : cameras_) {
       double target_pitch = 0.0;
       double target_roll = 0.0;
-      if (settings_.anchor_attitude) {
-        ++diagnostics_.consumer_armed[Diagnostics::kAnchorAttitude];
-      }
-      if (settings_.band_attitude) {
-        ++diagnostics_.consumer_armed[Diagnostics::kBandAttitude];
-      }
       if (settings_.anchor_attitude && held->anchor_ready) {
         target_pitch = held->anchor_pitch;
         target_roll = held->anchor_roll;
@@ -3707,11 +3728,42 @@ void Estimator::process_pair()
     // satisfied by moving the map -- the accelerometer does not care what the
     // anchors think. This is the observability Ground-VIO gets from its
     // non-ground features, taken from the only other metric source we have.
-    // A scale learner stood here, reading the displacement filter's own
-    // innovation. It could never run: the block is inside that filter's update
-    // and both deployed rigs are `fusion_model: velocity`, so `imu_scale_gain`
-    // had no reachable code at all. `inertial_scale_gain` measures the same
-    // quantity from the propagator directly and does not need a filter.
+    Eigen::Matrix2d world_shape = Eigen::Matrix2d::Identity();
+    if (last_hop_shape_valid_) {
+      Eigen::Matrix2d turn_matrix;
+      turn_matrix << c, -s, s, c;
+      world_shape = turn_matrix * last_hop_shape_ * turn_matrix.transpose();
+    }
+    const Eigen::Matrix2d * shape_ptr = last_hop_shape_valid_ ? &world_shape : nullptr;
+    if (!displacement_filter_->update(world, motion->inliers, extra, spread, shape_ptr)) {
+      ++diagnostics_.filter_rejections;
+    }
+    // The scale this filter's own innovation carries.
+    //
+    // Unreachable on both deployed rigs -- they are `fusion_model: velocity`
+    // and this sits inside the displacement branch -- and it was deleted for
+    // that reason, which was wrong twice over. The deletion took the
+    // measurement update above with it, and neither rig could show that: a
+    // filter left predicting from the accelerometer with nothing correcting it
+    // is invisible until someone runs the code default, which is Displacement.
+    // And `inertial_scale_gain`, which was to have replaced this, lives in the
+    // velocity branch, so removing this left a Displacement consumer with no
+    // scale learner at all. Unreachable in one configuration is not dead.
+    if (settings_.imu_scale_gain != 0.0) {
+      const auto & record = displacement_filter_->last_update();
+      if (record.has_value() && record->accepted) {
+        const double reach = record->predicted.norm();
+        if (reach > settings_.imu_scale_min_hop_m) {
+          const double relative =
+            record->innovation.dot(record->predicted) / (reach * reach);
+          if (std::isfinite(relative)) {
+            const double step =
+              std::clamp(settings_.imu_scale_gain * relative, -0.005, 0.005);
+            imu_scale_ = std::clamp(imu_scale_ * (1.0 + step), 0.9, 1.1);
+          }
+        }
+      }
+    }
     if (const auto & record = displacement_filter_->last_update(); record.has_value()) {
       // Two degrees of freedom, so an honest covariance averages 2. Below that
       // the filter is claiming less certainty than it has.

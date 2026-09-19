@@ -260,6 +260,16 @@ struct EstimatorSettings
   // The observable is sound and the baseline is too short. Accumulating the
   // velocity change over a braking event rather than over one solve interval
   // grows the signal and leaves the vision noise where it is.
+  // The same scale, read through the displacement filter's own innovation.
+  //
+  // It cannot run on a `velocity` rig, which both deployed configurations are,
+  // and `inertial_scale_gain` below covers that case without needing a filter
+  // at all. It is kept because the cover is not mutual: the propagator path
+  // sits in the velocity branch, so a consumer running the code default --
+  // `fusion_model` is Displacement -- has this and nothing else.
+  double imu_scale_gain = 0.0;
+  // Hops shorter than this carry more noise than signal in that ratio.
+  double imu_scale_min_hop_m = 0.05;
   double inertial_scale_gain = 0.0;
   // How many solves the accelerometer is integrated over before the pair is
   // read out.
@@ -476,6 +486,10 @@ struct EstimatorSettings
   // repeat spread it was meant to bring down goes to 2.05-4.70x against 2.17.
   // Sharing one scale between the cameras instead of one each is worse again
   // (0.2135 at 2.0), so it is not the two-camera weighting. Left at 0.
+  // Deployed at 1.0, and the note that used to sit here said it loses and was
+  // left at zero. That note is stale: measured over nine KITTI sequences the
+  // official translation metric reads 5.294% at 1.0 and 5.743% at 0.0. The
+  // configuration was right and the comment was not.
   double softness_from_residual = 0.0;
   // Solve both cameras' ground points together instead of solving each camera
   // apart and averaging the two answers. Their points are already in base_link

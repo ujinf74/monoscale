@@ -221,6 +221,12 @@ void triangulate_temporal_points(
   double max_distance, Points3 & points_out, Mask & valid_out);
 
 // Project ground points, given in base_link, back into the image.
+// No caller outside `predict_ground_pixels`, which has none of its own. Kept
+// rather than removed -- a projection is a capability and the header's note on
+// what dropping it cost is about a different mechanism -- but read it as
+// unused, and note that it is not the inverse of `pixels_to_ground`: that one
+// undistorts an equidistant lens to a pinhole and this one does not put the
+// projection back.
 Points2 project_ground_to_pixels(const Points2 & points_xy, const CameraModel & model);
 
 // Where ground features should land after the vehicle moves by `motion`.

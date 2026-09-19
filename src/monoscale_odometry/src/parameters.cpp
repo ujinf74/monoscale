@@ -243,6 +243,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.solve_max_distance_m = declare_double("solve_max_distance_m", 0.0);
   settings.solve_min_distance_m = declare_double("solve_min_distance_m", 0.0);
   settings.anchor_max_range_m = declare_double("anchor_max_range_m", 0.0);
+  settings.imu_scale_gain = declare_double("imu_scale_gain", 0.0);
+  settings.imu_scale_min_hop_m = declare_double("imu_scale_min_hop_m", 0.05);
   settings.inertial_scale_gain = declare_double("inertial_scale_gain", 0.0);
   settings.inertial_scale_window = declare_int("inertial_scale_window", 1);
   settings.inertial_scale_excitation_m_s =
