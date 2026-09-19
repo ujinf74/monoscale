@@ -1872,8 +1872,10 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // than it was chosen to be, admitting matches it was put there to refuse --
   // so the further the learner pushes the blunter the instrument it pushes on,
   // which is why giving it more room cost seq08 8.29% -> 9.01%.
-  const double learned_scale = cameras_.empty()
-    ? 1.0 : cameras_.front()->range_scale_learned * imu_scale_;
+  // This camera's own learned scale, not the first camera's. They are the same
+  // number on a single-camera rig, which is every KITTI run, so the difference
+  // only appears on a rig that has more than one.
+  const double learned_scale = camera.range_scale_learned * imu_scale_;
   const double gate = (settings_.ground_ransac_threshold_m +
     settings_.ground_rotation_threshold_m * std::abs(*yaw_for_solve)) *
     (learned_scale > 1e-6 ? learned_scale : 1.0);
