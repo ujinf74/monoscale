@@ -1880,6 +1880,83 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     settings_.ground_rotation_threshold_m * std::abs(*yaw_for_solve)) *
     (learned_scale > 1e-6 ? learned_scale : 1.0);
 
+  // Points that did not move as far as the vehicle did are not on the road.
+  //
+  // The fit's own per-point offset is `previous - R(yaw) current`, and for a
+  // point lying on the road that offset IS the translation -- the turn is
+  // already taken out of it, so every road point in one solve carries the same
+  // offset whatever its position in the patch. A point that keeps station with
+  // the camera carries zero instead, and a vehicle driving ahead of or behind
+  // this one is exactly that: a large, textured, coherent set of zeros sitting
+  // in the middle of the band.
+  //
+  // Measured on the Ford sample's clear stretch, where a car runs ahead and
+  // another behind: pushing the near edge out past where they sit, to 20 m,
+  // takes the drift from 38.7% to 12.6% and throws away two thirds of the
+  // solves to do it. The band is not the right instrument for this -- the
+  // points are, and this is what distinguishes them.
+  //
+  // One-sided on purpose. A point that moved further than the hop may be a
+  // kerb, a bad match, or a static obstacle standing above the plane, and the
+  // fit already has a threshold for those. A point that moved far less than
+  // the hop cannot be on the road the vehicle just drove over.
+  //
+  // The reach it is judged against has to come from outside this solve, and
+  // from outside the last one too. `last_fused_length_` was the obvious choice
+  // and it is a positive feedback: in the sample's jam the estimator's own hop
+  // already reads 1.85x long, so the floor built from it rejects the slow
+  // points that would have corrected it and the stretch goes from 52.3% drift
+  // to 121.9%. A gate fed by the quantity it is protecting protects the error.
+  //
+  // `expected_hop_` is the inertial propagation carried on the fused velocity
+  // and would be that reach, but it is empty here on Ford from the first frame
+  // to the last -- the velocity filter never settles on that rig -- so wiring
+  // this to it turns the whole test off rather than making it safe.
+  //
+  // So it stands on `last_fused_length_` and is off by default. On the Ford
+  // sample's clear stretch it is worth a great deal (43.7% drift to 10.1% at
+  // 0.6, hop bias -31.5% to -2.3%) and on the jam it is worth less than
+  // nothing. Until there is a reach that vision does not set, that is what
+  // this is: an instrument for a stretch where the hop is known to be honest,
+  // not a default.
+  //
+  // Half the hop is the decision boundary, not a tuned number: it is where a
+  // point is as close to "moved with the road" as it is to "did not move", so
+  // anything below it is the better fit to standing still. Above it the test
+  // stops rejecting and starts selecting -- 0.7 and 0.8 take the same stretch
+  // back to 25.9% and 37.1% drift, because cutting the lower tail of a noisy
+  // distribution biases what is left upwards.
+  //
+  // And it only means anything while the two hypotheses are separable. In the
+  // sample's jam the hop is 0.19 m, the fit's own tolerance on a point is
+  // 0.40 m, and a floor of 0.095 m is finer than the instrument that would
+  // have to resolve it -- applying it there costs the stretch 52.3% drift
+  // against 121.9%. So the floor has to clear `gate`, which is the stack's own
+  // statement of how far a point may sit from the plane and still be one.
+  if (settings_.ground_motion_floor > 0.0 && std::isfinite(last_fused_length_)) {
+    const double floor = settings_.ground_motion_floor * std::abs(last_fused_length_);
+    if (floor > gate) {
+      const double c = std::cos(*yaw_for_solve);
+      const double sn = std::sin(*yaw_for_solve);
+      for (Eigen::Index i = 0; i < solved.ground_valid.size(); ++i) {
+        if (!solved.ground_valid(i)) {
+          continue;
+        }
+        const double cx = solved.current_ground(i, 0);
+        const double cy = solved.current_ground(i, 1);
+        const double dx = solved.previous_ground(i, 0) - (c * cx - sn * cy);
+        const double dy = solved.previous_ground(i, 1) - (sn * cx + c * cy);
+        if (std::hypot(dx, dy) < floor) {
+          solved.ground_valid(i) = false;
+        }
+      }
+    }
+  }
+  if (!solved.ground_valid.any()) {
+    remember_solve_pixels(camera);
+    return solved;
+  }
+
   // Prefer the accumulated map; fall back to the previous frame alone. Matching
   // against anchors averaged over a feature's whole life is what stops a burst
   // of bad matches from carrying the estimate, which is how the two-frame solve

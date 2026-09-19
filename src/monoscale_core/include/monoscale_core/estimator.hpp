@@ -757,6 +757,17 @@ struct EstimatorSettings
   // Let the body tilt move the camera's height over the road. True is what the
   // projection has always done; false holds the height at its nominal value and
   // leaves the tilt to set only the plane's direction.
+  // Fewest metres a ground pair must have moved, as a fraction of the hop the
+  // last solve measured, before it is allowed into the fit. Zero is off.
+  //
+  // The rigid fit's per-point offset is `previous - R(yaw) current`, which for
+  // a point on the road is the translation itself and nothing else -- the turn
+  // is already out of it, so every road point in a solve carries the same
+  // offset whatever its position in the patch. A point that keeps station with
+  // the camera carries zero instead. That is what a vehicle driving ahead of or
+  // behind this one puts into the band, and it is as coherent a set as the road
+  // is, so the fit can and does take it.
+  double ground_motion_floor = 0.0;
   bool ground_height_from_tilt = true;
   // Take the ground projection's tilt from the road bands rather than from the
   // inertial attitude. The band measurement is of the camera against the road

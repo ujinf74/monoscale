@@ -405,6 +405,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.pair_tilt_gain = declare_double("pair_tilt_gain", 0.0);
   settings.pair_scale_gain = declare_double("pair_scale_gain", 0.0);
   settings.pitch_centre_x_m = declare_double("pitch_centre_x_m", 0.0);
+  settings.ground_motion_floor = declare_double("ground_motion_floor", 0.0);
   settings.ground_height_from_tilt =
     declare_bool("ground_height_from_tilt", true);
   settings.band_attitude = declare_bool("band_attitude", false);
