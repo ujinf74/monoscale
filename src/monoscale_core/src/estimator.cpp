@@ -58,6 +58,34 @@ double percentile_90(const Points2 & from, const Points2 & to)
 
 }  // namespace
 
+namespace
+{
+
+// The road's arc as the chord the solve measures.
+//
+// `photometric_step` is how far the road slid under the camera between two
+// frames, which is path length, and the steps are summed over the interval.
+// The solve's translation is the straight line between the interval's two
+// poses. Over a turn of `psi` at roughly constant curvature the two differ by
+// `sin(psi/2) / (psi/2)`, and the arc is always the longer of them, so
+// equating the two reads the photometric scale long on every turn and
+// correctly on every straight. That is a bias that rides on the rotation
+// instead of averaging out: 0.04% at 5 degrees of turn, 0.19% at 10, 1.15% at
+// 30.
+//
+// Constant curvature is the whole of the approximation. The per-frame yaws are
+// not kept -- only the scalar sum of the steps is -- so composing the interval
+// in SE(2) is not available here; what this recovers is the leading term,
+// which is the entire first-order difference between a path length and a
+// chord.
+double chord_of_arc(double arc, double yaw)
+{
+  const double half = 0.5 * std::abs(yaw);
+  return half > 1e-6 ? arc * std::sin(half) / half : arc;
+}
+
+}  // namespace
+
 FusionModel fusion_model_from_name(const std::string & name)
 {
   if (name == "velocity") {
@@ -1009,9 +1037,31 @@ void Estimator::ingest_imu(const ImuSample & measured)
         // of `r dt`, so the innovation vanishes at **r = -b/2** and the filter
         // settles on half the bias. Measured at 47-58% recovery on every drive
         // that has a bias, which is what pointed at it.
-        gyro_yaw_ = wrap_pi(
-          gyro_yaw_ +
-          sample.angular_velocity.z() * step);
+        // The gyro reports body rates; what this accumulates is an Euler
+        // angle. They are the same number only on the level. For the ZYX
+        // sequence the rest of the stack uses,
+        //
+        //   psi_dot = (q sin(phi) + r cos(phi)) / cos(theta)
+        //
+        // so a rolled body turns part of its pitch rate into heading, and a
+        // pitched one turns faster in yaw than its own z gyro reads. At 5
+        // degrees of roll that is 8.7% of the pitch rate arriving in the
+        // heading and 0.4% missing from the yaw rate itself.
+        //
+        // The attitude filter has not seen this sample yet, so `roll()` and
+        // `pitch()` are the attitude at the start of the step, which is the
+        // one the step should be integrated with.
+        double rate = sample.angular_velocity.z();
+        if (attitude_ && attitude_->started()) {
+          const double cos_pitch = std::cos(attitude_->pitch());
+          // Nowhere near vertical on a road vehicle; the guard is for the
+          // singularity, not for a case anyone expects to reach.
+          if (std::abs(cos_pitch) > 0.1) {
+            rate = (sample.angular_velocity.y() * std::sin(attitude_->roll()) +
+              sample.angular_velocity.z() * std::cos(attitude_->roll())) / cos_pitch;
+          }
+        }
+        gyro_yaw_ = wrap_pi(gyro_yaw_ + rate * step);
       }
     }
     gyro_yaw_stamp_ = sample.stamp;
@@ -2347,6 +2397,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       camera.photometric_since_solve > 0.0)
     {
       const double length = std::hypot(solved.motion->x, solved.motion->y);
+      const double road =
+        chord_of_arc(camera.photometric_since_solve, solved.motion->yaw);
       // The same bound the fused path puts on the same quantity.
       //
       // A photometric length that disagrees with the solve by more than
@@ -2358,12 +2410,12 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       // against the deployed 0.0224%, which is not a worse blend but a handful
       // of frames destroying whole drives.
       const double disagreement =
-        length > 1e-6 ? std::abs(camera.photometric_since_solve / length - 1.0) : 0.0;
+        length > 1e-6 ? std::abs(road / length - 1.0) : 0.0;
       if (settings_.max_scale_error > 0.0 && disagreement > settings_.max_scale_error) {
         ++diagnostics_.photometric_rejected;
       } else if (length > 1e-6) {
         const double blended = length + settings_.photometric_step_gain *
-          (camera.photometric_since_solve - length);
+          (road - length);
         const double ratio = blended / length;
         solved.motion->x *= ratio;
         solved.motion->y *= ratio;
@@ -3294,7 +3346,7 @@ void Estimator::process_pair()
     road_cameras > 0 &&
     motion.has_value() && !(settings_.photometric_when_mapless && any_from_map))
   {
-    const double measured = road_mean;
+    const double measured = chord_of_arc(road_mean, motion->yaw);
     const double length = std::hypot(motion->x, motion->y);
     if (length > 1e-6 && std::isfinite(measured)) {
       // These are two independent measurements of the same displacement, and
