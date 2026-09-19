@@ -403,6 +403,7 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_bool("anchor_link_adopter_writes", false);
   settings.ground_plane_offset_m =
     declare_double("ground_plane_offset_m", 0.0);
+  settings.pair_tilt_gain = declare_double("pair_tilt_gain", 0.0);
   settings.pair_scale_gain = declare_double("pair_scale_gain", 0.0);
   settings.pitch_centre_x_m = declare_double("pitch_centre_x_m", 0.0);
   settings.ground_height_from_tilt =

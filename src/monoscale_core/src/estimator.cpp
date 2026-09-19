@@ -2336,6 +2336,12 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     const double s = std::sin(*yaw_for_solve);
     double squared = 0.0;
     int kept = 0;
+    // The same five sums as the drive-long accumulator, over this solve alone.
+    double solve_n = 0.0;
+    double solve_sr = 0.0;
+    double solve_srr = 0.0;
+    double solve_se = 0.0;
+    double solve_sre = 0.0;
     for (Eigen::Index i = 0; i < paired; ++i) {
       if (!estimate->inliers(i)) {
         continue;
@@ -2353,6 +2359,11 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       const double range = std::hypot(rx, ry);
       if (range > settings_.radial_min_range_m) {
         const double radial = (ex * rx + ey * ry) / range;
+        solve_n += 1.0;
+        solve_sr += range;
+        solve_srr += range * range;
+        solve_se += radial;
+        solve_sre += range * radial;
         camera.pair_n += 1.0;
         camera.pair_sr += range;
         camera.pair_srr += range * range;
@@ -2375,6 +2386,27 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       }
     }
     solved.spread = kept > 0 ? std::sqrt(squared / kept) : 0.0;
+
+    // The tilt this solve left in its own residual, and the hop with it removed.
+    // See `pair_tilt_gain`.
+    if (settings_.pair_tilt_gain != 0.0 && solve_n > 8.0) {
+      const double d = solve_n * solve_srr - solve_sr * solve_sr;
+      if (std::abs(d) > 1e-9) {
+        const double slope = (solve_n * solve_sre - solve_sr * solve_se) / d;
+        const double mean_range = solve_sr / solve_n;
+        const double excess = slope * mean_range;
+        const double length = std::hypot(estimate->motion.x, estimate->motion.y);
+        if (std::isfinite(excess) && length > 1e-6 &&
+          std::abs(excess) < 0.5 * length)
+        {
+          const double factor = 1.0 - settings_.pair_tilt_gain * excess / length;
+          solved.motion->x *= factor;
+          solved.motion->y *= factor;
+          diagnostics_.pair_tilt_sum += excess / length;
+          ++diagnostics_.pair_tilt_samples;
+        }
+      }
+    }
 
     // The independent count among the pair solve's votes was computed here,
     // from the correlation between residuals far enough apart that a shared

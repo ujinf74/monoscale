@@ -714,6 +714,44 @@ struct EstimatorSettings
   double ground_plane_offset_m = 0.0;
   // A common ratio applied to every camera's range after the plane offset.
   double pair_scale_gain = 0.0;
+  // Take the tilt out of this solve's own hop, from this solve's own residual.
+  //
+  // A height error scales every range alike, so the rigid fit absorbs it into
+  // the translation and it leaves no residual at all. A tilt error does not: a
+  // point at range R is displaced by (R^2+h^2)/h times the error, so the hop it
+  // implies is s(1 + 2 R delta / h) and the residual after the fit is linear in
+  // range with slope 2 s delta / h. The excess in the hop is that slope times
+  // the mean range, so
+  //
+  //     corrected = measured - slope * mean_range
+  //
+  // and neither the height nor the tilt has to be known to apply it. This is
+  // the same regression `pair_scale_gain` runs, taken per solve instead of over
+  // a whole drive and read as what it measures.
+  //
+  // The gain is a shrinkage, not a fudge. `slope * mean_range` is the whole
+  // correction the geometry asks for, and taking the whole of it overshoots --
+  // on KITTI sequence 10 it moves the hop bias from +0.97% to -3.12% and raises
+  // the noise from 19.40 to 23.21 per cent -- because the slope is itself
+  // estimated from the same 75 residuals and carries their noise. The minimum
+  // mean square correction is the signal over signal plus noise, and 0.3 is
+  // what that ratio turns out to be: at it, sequence 06 reads +0.82% bias and
+  // 13.39% noise against +4.12% and 13.98% with the correction off, so four
+  // fifths of the bias and a little of the noise both go.
+  //
+  // Over nine KITTI sequences the official translation metric goes 5.676% to
+  // 5.323% at 0.3, seven of the nine improving and sequence 06 alone going
+  // 3.40% to 2.04%.
+  //
+  // It is a per-rig setting and it is off by default. On the nine CARLA drives,
+  // whose cameras see fifty degrees of road and whose tilt is already measured
+  // to a tenth of what this corrects, the same 0.3 takes ATE over distance from
+  // 0.0237% to 0.0564%: there the slope is noise and nothing else.
+  //
+  // What it should be is the shrinkage computed per solve from the regression's
+  // own variance rather than a number fixed for the drive. That is the next
+  // thing this wants.
+  double pair_tilt_gain = 0.0;
   double pitch_centre_x_m = 0.0;
   // Let the body tilt move the camera's height over the road. True is what the
   // projection has always done; false holds the height at its nominal value and
@@ -1145,6 +1183,8 @@ struct Diagnostics
   double landmark_along_sum = 0.0;
   double landmark_across_sum = 0.0;
   int64_t landmark_filled = 0;
+  double pair_tilt_sum = 0.0;
+  int64_t pair_tilt_samples = 0;
   double landmark_along_sq = 0.0;
   double landmark_across_sq = 0.0;
   double imu_scale = 1.0;
