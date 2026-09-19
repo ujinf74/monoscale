@@ -275,6 +275,21 @@ struct EstimatorSettings
   // velocity change over a braking event rather than over one solve interval
   // grows the signal and leaves the vision noise where it is.
   double inertial_scale_gain = 0.0;
+  // How many solves the accelerometer is integrated over before the pair is
+  // read out.
+  //
+  // One is the whole trouble. The vision noise in the pair sits on the two end
+  // velocities and does not shrink with the window, while the accelerometer's
+  // integral grows with it: a fifth of a second at 2 m/s^2 is 0.4 m/s against
+  // 2.4 m/s of endpoint noise, and two seconds of the same is 4. The
+  // attenuation goes as the square of that ratio, so the window is the whole
+  // difference between a number that converges and a number that is worth
+  // applying.
+  //
+  // Windows do not overlap, so the samples stay independent, and one that ends
+  // without reaching the excitation is discarded rather than averaged in --
+  // gating on the accelerometer's side is safe because it is the quiet one.
+  int inertial_scale_window = 1;
   // How much the velocity has to have changed for the ratio above to be signal.
   // Over a 0.2 s solve interval this is the acceleration times that interval.
   double inertial_scale_excitation_m_s = 0.2;
@@ -1302,6 +1317,11 @@ private:
   // read from.
   std::optional<Eigen::Vector2d> scale_last_correction_;
   std::optional<Eigen::Vector2d> scale_last_measured_;
+  // The window the pair is read over: the accelerometer accumulated across the
+  // corrections that reset it, against the vision velocity it started from.
+  Eigen::Vector2d scale_window_accum_ = Eigen::Vector2d::Zero();
+  std::optional<Eigen::Vector2d> scale_window_start_;
+  int scale_window_count_ = 0;
   std::optional<Eigen::Vector2d> expected_hop_;
   std::vector<int64_t> camera_solves_;
   std::vector<double> camera_inliers_;

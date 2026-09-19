@@ -246,6 +246,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.imu_scale_gain = declare_double("imu_scale_gain", 0.0);
   settings.imu_scale_min_hop_m = declare_double("imu_scale_min_hop_m", 0.05);
   settings.inertial_scale_gain = declare_double("inertial_scale_gain", 0.0);
+  settings.inertial_scale_window = declare_int("inertial_scale_window", 1);
   settings.inertial_scale_excitation_m_s =
     declare_double("inertial_scale_excitation_m_s", 0.2);
   settings.inertial_gate_m = declare_double("inertial_gate_m", 0.0);

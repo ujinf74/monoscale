@@ -3606,8 +3606,24 @@ void Estimator::process_pair()
       if (settings_.inertial_scale_gain != 0.0 && inertial_.corrected() &&
         scale_last_correction_.has_value() && scale_last_measured_.has_value())
       {
-        const Eigen::Vector2d delta_imu = inertial_.velocity() - *scale_last_correction_;
-        const Eigen::Vector2d delta_vision = *measured - *scale_last_measured_;
+        // Each correction resets the propagator, so the per-interval integral
+        // has to be summed across them to make a window.
+        const Eigen::Vector2d step_imu = inertial_.velocity() - *scale_last_correction_;
+        if (!scale_window_start_.has_value()) {
+          scale_window_start_ = *scale_last_measured_;
+          scale_window_accum_.setZero();
+          scale_window_count_ = 0;
+        }
+        scale_window_accum_ += step_imu;
+        ++scale_window_count_;
+        const bool closing =
+          scale_window_count_ >= std::max(settings_.inertial_scale_window, 1);
+        const Eigen::Vector2d delta_imu = scale_window_accum_;
+        const Eigen::Vector2d delta_vision = *measured - *scale_window_start_;
+        if (closing) {
+          scale_window_start_.reset();
+        }
+        if (closing) {
         // Divided by the accelerometer's own integral, because that is the
         // quiet one.
         //
@@ -3629,11 +3645,18 @@ void Estimator::process_pair()
             delta_vision.x() * delta_imu.y() - delta_vision.y() * delta_imu.x();
           const double relative = (delta_vision - delta_imu).dot(delta_imu) / (reach * reach);
           if (std::isfinite(relative)) {
+            // Half a per cent an update, whatever the window. Scaling the
+            // bound with the window is the obvious thing and it loses: at 20
+            // solves a window it takes the four-sequence mean from 5.690% to
+            // 7.504%. The bound is not a rate limit, it is what keeps one bad
+            // window -- a stop, a kerb strike, a stretch where the vision
+            // velocity is mostly noise -- from moving the scale at all.
             const double step =
               std::clamp(settings_.inertial_scale_gain * relative, -0.005, 0.005);
             imu_scale_ = std::clamp(imu_scale_ * (1.0 + step), 0.9, 1.1);
             ++diagnostics_.inertial_scale_samples;
           }
+        }
         }
       }
       // The propagator withholds spawn/drop acceleration until a vision
