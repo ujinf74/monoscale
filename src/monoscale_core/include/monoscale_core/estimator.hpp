@@ -228,6 +228,17 @@ struct EstimatorSettings
   // beyond the ground band itself.
   double anchor_max_range_m = 0.0;
   // How fast the ground scale follows the inertial filter's innovation.
+  //
+  // This is the only exogenous metric reference the stack has, and the note at
+  // its use says why it is the right one: the accelerometer does not care what
+  // the anchors think. It is also unreachable on a rig that does not run the
+  // displacement filter, because the block that reads it sits inside that
+  // filter's update -- on KITTI, where `fusion_model: velocity`, sweeping this
+  // over 0.001 to 0.03 changes the official translation metric by nothing at
+  // all, to four figures on four sequences. Switching the model to reach it
+  // costs more than the gain returns: 5.905% to 7.48% with the gain off, and
+  // 7.37% at its best setting, nearly all of it on the sequence whose solves
+  // are already sparse.
   double imu_scale_gain = 0.0;
   // Hops shorter than this carry more noise than signal in that ratio.
   double imu_scale_min_hop_m = 0.05;

@@ -620,6 +620,15 @@ struct AnchorAlignment
   double radial_height = 0.0;
   double radial_pitch = 0.0;
   // The same fit with the height column dropped; see the note at the fit.
+  //
+  // It is the quadratic term the note above already reports as unsupported, and
+  // measuring it directly agrees: rotate the camera mount by a known pitch and
+  // this reads +0.703 / +0.066 / +0.832 over a 0.6 degree swing on sequence 06
+  // and +0.040 / +0.440 / +0.341 on sequence 10, which is not monotone.
+  // `radial_linear` on the same runs is monotone in the imposed pitch, at
+  // -0.048 per degree on sequence 07 and -0.017 on sequence 10. The linear
+  // basis is the instrument; this one is here because dropping the height
+  // column is what makes the pair's numbers legible, not because it works.
   double radial_pitch_only = 0.0;
 
   // The same residuals read on the sphere instead of on the ground.
