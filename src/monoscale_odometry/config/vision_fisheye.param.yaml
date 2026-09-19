@@ -1451,7 +1451,6 @@
     # `anchor_weight_by_variance` is the one qualitatively new element: it was
     # written in 1c3f002 and had never been in any sweep's axis list, and it
     # appears in every one of the top ten combinations.
-    anchor_weight_by_variance: true
     fusion_gain_mode: 0
     ground_height_from_tilt: false
 

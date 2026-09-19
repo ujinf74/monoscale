@@ -1565,22 +1565,6 @@ std::optional<AnchorAlignment> align_to_anchors(
         result.radial_height = (c1 * a22 - c2 * a12) / det;
         result.radial_pitch = (a11 * c2 - a12 * c1) / det;
       }
-      // The same residual on the pitch basis alone.
-      //
-      // The two bases are 98-99% collinear over the range the hop's own
-      // weighting leaves, and the pair rides their null direction: measured on
-      // KITTI it returns 1.75 degrees of pitch against -0.204 m of height,
-      // whose separate contributions are 0.85 m each and whose sum is 4 cm.
-      // Only one functional of the two is determined, and splitting it is
-      // asking the anchors a question their geometry cannot answer.
-      //
-      // It does not have to be asked. The mount height is calibrated and the
-      // tilt is not, so dropping the height column is not losing information --
-      // it is declining to re-estimate something already known. One basis, no
-      // collinearity, and the coefficient is the pitch.
-      if (a22 > 1e-12) {
-        result.radial_pitch_only = c2 / a22;
-      }
     }
   }
   return result;

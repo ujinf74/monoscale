@@ -246,11 +246,6 @@ struct Estimator::Camera
   Points2 slip_world;
   Points2 slip_camera;
   std::vector<int32_t> slip_misses;
-  // How far above the road each feature the slip path has read turned out to
-  // stand, kept by track identity. A height is a property of the feature, so
-  // once it is earned it applies to every later sighting of it -- including the
-  // ones the anchor map is being handed.
-  std::unordered_map<int64_t, double> slip_height;
 };
 
 struct Estimator::Solved
@@ -478,7 +473,6 @@ Estimator::Estimator(const EstimatorSettings & settings)
     anchor_settings, std::max<int>(1, static_cast<int>(settings.cameras.size())));
   last_radial_height_.assign(settings.cameras.size(), 0.0);
   last_radial_pitch_.assign(settings.cameras.size(), 0.0);
-  last_radial_pitch_only_.assign(settings.cameras.size(), 0.0);
   camera_travel_.assign(settings.cameras.size(), 0.0);
   camera_solves_.assign(settings.cameras.size(), 0);
   camera_inliers_.assign(settings.cameras.size(), 0.0);
@@ -2137,7 +2131,6 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       ++camera.radial_terms;
       last_radial_height_[camera.source] = aligned->radial_height;
       last_radial_pitch_[camera.source] = aligned->radial_pitch;
-      last_radial_pitch_only_[camera.source] = aligned->radial_pitch_only;
       if (aligned->radial_reference > 0.0) {
         camera.radial_linear_sum += aligned->radial_linear;
         ++camera.radial_samples;
@@ -2374,7 +2367,20 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         // as an integrator: the integrator form was what went unstable when
         // this was tried before, and with a hundred thousand points behind it
         // the slope needs no smoothing of its own.
-        if (settings_.pair_scale_gain != 0.0 && camera.pair_n > 2000.0) {
+        // One owner for one quantity. `pair_tilt_gain` reads this same
+        // regression per solve and takes the correction out of the hop; this
+        // reads it over the whole drive and takes it out of the ranges. They
+        // are alternatives, not complements, and letting a configuration set
+        // both corrects the mean twice.
+        //
+        // Splitting them by timescale -- the drive-long mean here, the
+        // deviation there -- is the obvious repair and it loses, 5.471% against
+        // 5.292% over nine KITTI sequences, because the map below is clamped to
+        // +-2% and the mean tilt's effect on the hop reaches 4%. Half a
+        // correction cannot own the mean.
+        if (settings_.pair_scale_gain != 0.0 && settings_.pair_tilt_gain == 0.0 &&
+          camera.pair_n > 2000.0)
+        {
           const double d = camera.pair_n * camera.pair_srr - camera.pair_sr * camera.pair_sr;
           if (std::abs(d) > 1e-9) {
             const double slope =
@@ -2491,6 +2497,122 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   return solved;
 }
 
+
+void Estimator::fold_landmarks(
+  const std::vector<std::optional<Solved>> & solved, std::optional<PlanarMotion> & motion,
+  const std::optional<double> & yaw_delta)
+{
+  if (settings_.landmark_hop_gain == 0.0) {
+    return;
+  }
+// The features the ground band threw away, carried as inverse-depth
+// landmarks and asked for the same hop. See landmarks.hpp for why they
+// cannot be placed by the plane and why this is a memory of the plane's
+// scale rather than a second source of it.
+  for (const auto & entry : solved) {
+    if (!entry.has_value() || entry->current_pixels.rows() == 0) {
+      continue;
+    }
+    const Solved & seen = *entry;
+    std::vector<Eigen::Index> off;
+    for (Eigen::Index i = 0; i < seen.current_pixels.rows(); ++i) {
+      if (i >= seen.ground_valid.size() || !seen.ground_valid(i)) {
+        off.push_back(i);
+      }
+    }
+    if (off.size() < static_cast<size_t>(8)) {
+      continue;
+    }
+    Points2 pixels(static_cast<Eigen::Index>(off.size()), 2);
+    std::vector<int64_t> ids(off.size());
+    for (size_t k = 0; k < off.size(); ++k) {
+      pixels(static_cast<Eigen::Index>(k), 0) = seen.current_pixels(off[k], 0);
+      pixels(static_cast<Eigen::Index>(k), 1) = seen.current_pixels(off[k], 1);
+      ids[k] = seen.track_ids(off[k]);
+    }
+    const Camera & camera = *cameras_[static_cast<size_t>(&entry - &solved[0])];
+    const auto bearings = pixels_to_bearings(pixels, camera.model);
+    // The motion from the previous body frame into this one. A point fixed
+    // in the world sits at `R (X - t)` after a hop of `t` and a turn of
+    // `yaw`, so the rotation is by the turn's negative.
+    // The turn is the gyro's on a filled frame, not zero. Taking zero there
+    // is the same mistake as freezing an unobserved landmark: the vehicle
+    // turned whether or not the road could say so, and a landmark map told
+    // otherwise reads every bearing in the wrong place. Measured, it took the
+    // official rotation metric from 0.49 to 4.60 deg/100m.
+    const double turn = motion.has_value() ? motion->yaw : yaw_delta.value_or(0.0);
+    Eigen::Matrix3d rotation;
+    rotation << std::cos(turn), std::sin(turn), 0.0,
+      -std::sin(turn), std::cos(turn), 0.0,
+      0.0, 0.0, 1.0;
+    const Eigen::Vector3d hop = motion.has_value()
+      ? Eigen::Vector3d(motion->x, motion->y, 0.0) : Eigen::Vector3d::Zero();
+    // Where the plane failed there is no hop to guess from, so the last one
+    // stands in. That is what the coast would have used anyway; the question
+    // is whether the landmarks can improve on it.
+    Eigen::Vector3d guess = hop;
+    if (!motion.has_value()) {
+      guess = Eigen::Vector3d(last_hop_body_.x(), last_hop_body_.y(), 0.0);
+    }
+    int votes = 0;
+    if (!landmarks_) {
+      LandmarkSettings marks;
+      marks.max_disagreement = settings_.landmark_max_disagreement_m;
+      marks.converged_fraction = settings_.landmark_converged_fraction;
+      marks.bearing_sigma_rad = settings_.landmark_bearing_sigma_rad;
+      landmarks_ = std::make_unique<LandmarkMap>(marks);
+    }
+    double residual_rms = 0.0;
+    const auto solved_hop =
+      landmarks_->solve_hop(bearings, ids, rotation, guess, votes, &residual_rms);
+    diagnostics_.landmark_residual_sum += residual_rms;
+    ++diagnostics_.landmark_asked;
+    diagnostics_.landmark_votes_sum += votes;
+    diagnostics_.landmark_votes_max = std::max<int64_t>(diagnostics_.landmark_votes_max, votes);
+    if (solved_hop.has_value()) {
+      ++diagnostics_.landmark_solved;
+      const double length = guess.head<2>().norm();
+      if (length > 1e-6) {
+        diagnostics_.landmark_ratio_sum += solved_hop->head<2>().norm() / length;
+        // Along and across the hop the plane solved, separately. A magnitude
+        // ratio cannot tell a hop that is too long from one carrying a
+        // spurious sideways component, and the bearings a forward camera
+        // sees are far more sensitive to the second.
+        const Eigen::Vector2d along = guess.head<2>() / length;
+        const Eigen::Vector2d across(-along.y(), along.x());
+        const double a = solved_hop->head<2>().dot(along) / length;
+        const double b = solved_hop->head<2>().dot(across) / length;
+        diagnostics_.landmark_along_sum += a;
+        diagnostics_.landmark_across_sum += b;
+        diagnostics_.landmark_along_sq += a * a;
+        diagnostics_.landmark_across_sq += b * b;
+      }
+      if (settings_.landmark_hop_gain > 0.0 && motion.has_value()) {
+        const double gain = std::min(settings_.landmark_hop_gain, 1.0);
+        motion->x += gain * (solved_hop->x() - motion->x);
+        motion->y += gain * (solved_hop->y() - motion->y);
+      } else if (settings_.landmark_fill_gaps && !motion.has_value()) {
+        // The whole point of carrying them: a hop on a frame the road could
+        // not answer. The turn is the gyro's either way.
+        PlanarMotion filled;
+        filled.x = solved_hop->x();
+        filled.y = solved_hop->y();
+        filled.yaw = turn;
+        filled.inliers = votes;
+        filled.scale = 1.0;
+        motion = filled;
+        ++diagnostics_.landmark_filled;
+      }
+    }
+    landmarks_->observe(
+      bearings, ids, rotation,
+      motion.has_value() ? Eigen::Vector3d(motion->x, motion->y, 0.0) : guess);
+    diagnostics_.landmarks_held = landmarks_->size();
+    diagnostics_.landmarks_converged = landmarks_->converged();
+    diagnostics_.landmark_depth = landmarks_->median_depth();
+    break;
+  }
+}
 
 void Estimator::process_pair()
 {
@@ -3585,32 +3707,11 @@ void Estimator::process_pair()
     // satisfied by moving the map -- the accelerometer does not care what the
     // anchors think. This is the observability Ground-VIO gets from its
     // non-ground features, taken from the only other metric source we have.
-    const bool learn_scale = settings_.imu_scale_gain != 0.0;
-    Eigen::Matrix2d world_shape = Eigen::Matrix2d::Identity();
-    if (last_hop_shape_valid_) {
-      Eigen::Matrix2d turn_matrix;
-      turn_matrix << c, -s, s, c;
-      world_shape = turn_matrix * last_hop_shape_ * turn_matrix.transpose();
-    }
-    const Eigen::Matrix2d * shape_ptr = last_hop_shape_valid_ ? &world_shape : nullptr;
-    if (!displacement_filter_->update(world, motion->inliers, extra, spread, shape_ptr)) {
-      ++diagnostics_.filter_rejections;
-    }
-    if (learn_scale) {
-      const auto & record = displacement_filter_->last_update();
-      if (record.has_value() && record->accepted) {
-        const double reach = record->predicted.norm();
-        if (reach > settings_.imu_scale_min_hop_m) {
-          const double relative =
-            record->innovation.dot(record->predicted) / (reach * reach);
-          if (std::isfinite(relative)) {
-            const double step =
-              std::clamp(settings_.imu_scale_gain * relative, -0.005, 0.005);
-            imu_scale_ = std::clamp(imu_scale_ * (1.0 + step), 0.9, 1.1);
-          }
-        }
-      }
-    }
+    // A scale learner stood here, reading the displacement filter's own
+    // innovation. It could never run: the block is inside that filter's update
+    // and both deployed rigs are `fusion_model: velocity`, so `imu_scale_gain`
+    // had no reachable code at all. `inertial_scale_gain` measures the same
+    // quantity from the propagator directly and does not need a filter.
     if (const auto & record = displacement_filter_->last_update(); record.has_value()) {
       // Two degrees of freedom, so an honest covariance averages 2. Below that
       // the filter is claiming less certainty than it has.
@@ -3734,132 +3835,7 @@ void Estimator::process_pair()
     allowance *= std::max(1.0, std::min(since / dt, settings_.max_arrears_frames));
   }
 
-  // The features the ground band threw away, carried as inverse-depth
-  // landmarks and asked for the same hop. See landmarks.hpp for why they
-  // cannot be placed by the plane and why this is a memory of the plane's
-  // scale rather than a second source of it.
-  if (settings_.landmark_hop_gain != 0.0) {
-    for (const auto & entry : solved) {
-      if (!entry.has_value() || entry->current_pixels.rows() == 0) {
-        continue;
-      }
-      const Solved & seen = *entry;
-      std::vector<Eigen::Index> off;
-      for (Eigen::Index i = 0; i < seen.current_pixels.rows(); ++i) {
-        if (i >= seen.ground_valid.size() || !seen.ground_valid(i)) {
-          off.push_back(i);
-        }
-      }
-      if (off.size() < static_cast<size_t>(8)) {
-        continue;
-      }
-      Points2 pixels(static_cast<Eigen::Index>(off.size()), 2);
-      std::vector<int64_t> ids(off.size());
-      for (size_t k = 0; k < off.size(); ++k) {
-        pixels(static_cast<Eigen::Index>(k), 0) = seen.current_pixels(off[k], 0);
-        pixels(static_cast<Eigen::Index>(k), 1) = seen.current_pixels(off[k], 1);
-        ids[k] = seen.track_ids(off[k]);
-      }
-      const Camera & camera = *cameras_[static_cast<size_t>(&entry - &solved[0])];
-      const auto bearings = pixels_to_bearings(pixels, camera.model);
-      // The motion from the previous body frame into this one. A point fixed
-      // in the world sits at `R (X - t)` after a hop of `t` and a turn of
-      // `yaw`, so the rotation is by the turn's negative.
-      // The turn is the gyro's on a filled frame, not zero. Taking zero there
-      // is the same mistake as freezing an unobserved landmark: the vehicle
-      // turned whether or not the road could say so, and a landmark map told
-      // otherwise reads every bearing in the wrong place. Measured, it took the
-      // official rotation metric from 0.49 to 4.60 deg/100m.
-      const double turn = motion.has_value() ? motion->yaw : yaw_delta.value_or(0.0);
-      Eigen::Matrix3d rotation;
-      rotation << std::cos(turn), std::sin(turn), 0.0,
-        -std::sin(turn), std::cos(turn), 0.0,
-        0.0, 0.0, 1.0;
-      const Eigen::Vector3d hop = motion.has_value()
-        ? Eigen::Vector3d(motion->x, motion->y, 0.0) : Eigen::Vector3d::Zero();
-      // Where the plane failed there is no hop to guess from, so the last one
-      // stands in. That is what the coast would have used anyway; the question
-      // is whether the landmarks can improve on it.
-      Eigen::Vector3d guess = hop;
-      if (!motion.has_value()) {
-        guess = Eigen::Vector3d(last_hop_body_.x(), last_hop_body_.y(), 0.0);
-      }
-      int votes = 0;
-      if (!landmarks_) {
-        LandmarkSettings marks;
-        marks.max_disagreement = settings_.landmark_max_disagreement_m;
-        marks.converged_fraction = settings_.landmark_converged_fraction;
-        marks.bearing_sigma_rad = settings_.landmark_bearing_sigma_rad;
-        landmarks_ = std::make_unique<LandmarkMap>(marks);
-      }
-      double residual_rms = 0.0;
-      const auto solved_hop =
-        landmarks_->solve_hop(bearings, ids, rotation, guess, votes, &residual_rms);
-      diagnostics_.landmark_residual_sum += residual_rms;
-      {
-        // Three readings of the same residual, to separate a convention from a
-        // state: the rotation as handed in, its transpose, and none at all.
-        int scratch = 0;
-        double alt = 0.0;
-        landmarks_->solve_hop(
-          bearings, ids, rotation.transpose(), hop, scratch, &alt);
-        diagnostics_.landmark_residual_alt += alt;
-        double none = 0.0;
-        landmarks_->solve_hop(
-          bearings, ids, Eigen::Matrix3d::Identity(), hop, scratch, &none);
-        diagnostics_.landmark_residual_none += none;
-        double still = 0.0;
-        landmarks_->solve_hop(
-          bearings, ids, rotation, Eigen::Vector3d::Zero(), scratch, &still);
-        diagnostics_.landmark_residual_still += still;
-      }
-      ++diagnostics_.landmark_asked;
-      diagnostics_.landmark_votes_sum += votes;
-      diagnostics_.landmark_votes_max = std::max<int64_t>(diagnostics_.landmark_votes_max, votes);
-      if (solved_hop.has_value()) {
-        ++diagnostics_.landmark_solved;
-        const double length = guess.head<2>().norm();
-        if (length > 1e-6) {
-          diagnostics_.landmark_ratio_sum += solved_hop->head<2>().norm() / length;
-          // Along and across the hop the plane solved, separately. A magnitude
-          // ratio cannot tell a hop that is too long from one carrying a
-          // spurious sideways component, and the bearings a forward camera
-          // sees are far more sensitive to the second.
-          const Eigen::Vector2d along = guess.head<2>() / length;
-          const Eigen::Vector2d across(-along.y(), along.x());
-          const double a = solved_hop->head<2>().dot(along) / length;
-          const double b = solved_hop->head<2>().dot(across) / length;
-          diagnostics_.landmark_along_sum += a;
-          diagnostics_.landmark_across_sum += b;
-          diagnostics_.landmark_along_sq += a * a;
-          diagnostics_.landmark_across_sq += b * b;
-        }
-        if (settings_.landmark_hop_gain > 0.0 && motion.has_value()) {
-          const double gain = std::min(settings_.landmark_hop_gain, 1.0);
-          motion->x += gain * (solved_hop->x() - motion->x);
-          motion->y += gain * (solved_hop->y() - motion->y);
-        } else if (settings_.landmark_fill_gaps && !motion.has_value()) {
-          // The whole point of carrying them: a hop on a frame the road could
-          // not answer. The turn is the gyro's either way.
-          PlanarMotion filled;
-          filled.x = solved_hop->x();
-          filled.y = solved_hop->y();
-          filled.yaw = turn;
-          filled.inliers = votes;
-          filled.scale = 1.0;
-          motion = filled;
-          ++diagnostics_.landmark_filled;
-        }
-      }
-      landmarks_->observe(
-        bearings, ids, rotation,
-        motion.has_value() ? Eigen::Vector3d(motion->x, motion->y, 0.0) : guess);
-      diagnostics_.landmarks_held = landmarks_->size();
-      diagnostics_.landmarks_converged = landmarks_->converged();
-      diagnostics_.landmark_depth = landmarks_->median_depth();
-      break;
-    }
-  }
+  fold_landmarks(solved, motion, yaw_delta);
 
   Eigen::Vector3d twist = Eigen::Vector3d::Zero();
   const bool rejected = !motion.has_value() || warming_up || dt <= 1e-4 ||
@@ -3881,7 +3857,6 @@ void Estimator::process_pair()
   update.camera_point_count = last_point_count_;
   update.radial_height = last_radial_height_;
   update.radial_pitch = last_radial_pitch_;
-  update.radial_pitch_only = last_radial_pitch_only_;
   update.photometric_distance = last_photometric_distance_;
   update.fused_length = last_fused_length_;
 
@@ -4440,29 +4415,6 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
       body(n, 1) = entry.current_ground(at, 1);
       body(n, 2) = 0.0;
       ids(n) = entry.track_ids(at);
-      // A feature the slip path has measured a height for is not on the plane,
-      // and its plane crossing is not a landmark: the crossing sits H/(H-z)
-      // times as far out as the feature does, so it walks back towards the
-      // camera by z/(H-z) of every metre driven. A 0.17 m kerb at 1.65 m of
-      // camera height drifts 0.09 m a hop, which `max_variance` throws out
-      // after three of them. That is why the map is all road and not a law
-      // about where a landmark may stand.
-      //
-      // Walking back along the ray by the same factor puts it where it
-      // actually is, and there it holds still. The map stays two dimensional
-      // because a fixed point's horizontal position is fixed whatever its
-      // height.
-      if (settings_.anchor_off_plane) {
-        const auto found = camera.slip_height.find(ids(n));
-        if (found != camera.slip_height.end()) {
-          const double share = (height - found->second) / height;
-          if (share > 0.05) {
-            body(n, 0) = mount.x() + (body(n, 0) - mount.x()) * share;
-            body(n, 1) = mount.y() + (body(n, 1) - mount.y()) * share;
-            body(n, 2) = found->second;
-          }
-        }
-      }
       // How much this sighting is worth. A ground point is a bearing crossed
       // with a plane, so its position error is the bearing error multiplied by
       // (R^2 + h^2) / h and the information is the square of the inverse:
@@ -4871,7 +4823,6 @@ void Estimator::integrate_obstacle_slip(
     point.origin_y = static_cast<float>(here.y());
     update.points.push_back(point);
     ++diagnostics_.obstacle_points;
-    camera.slip_height[sorted_ids(item.row)] = obstacle_height;
   }
 
   // Entries persist until they are either read out or have gone missing for

@@ -228,21 +228,6 @@ struct EstimatorSettings
   // Far limit for sightings that may enter the anchor map. 0 means no limit
   // beyond the ground band itself.
   double anchor_max_range_m = 0.0;
-  // How fast the ground scale follows the inertial filter's innovation.
-  //
-  // This is the only exogenous metric reference the stack has, and the note at
-  // its use says why it is the right one: the accelerometer does not care what
-  // the anchors think. It is also unreachable on a rig that does not run the
-  // displacement filter, because the block that reads it sits inside that
-  // filter's update -- on KITTI, where `fusion_model: velocity`, sweeping this
-  // over 0.001 to 0.03 changes the official translation metric by nothing at
-  // all, to four figures on four sequences. Switching the model to reach it
-  // costs more than the gain returns: 5.905% to 7.48% with the gain off, and
-  // 7.37% at its best setting, nearly all of it on the sequence whose solves
-  // are already sparse.
-  double imu_scale_gain = 0.0;
-  // Hops shorter than this carry more noise than signal in that ratio.
-  double imu_scale_min_hop_m = 0.05;
   // The same scale, learned from the accelerometer without the filter.
   //
   // `imu_scale_gain` reads the displacement filter's innovation and therefore
@@ -368,10 +353,6 @@ struct EstimatorSettings
   // stops short of it.
   double obstacle_height_margin = 0.7;
   int obstacle_slip_patience = 30;
-  // Let a feature the slip path has given a height to enter the anchor map at
-  // that height, instead of at the plane crossing that is not where it stands.
-  // See the note at the placement. Zero anchors are off the plane without it.
-  bool anchor_off_plane = false;
   // Carry the features the ground band throws away as inverse-depth landmarks,
   // and let them answer for the hop where the road cannot. See landmarks.hpp.
   // Zero is off; 1 takes the landmarks' hop outright where they have one.
@@ -748,6 +729,12 @@ struct EstimatorSettings
   // to a tenth of what this corrects, the same 0.3 takes ATE over distance from
   // 0.0237% to 0.0564%: there the slope is noise and nothing else.
   //
+  // It replaces `pair_scale_gain` rather than joining it: the two read one
+  // regression, one per solve into the hop and one over the drive into the
+  // ranges, and setting both corrects the mean twice. Where this is non-zero
+  // the drive-long map is skipped, so the pairing cannot be got wrong by
+  // configuration.
+  //
   // What it should be is the shrinkage computed per solve from the regression's
   // own variance rather than a number fixed for the drive. That is the next
   // thing this wants.
@@ -1069,7 +1056,6 @@ struct Update
   // term. Diagnostic; nothing acts on them.
   std::vector<double> radial_height;
   std::vector<double> radial_pitch;
-  std::vector<double> radial_pitch_only;
   double photometric_distance = 0.0;
   double fused_length = 0.0;
   // What the pose was actually moved by, after the filters and the rejection
@@ -1176,9 +1162,6 @@ struct Diagnostics
   int64_t landmark_votes_sum = 0;
   int64_t landmark_votes_max = 0;
   double landmark_residual_sum = 0.0;
-  double landmark_residual_alt = 0.0;
-  double landmark_residual_none = 0.0;
-  double landmark_residual_still = 0.0;
   double landmark_depth = 0.0;
   double landmark_along_sum = 0.0;
   double landmark_across_sum = 0.0;
@@ -1377,6 +1360,12 @@ private:
   std::optional<double> imu_yaw_at(double stamp) const;
   bool imu_still_arriving(double stamp) const;
   void update_anchors(const std::vector<std::optional<Solved>> & solved);
+  // The off-plane landmarks: solve a hop from them, then move them through the
+  // one that was taken. Lifted out of `process_pair` because it is self
+  // contained and that function is long enough to hide an insertion order.
+  void fold_landmarks(
+    const std::vector<std::optional<Solved>> & solved, std::optional<PlanarMotion> & motion,
+    const std::optional<double> & yaw_delta);
 
 public:
   // The revisit constraints as they stand, each paired with the odometry the
@@ -1438,7 +1427,6 @@ private:
   std::vector<double> last_point_count_;
   std::vector<double> last_radial_height_;
   std::vector<double> last_radial_pitch_;
-  std::vector<double> last_radial_pitch_only_;
   double last_photometric_distance_ = 0.0;
   double last_fused_length_ = 0.0;
   // Shortest mean reach any camera had last frame, which is what

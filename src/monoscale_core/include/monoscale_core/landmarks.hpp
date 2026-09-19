@@ -16,6 +16,12 @@
 // ray never meets the plane at all. What places them is a depth, and the depth
 // has to be triangulated against motion that is already metric.
 //
+// Placing them with the plane's own slip path was tried and cannot reach far
+// enough: a feature at the camera's height has a ray that never meets the
+// plane, so `obstacle_height_margin` caps that route at 0.7 H = 1.16 m, and
+// everything worth having -- the building corners, the poles, the signs -- is
+// above it.
+//
 // So this is deliberately not a second source of scale. It is a memory of the
 // scale the plane supplied: while the road answers, each landmark's depth is
 // refined against the metric hop; when the road stops answering, the landmarks

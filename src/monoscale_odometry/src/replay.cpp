@@ -382,7 +382,6 @@ struct Outcome
   // using, which is what a scale bias is made of.
   double radial_pitch_sum = 0.0;
   double radial_height_sum = 0.0;
-  double radial_only_sum = 0.0;
   int64_t radial_pitch_n = 0;
 };
 
@@ -421,8 +420,6 @@ void replay_into(
         outcome.radial_pitch_sum += update.radial_pitch[0];
         outcome.radial_height_sum += update.radial_height.empty() ? 0.0
           : update.radial_height[0];
-        outcome.radial_only_sum += update.radial_pitch_only.empty() ? 0.0
-          : update.radial_pitch_only[0];
         ++outcome.radial_pitch_n;
       }
       if (!update.pose_valid) {
@@ -1559,15 +1556,14 @@ int main(int argc, char ** argv)
     // much material an off-plane anchor would have.
     if (outcome.radial_pitch_n > 0) {
       std::printf(
-        "radial split[0]: pitch %+.4f deg  height %+.5f m  pitch-only %+.4f deg  n=%ld\n",
+        "radial split[0]: pitch %+.4f deg  height %+.5f m  n=%ld\n",
         outcome.radial_pitch_sum / static_cast<double>(outcome.radial_pitch_n) * 180.0 / M_PI,
         outcome.radial_height_sum / static_cast<double>(outcome.radial_pitch_n),
-        outcome.radial_only_sum / static_cast<double>(outcome.radial_pitch_n) * 180.0 / M_PI,
         outcome.radial_pitch_n);
     }
     if (diagnostics.landmark_asked > 0) {
       std::printf(
-        "landmarks: %ld held, %ld converged, answered %ld of %ld, votes mean %.1f max %ld, residual %.5f (전치 %.5f, 무회전 %.5f, 무이동 %.5f) rad, ratio %.4f (앞 %.4f±%.3f 옆 %+.4f±%.3f), 깊이 중앙 %.1f m\n",
+        "landmarks: %ld held, %ld converged, answered %ld of %ld, votes mean %.1f max %ld, residual %.5f rad, ratio %.4f (앞 %.4f±%.3f 옆 %+.4f±%.3f), 깊이 중앙 %.1f m\n",
         diagnostics.landmarks_held, diagnostics.landmarks_converged,
         diagnostics.landmark_solved, diagnostics.landmark_asked,
         diagnostics.landmark_asked > 0
@@ -1577,12 +1573,6 @@ int main(int argc, char ** argv)
         diagnostics.landmark_asked > 0
         ? diagnostics.landmark_residual_sum / static_cast<double>(diagnostics.landmark_asked)
         : 0.0,
-        diagnostics.landmark_asked > 0
-        ? diagnostics.landmark_residual_alt / static_cast<double>(diagnostics.landmark_asked) : 0.0,
-        diagnostics.landmark_asked > 0
-        ? diagnostics.landmark_residual_none / static_cast<double>(diagnostics.landmark_asked) : 0.0,
-        diagnostics.landmark_asked > 0
-        ? diagnostics.landmark_residual_still / static_cast<double>(diagnostics.landmark_asked) : 0.0,
         diagnostics.landmark_solved > 0
         ? diagnostics.landmark_ratio_sum / static_cast<double>(diagnostics.landmark_solved)
         : 0.0,
