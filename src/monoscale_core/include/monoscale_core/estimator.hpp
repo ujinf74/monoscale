@@ -585,6 +585,23 @@ struct EstimatorSettings
   // ground point runs (R^2+h^2)/h along the line of sight against R across it,
   // and a scalar weight lets the radial half in at full strength.
   bool elliptical_pair_weights = false;
+  // The image displacement, in pixels, at which a point's tracking error
+  // matches its detection error.
+  //
+  // The ellipse above is built from bearing error alone, and that model says
+  // every point's bearing is measured equally well. It is not: a point's error
+  // has a floor the detector sets and a part that grows with how far the point
+  // moved in the image between the two views, which for ground at range R with
+  // the camera h up and a hop s is `f s h / (R^2 + h^2)` pixels -- 56:1 between
+  // the near and far edge of the CARLA band, 17:1 across KITTI's.
+  //
+  // Leaving it out is why the same correct weighting wins on one rig and loses
+  // on the other: the along-ray sigma goes as R^2, so without this the solve
+  // collapses onto the near edge, and the near edge is exactly where the hop
+  // has moved the image most. Adding it puts a range-independent `k s` beside
+  // the `(R^2+h^2)/h`, which flattens the near/far ratio by as much as the rig's
+  // own band and hop demand. Zero keeps the bearing-only model.
+  double ground_flow_reference_px = 0.0;
   bool anchor_link_cross_source_only = false;
   bool anchor_bearing_nonholonomic = false;
   // See `align_to_anchors`. 0 is off; the physical value is the bearing noise.

@@ -376,6 +376,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.anchor_link_radius_m = declare_double("anchor_link_radius_m", 0.0);
   settings.anchor_link_radius_per_m =
     declare_double("anchor_link_radius_per_m", 0.0);
+  settings.ground_flow_reference_px =
+    declare_double("ground_flow_reference_px", 0.0);
   settings.elliptical_pair_weights =
     declare_bool("elliptical_pair_weights", false);
   settings.anchor_link_cross_source_only =

@@ -2228,15 +2228,36 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     const double height = std::max(camera.model.translation_base_from_camera.z(), 0.05);
     pair_directions.resize(paired, 4);
     for (Eigen::Index i = 0; i < paired; ++i) {
+      // The midpoint of the two views, not this one.
+      //
+      // A weight built from the range it is about to weigh is correlated with
+      // it: noise that pulls a point nearer makes it look more precise, and the
+      // displacement it votes for shrinks with the same range. The weight goes
+      // as (h/(R^2+h^2))^2, so d ln w / d ln R is -1.25 at the near edge of the
+      // CARLA band -- the under-measured hops are exactly the up-weighted ones,
+      // and a scale bias falls out that no amount of averaging removes. It
+      // reads 0.1% on the straight drives, which is four times their whole
+      // final error. Averaging the two frames leaves cov(w, v) proportional to
+      // var(e_B) - var(e_A), which is zero when the two views are alike.
       const Eigen::Vector2d ray(
-        current_ground(i, 0) - lens.x(), current_ground(i, 1) - lens.y());
+        0.5 * (previous_ground(i, 0) + current_ground(i, 0)) - lens.x(),
+        0.5 * (previous_ground(i, 1) + current_ground(i, 1)) - lens.y());
       const double range = ray.norm();
       if (!(range > 1e-6)) {
         pair_directions.row(i) << 1.0, 0.0, 0.0, 0.0;
         continue;
       }
+      // A point that moved further in the image between the two views was
+      // tracked less well, and the two sigmas are both per radian of bearing,
+      // so the whole ellipse scales with that error rather than changing shape.
+      double scale = 1.0;
+      if (settings_.ground_flow_reference_px > 0.0) {
+        const double moved_px = camera.model.k(0, 0) * std::abs(last_fused_length_) *
+          height / (range * range + height * height);
+        scale = 1.0 + moved_px / settings_.ground_flow_reference_px;
+      }
       pair_directions.row(i) << ray.x() / range, ray.y() / range,
-        (range * range + height * height) / height, range;
+        scale * (range * range + height * height) / height, scale * range;
     }
   }
   const auto estimate = estimate_planar_motion_with_yaw(
