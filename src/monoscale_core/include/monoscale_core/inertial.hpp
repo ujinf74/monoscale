@@ -16,6 +16,7 @@
 #ifndef MONOSCALE_CORE__INERTIAL_HPP_
 #define MONOSCALE_CORE__INERTIAL_HPP_
 
+#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -78,6 +79,11 @@ public:
   void correct_velocity(const Eigen::Vector2d & velocity_world, double gain = 1.0);
 
   bool corrected() const {return corrected_;}
+  // How many times a gap has made the integral start clean. Anyone
+  // differencing `velocity()` across two corrections has to watch this: the
+  // velocity it would difference against was discarded, not measured, and the
+  // difference then reads as the whole speed arriving in one interval.
+  uint64_t restarts() const {return restarts_;}
   const Eigen::Vector2d & velocity() const {return velocity_;}
   const Eigen::Vector2d & position() const {return position_;}
   int rejected_samples() const {return rejected_samples_;}
@@ -104,6 +110,7 @@ private:
   // velocity that never existed, so predictions stay unavailable until vision
   // has pinned the velocity down at least once.
   bool corrected_ = false;
+  uint64_t restarts_ = 0;
   std::deque<Sample> history_;
 };
 

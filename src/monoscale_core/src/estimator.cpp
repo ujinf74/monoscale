@@ -63,19 +63,25 @@ FusionModel fusion_model_from_name(const std::string & name)
   if (name == "velocity") {
     return FusionModel::Velocity;
   }
-  if (name == "msckf") {
-    return FusionModel::Msckf;
-  }
-  if (name == "msckf6") {
-    return FusionModel::Msckf6;
-  }
   if (name == "displacement") {
     return FusionModel::Displacement;
   }
   // Loudly, because Displacement is also the default: a silent fallback makes a
   // typed `velocty` indistinguishable from asking for the default, and the run
   // that results is a different estimator wearing the same command line.
-  throw std::invalid_argument("unknown fusion_model: " + name);
+  //
+  // `msckf` and `msckf6` are named in the enum and have no filter behind them:
+  // the constructor builds a displacement filter or nothing, so asking for
+  // either one has always run Velocity. Accepting them here would be the same
+  // silence with a spelling the user believes in, so they are refused by name
+  // until something implements them.
+  if (name == "msckf" || name == "msckf6") {
+    throw std::invalid_argument(
+            "fusion_model `" + name + "` is declared but not implemented; "
+            "use `velocity` or `displacement`");
+  }
+  throw std::invalid_argument(
+          "unknown fusion_model `" + name + "`; use `velocity` or `displacement`");
 }
 
 struct Estimator::Frame
@@ -3840,6 +3846,21 @@ void Estimator::process_pair()
       {
         // Each correction resets the propagator, so the per-interval integral
         // has to be summed across them to make a window.
+        //
+        // Unless a gap reset it first. Then `velocity()` is zero because the
+        // integral was abandoned, not because the vehicle stopped, and this
+        // difference is minus the whole speed -- eight metres a second of
+        // acceleration that never happened, landed in one interval of a twenty
+        // interval window. The window is dropped rather than corrected: there
+        // is no integral to correct.
+        const uint64_t restarts = inertial_.restarts();
+        const bool restarted = restarts != scale_last_restarts_;
+        scale_last_restarts_ = restarts;
+        if (restarted) {
+          scale_window_start_.reset();
+          scale_last_correction_.reset();
+          scale_last_measured_.reset();
+        } else {
         const Eigen::Vector2d step_imu = inertial_.velocity() - *scale_last_correction_;
         if (!scale_window_start_.has_value()) {
           scale_window_start_ = *scale_last_measured_;
@@ -3888,6 +3909,7 @@ void Estimator::process_pair()
             imu_scale_ = std::clamp(imu_scale_ * (1.0 + step), 0.9, 1.1);
             ++diagnostics_.inertial_scale_samples;
           }
+        }
         }
         }
       }

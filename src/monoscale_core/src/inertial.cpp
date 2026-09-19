@@ -127,6 +127,7 @@ PlanarInertialPropagator::Step PlanarInertialPropagator::add_sample(
       // A gap this long makes the integral meaningless; start clean.
       velocity_.setZero();
       previous_acceleration_.reset();
+      ++restarts_;
     }
   }
 

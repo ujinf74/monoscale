@@ -1415,6 +1415,7 @@ private:
   // What was handed to the propagator, and what vision measured, at the last
   // correction. The difference of each against now is the pair the scale is
   // read from.
+  uint64_t scale_last_restarts_ = 0;
   std::optional<Eigen::Vector2d> scale_last_correction_;
   std::optional<Eigen::Vector2d> scale_last_measured_;
   // The window the pair is read over: the accelerometer accumulated across the

@@ -7,6 +7,7 @@
 // does no estimation and holds no transform tree, which is the seam that let
 // the whole thing be debugged offline (the node design note).
 
+#include <algorithm>
 #include <deque>
 #include <map>
 #include <memory>
@@ -411,7 +412,27 @@ private:
   void maybe_keyframe(const std::string & name, std::vector<Job> & jobs)
   {
     auto & ring = rings_[name];
-    const Frame & reference = ring.back();
+    // `ring.back()` is the newest frame and nothing stands ahead of it, so a
+    // reference taken there can never match a positive source offset. Three of
+    // the six defaults are positive, which meant the live node swept on the
+    // three negative ones while the offline tool, searching a recorded
+    // trajectory, swept on all six -- silently, because the only guard is
+    // `source_grays.size() < 2` and three sources clear it.
+    //
+    // Standing the reference back by the widest positive offset costs that
+    // much travel of latency and buys the baselines back. The ring's 6.0 m trim
+    // already covers the span this needs: 2.4 forward of the reference plus 2.4
+    // behind it.
+    double lead = 0.0;
+    for (double offset : settings_.source_offsets) {
+      lead = std::max(lead, offset);
+    }
+    const Frame * standing = nullptr;
+    for (const auto & frame : ring) {
+      if (frame.travelled <= ring.back().travelled - lead) {standing = &frame;}
+    }
+    if (standing == nullptr) {return;}
+    const Frame & reference = *standing;
     if (reference.travelled < next_at_[name]) {return;}
 
     // Sources at the configured offsets of camera travel, nearest frame in
