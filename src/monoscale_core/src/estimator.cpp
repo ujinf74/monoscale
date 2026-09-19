@@ -2786,9 +2786,18 @@ void Estimator::process_pair()
   // point was measured and made things worse -- but it is far more than
   // accurate enough to rule out "the vehicle did not move", which is the
   // failure that swallows the slow drives. Used as a gate, never as a seed.
+  //
+  // Through `fused_world_velocity`, which answers for whichever filter this
+  // run owns. Reading `displacement_filter_` directly stood here, and that
+  // filter is built only under `fusion_model: displacement` -- so under
+  // `velocity`, which is what every deployed rig and the KITTI benchmark set,
+  // `expected_hop_` was never filled and the gate below never ran. A number
+  // was configured, `inertial_gate_m: 3.0`, and nothing read it.
   expected_hop_.reset();
-  if (displacement_filter_ && dt > 1e-4 && displacement_filter_->settled()) {
-    expected_hop_ = displacement_filter_->velocity() * dt;
+  if (dt > 1e-4) {
+    if (const auto velocity = fused_world_velocity()) {
+      expected_hop_ = *velocity * dt;
+    }
   }
 
   // Read here, before the solves, because remembering a solve frame resets it.
