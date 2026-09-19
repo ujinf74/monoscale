@@ -246,6 +246,11 @@ struct Estimator::Camera
   Points2 slip_world;
   Points2 slip_camera;
   std::vector<int32_t> slip_misses;
+  // How far above the road each feature the slip path has read turned out to
+  // stand, kept by track identity. A height is a property of the feature, so
+  // once it is earned it applies to every later sighting of it -- including the
+  // ones the anchor map is being handed.
+  std::unordered_map<int64_t, double> slip_height;
 };
 
 struct Estimator::Solved
@@ -4171,6 +4176,29 @@ void Estimator::update_anchors(const std::vector<std::optional<Solved>> & solved
       body(n, 1) = entry.current_ground(at, 1);
       body(n, 2) = 0.0;
       ids(n) = entry.track_ids(at);
+      // A feature the slip path has measured a height for is not on the plane,
+      // and its plane crossing is not a landmark: the crossing sits H/(H-z)
+      // times as far out as the feature does, so it walks back towards the
+      // camera by z/(H-z) of every metre driven. A 0.17 m kerb at 1.65 m of
+      // camera height drifts 0.09 m a hop, which `max_variance` throws out
+      // after three of them. That is why the map is all road and not a law
+      // about where a landmark may stand.
+      //
+      // Walking back along the ray by the same factor puts it where it
+      // actually is, and there it holds still. The map stays two dimensional
+      // because a fixed point's horizontal position is fixed whatever its
+      // height.
+      if (settings_.anchor_off_plane) {
+        const auto found = camera.slip_height.find(ids(n));
+        if (found != camera.slip_height.end()) {
+          const double share = (height - found->second) / height;
+          if (share > 0.05) {
+            body(n, 0) = mount.x() + (body(n, 0) - mount.x()) * share;
+            body(n, 1) = mount.y() + (body(n, 1) - mount.y()) * share;
+            body(n, 2) = found->second;
+          }
+        }
+      }
       // How much this sighting is worth. A ground point is a bearing crossed
       // with a plane, so its position error is the bearing error multiplied by
       // (R^2 + h^2) / h and the information is the square of the inverse:
@@ -4579,6 +4607,7 @@ void Estimator::integrate_obstacle_slip(
     point.origin_y = static_cast<float>(here.y());
     update.points.push_back(point);
     ++diagnostics_.obstacle_points;
+    camera.slip_height[sorted_ids(item.row)] = obstacle_height;
   }
 
   // Entries persist until they are either read out or have gone missing for

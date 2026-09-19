@@ -293,6 +293,10 @@ struct EstimatorSettings
   // stops short of it.
   double obstacle_height_margin = 0.7;
   int obstacle_slip_patience = 30;
+  // Let a feature the slip path has given a height to enter the anchor map at
+  // that height, instead of at the plane crossing that is not where it stands.
+  // See the note at the placement. Zero anchors are off the plane without it.
+  bool anchor_off_plane = false;
 
 
 

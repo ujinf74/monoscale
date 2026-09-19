@@ -1536,6 +1536,14 @@ int main(int argc, char ** argv)
       "sightings: %ld remembered, %ld anchors, %ld poses of history, %.1f MB held, rebuild %.2f ms\n",
       diagnostics.remembered_sightings, diagnostics.anchors,
       diagnostics.pose_history, bytes / 1048576.0, diagnostics.rebuild_ms);
+    // What the slip path had to work with. It is the only thing in this stack
+    // that places a feature off the plane, so it is the only measure of how
+    // much material an off-plane anchor would have.
+    std::printf(
+      "slip: %ld usable, %ld with baseline, %ld no slip, %ld out of band, %ld placed\n",
+      diagnostics.obstacle_usable, diagnostics.obstacle_ready,
+      diagnostics.obstacle_no_slip, diagnostics.obstacle_out_of_band,
+      diagnostics.obstacle_points);
     std::printf("  rebuild moves an anchor by %.7f m on average, sighting span %.1f\n",
       diagnostics.rebuild_shift_m, diagnostics.sighting_span);
     std::printf("  photometric step: applied %ld of %ld chances, mapless %ld\n",
