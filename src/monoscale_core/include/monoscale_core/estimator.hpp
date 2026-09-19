@@ -186,6 +186,10 @@ struct EstimatorSettings
   double imu_max_gap_sec = 0.12;
 
   double ground_max_distance_m = 25.0;
+  // How far to either side of the track the ground band reaches. The range
+  // band is a disc; a road is a corridor, and at 30 m ahead a forward camera's
+  // disc takes in the verge and the parked cars with it. Zero keeps the disc.
+  double ground_max_lateral_m = 0.0;
   // How many hop lengths of clearance the near edge of the road band needs.
   //
   // The road nearest the camera is the best conditioned ground there is, right

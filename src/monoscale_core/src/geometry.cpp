@@ -179,7 +179,7 @@ void pixels_to_ground(
   const Points2 & pixels, const CameraModel & model, double max_distance,
   double min_distance, const Eigen::Matrix3d * tilt, double range_scale,
   Points2 & ground_out, Mask & valid_out, double pitch_centre_x,
-  bool tilt_moves_camera)
+  bool tilt_moves_camera, double max_lateral)
 {
   const Eigen::Index count = pixels.rows();
   ground_out.resize(count, 2);
@@ -253,7 +253,7 @@ void pixels_to_ground(
     ground_out(i, 1) = point.y();
     valid_out(i) = nonparallel && std::isfinite(point.x()) && std::isfinite(point.y()) &&
       std::isfinite(point.z()) && lambda > 0.0 && distance <= max_distance &&
-      distance >= min_distance;
+      distance >= min_distance && (max_lateral <= 0.0 || std::abs(dy) <= max_lateral);
   }
 }
 

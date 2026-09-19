@@ -230,6 +230,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   declare_int("detection_grid_rows", 0);
 
   settings.ground_max_distance_m = declare_double("ground_max_distance_m", 25.0);
+  settings.ground_max_lateral_m = declare_double("ground_max_lateral_m", 0.0);
   settings.ground_min_distance_hops =
     declare_double("ground_min_distance_hops", 0.0);
   settings.emit_between_solves = declare_bool("emit_between_solves", false);

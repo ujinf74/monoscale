@@ -1661,7 +1661,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       current_pixels, camera.model, band, near_limit,
       tilt_ptr, camera.settings.range_scale * camera.range_scale_learned * imu_scale_,
       solved.current_ground, valid_current, settings_.pitch_centre_x_m,
-      tilt_moves_camera);
+      tilt_moves_camera, settings_.ground_max_lateral_m);
     // The earlier frame gets the tilt it was taken under, not this one's.
     const Eigen::Matrix3d * then_ptr = tilt_ptr;
     if (settings_.tilt_at_capture && camera.solve_tilt.has_value()) {
@@ -1671,7 +1671,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       previous_pixels, camera.model, band, near_limit,
       then_ptr, camera.settings.range_scale * camera.range_scale_learned * imu_scale_,
       solved.previous_ground, valid_previous, settings_.pitch_centre_x_m,
-      tilt_moves_camera);
+      tilt_moves_camera, settings_.ground_max_lateral_m);
   }
   solved.ground_valid = valid_previous && valid_current;
 

@@ -148,7 +148,12 @@ void pixels_to_ground(
   // Whether this tilt is the body rotating, in which case it both swings the
   // mount on its lever and changes the height over the road, or the camera's
   // angle against a road it still rides on, in which case it does neither.
-  bool tilt_moves_camera = true);
+  bool tilt_moves_camera = true,
+  // How far to either side of the vehicle's own track the ground still counts.
+  // The band above is a disc and a road is a corridor: at 30 m a forward camera
+  // takes in the verge, the kerb, the pavement and whatever is parked on it,
+  // and none of that is on the plane being fitted. Zero keeps the disc.
+  double max_lateral = 0.0);
 
 // Same, allocating its own results. The caller that runs this every solve
 // should prefer the form above and keep its buffers.
