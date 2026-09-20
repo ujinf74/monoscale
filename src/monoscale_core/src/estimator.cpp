@@ -4205,9 +4205,10 @@ void Estimator::process_pair()
     }
   }
 
-  // The accelerometer's own hop, blended in at a fixed weight. See
-  // `inertial_hop_weight`.
-  if (settings_.inertial_hop_weight > 0.0 && motion.has_value() && dt > 1e-4 &&
+  // The accelerometer's own hop, as a gate and as a weight. See
+  // `inertial_hop_gate_m` and `inertial_hop_weight`.
+  if ((settings_.inertial_hop_weight > 0.0 || settings_.inertial_hop_gate_m > 0.0) &&
+    motion.has_value() && dt > 1e-4 &&
     previous_stamp > 0.0 && current_stamp > previous_stamp)
   {
     const auto carried =
@@ -4238,9 +4239,29 @@ void Estimator::process_pair()
         // prediction for the first two hundred hops spends its whole scale
         // error on the stretch the trajectory is least able to absorb it.
         if (ready) {
-          const double w = std::clamp(settings_.inertial_hop_weight, 0.0, 1.0);
-          motion->x = (1.0 - w) * motion->x + w * scale * carried->x();
-          motion->y = (1.0 - w) * motion->y + w * scale * carried->y();
+          const double px = scale * carried->x();
+          const double py = scale * carried->y();
+          const double gap = std::hypot(motion->x - px, motion->y - py);
+          if (settings_.inertial_hop_gate_m > 0.0 && gap > settings_.inertial_hop_gate_m) {
+            // Pulled to the gate's edge, not replaced by the prediction.
+            //
+            // Replacing loses and the loop says why: the velocity filter then
+            // follows the prediction, and `correct_velocity` hands that back to
+            // the propagator, so a stretch where vision keeps failing becomes
+            // an accelerometer correcting itself. These stretches come in runs
+            // of ten and more. Clamping keeps vision in the loop and still
+            // takes the whole of what a collapsed hop costs: at a gate of
+            // 0.8 m the deviation fires on 3% of hops, which is the size of
+            // the population that carries the length error.
+            const double keep = settings_.inertial_hop_gate_m / gap;
+            motion->x = px + (motion->x - px) * keep;
+            motion->y = py + (motion->y - py) * keep;
+            ++diagnostics_.inertial_hop_gated;
+          } else if (settings_.inertial_hop_weight > 0.0) {
+            const double w = std::clamp(settings_.inertial_hop_weight, 0.0, 1.0);
+            motion->x = (1.0 - w) * motion->x + w * px;
+            motion->y = (1.0 - w) * motion->y + w * py;
+          }
         }
       }
     }

@@ -173,6 +173,19 @@ struct EstimatorSettings
   // truth against the fused hop's +3.8%. Blending a biased instrument at 0.59
   // spends that difference at first order.
   bool inertial_hop_equalise = true;
+  // How far the fused hop may sit from the accelerometer's before it is
+  // replaced by it. Zero leaves the hop alone.
+  //
+  // The weight above spends the prediction on every hop and loses, because the
+  // prediction's error is the most persistent thing here and blending it
+  // raises the sequence's autocorrelation. A gate spends it only where vision
+  // has already failed, and vision's failures are not subtle: on Ford's Log6
+  // the worst 2% of hops read -0.094 of truth against the drive's +1.001, and
+  // they carry 80% of its -4.7% length error. Their signature is the same on
+  // both drives -- the map did not answer, the point count is a third of
+  // normal, and the answer collapses to zero or below -- and a prediction good
+  // to 7% of the hop separates that from an honest one with room to spare.
+  double inertial_hop_gate_m = 0.0;
   double gyro_noise_sigma_rad_s = 1.0e-3;
   // What the ESM's turn is worth as an observation of the handed-in heading,
   // in radians over one hop. 0 is off. Its per-hop scatter measures 0.0003 to
@@ -1304,6 +1317,8 @@ struct Diagnostics
   // How many accelerating stretches the inertial scale learner could use, and
   // where it left the ground scale.
   int64_t inertial_scale_samples = 0;
+  // Hops the accelerometer refused and replaced. See `inertial_hop_gate_m`.
+  int64_t inertial_hop_gated = 0;
   // How the off-plane landmarks are doing: how many are held, how many know
   // their depth well enough to vote, and how often they could answer for a hop
   // against how often they were asked.
