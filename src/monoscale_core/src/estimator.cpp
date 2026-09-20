@@ -1153,9 +1153,20 @@ void Estimator::ingest_imu(const ImuSample & measured)
     // sequences 06, 07 and 10 against initial OXTS headings of -175.0, -31.9
     // and -15.7. It is the datum, and on a simulator that spawns the vehicle
     // facing zero it is zero, which is why it has never shown.
+    //
+    // And by the heading the estimator is actually using, which is not always
+    // the one the orientation reports. `imu_yaw_from_gyro` replaces the
+    // reported heading with the gyro's integral everywhere except here, so on
+    // a rig whose orientation is not the vehicle heading the propagator
+    // integrates the accelerometer into one world while the pose lives in
+    // another. Measured by the same cross product: Ford's Log5, which needs
+    // the gyro because its `/imu` orientation wanders +-180 degrees against
+    // the course, comes out at -70.3 degrees between the frames and the scale
+    // learner's two velocity changes correlate at 0.072. KITTI's seq00, where
+    // the two headings are the same number, reads -0.2 degrees and 0.971.
     Eigen::Vector4d oriented = sample.orientation;
     if (imu_yaw_datum_.has_value()) {
-      const double half = -0.5 * *imu_yaw_datum_;
+      const double half = 0.5 * wrap_pi(reported - yaw - *imu_yaw_datum_);
       const double cz = std::cos(half);
       const double sz = std::sin(half);
       const Eigen::Vector4d & q = sample.orientation;
@@ -4130,7 +4141,14 @@ void Estimator::process_pair()
           diagnostics_.scale_ww += delta_imu.squaredNorm();
           diagnostics_.scale_cross +=
             delta_vision.x() * delta_imu.y() - delta_vision.y() * delta_imu.x();
-          const double relative = (delta_vision - delta_imu).dot(delta_imu) / (reach * reach);
+          // The symmetric estimate reads the running sums rather than this
+          // window alone: a single ratio of two noisy magnitudes is worse than
+          // the attenuated regression it replaces, and the sums are already
+          // being kept.
+          const double relative = settings_.inertial_scale_symmetric
+            ? (diagnostics_.scale_ww > 1e-12
+            ? std::sqrt(diagnostics_.scale_uu / diagnostics_.scale_ww) - 1.0 : 0.0)
+            : (delta_vision - delta_imu).dot(delta_imu) / (reach * reach);
           if (std::isfinite(relative)) {
             // Half a per cent an update, whatever the window. Scaling the
             // bound with the window is the obvious thing and it loses: at 20

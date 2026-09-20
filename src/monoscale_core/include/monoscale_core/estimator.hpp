@@ -318,6 +318,27 @@ struct EstimatorSettings
   // How much the velocity has to have changed for the ratio above to be signal.
   // Over a 0.2 s solve interval this is the acceleration times that interval.
   double inertial_scale_excitation_m_s = 0.2;
+  // Estimate the scale from the two velocity changes symmetrically instead of
+  // regressing one on the other.
+  //
+  // `(dv_vision - dv_imu) . dv_imu / |dv_imu|^2` is vision regressed on the
+  // accelerometer, and the accelerometer is in the denominator, so noise there
+  // attenuates it. Writing `dv_vision = s u` and `dv_imu = u + e`,
+  //
+  //   E[relative] = (s - 1) |u|^2/(|u|^2 + var_e)  -  var_e/(|u|^2 + var_e)
+  //
+  // and the second term does not vanish when `s = 1`. A drive whose vision is
+  // already right is pushed down, `imu_scale_` grows the ranges, and the hop
+  // gets longer -- which is what both benchmarks do. Ford's Log5 sits at 0.995
+  // of truth, fires 122 times, reaches the 0.9 clamp and comes out at 1.052;
+  // KITTI's seq08 reaches 0.9045.
+  //
+  // The symmetric form is `sqrt(sum|dv_vision|^2 / sum|dv_imu|^2)`, the
+  // geometric mean of the two one-sided regressions. Each noise inflates its
+  // own side, so they cancel where the two are alike and the estimate is
+  // unbiased at `s = 1` -- which is the case that matters, because it is the
+  // one where the learner should do nothing at all.
+  bool inertial_scale_symmetric = false;
   // How far a translation may sit from what inertial propagation expects.
   double inertial_gate_m = 0.0;
   // How fast the per-camera range scale follows the measured radial residual.

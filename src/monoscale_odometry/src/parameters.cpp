@@ -255,6 +255,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.inertial_scale_window = declare_int("inertial_scale_window", 1);
   settings.inertial_scale_excitation_m_s =
     declare_double("inertial_scale_excitation_m_s", 0.2);
+  settings.inertial_scale_symmetric =
+    declare_bool("inertial_scale_symmetric", false);
   settings.inertial_gate_m = declare_double("inertial_gate_m", 0.0);
   settings.align_seed_from_last_hop = declare_bool("align_seed_from_last_hop", false);
   settings.align_restarts = declare_int("align_restarts", 1);
