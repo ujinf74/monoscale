@@ -791,6 +791,9 @@ struct EstimatorSettings
   // What it should be is the shrinkage computed per solve from the regression's
   // own variance rather than a number fixed for the drive. That is the next
   // thing this wants.
+  // Learn the camera-to-road pitch from the front and rear cameras disagreeing
+  // about the hop. Zero is off; it needs two cameras facing opposite ways.
+  double split_tilt_gain = 0.0;
   double pair_tilt_gain = 0.0;
   // Carry the tilt the pair residual measures, instead of spending each solve's
   // estimate on that solve alone.
@@ -1264,6 +1267,8 @@ struct Diagnostics
   // accumulate the correlation between what the pair residual says the tilt
   // changed by between two solves and what the gyro integrated over the same
   // interval.
+  double split_tilt = 0.0;
+  int64_t split_tilt_samples = 0;
   int64_t bearing_attempts = 0;
   int64_t bearing_thin = 0;
   int64_t bearing_singular = 0;
@@ -1507,6 +1512,7 @@ private:
   // correction. The difference of each against now is the pair the scale is
   // read from.
   uint64_t scale_last_restarts_ = 0;
+  double split_tilt_ = 0.0;
   std::optional<std::pair<double, double>> tilt_probe_last_;
   std::optional<Eigen::Vector2d> scale_last_correction_;
   std::optional<Eigen::Vector2d> scale_last_measured_;

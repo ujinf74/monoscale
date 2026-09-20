@@ -412,6 +412,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.ground_plane_offset_m =
     declare_double("ground_plane_offset_m", 0.0);
   settings.pair_tilt_gain = declare_double("pair_tilt_gain", 0.0);
+  settings.split_tilt_gain = declare_double("split_tilt_gain", 0.0);
   settings.pair_tilt_filter = declare_bool("pair_tilt_filter", false);
   settings.pair_tilt_road_rate_deg_s =
     declare_double("pair_tilt_road_rate_deg_s", 0.3);

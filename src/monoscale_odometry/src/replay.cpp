@@ -1600,6 +1600,11 @@ int main(int argc, char ** argv)
               static_cast<double>(diagnostics.landmark_solved), 2), 0.0)) : 0.0,
         diagnostics.landmark_depth);
     }
+    if (diagnostics.split_tilt_samples > 0) {
+      std::printf(
+        "split tilt: %+.4f deg from %ld updates\n",
+        diagnostics.split_tilt * 180.0 / M_PI, diagnostics.split_tilt_samples);
+    }
     if (diagnostics.bearing_attempts > 0) {
       std::printf(
         "bearing fit: %ld attempts, %ld too thin, %ld singular (mean condition %.3g)\n",

@@ -1816,7 +1816,16 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   solved.track_slot = matched_now;
   solved.current_pixels = current_pixels;
 
-  const auto tilt = camera_tilt(camera);
+  auto tilt = camera_tilt(camera);
+  // The pitch the two cameras' disagreement has measured, composed on whatever
+  // else the tilt is. See `split_tilt_gain`: it is a body rotation, so it goes
+  // on both cameras alike and their own geometry gives it the opposite sign in
+  // each hop.
+  if (settings_.split_tilt_gain != 0.0 && std::abs(split_tilt_) > 1e-9) {
+    const Eigen::Matrix3d extra(
+      Eigen::AngleAxisd(split_tilt_, Eigen::Vector3d::UnitY()));
+    tilt = tilt.has_value() ? Eigen::Matrix3d(extra * tilt.value()) : extra;
+  }
   const Eigen::Matrix3d * tilt_ptr = tilt.has_value() ? &tilt.value() : nullptr;
   // A band or anchor tilt is the camera's angle against the road, not the
   // body's attitude against gravity. A mounting error tilts the camera without
@@ -2709,6 +2718,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       if (std::abs(d) > 1e-9) {
         const double slope = (solve_n * solve_sre - solve_sr * solve_se) / d;
         const double mean_range = solve_sr / solve_n;
+        solved.mean_range = mean_range;
         const double sign = solve_forward < 0.0 ? -1.0 : 1.0;
         double excess = slope * mean_range * sign;
         const double length = std::hypot(estimate->motion.x, estimate->motion.y);
@@ -3979,6 +3989,60 @@ void Estimator::process_pair()
     }
     if (total > 0.0) {
       motion->y -= motion->yaw * lever / total;
+    }
+
+    // And the pitch that disagreement is measuring.
+    //
+    // A camera-to-road pitch `d` puts a relative error `2 R_bar d / h` on the
+    // hop, with the sign of the direction it faces: a forward camera reads the
+    // hop long when it is nose-up and a rear one reads it short. So with two
+    // cameras the common part and the pitch part separate,
+    //
+    //   e_i = a + k_i d ,   k_i = facing_i * 2 R_bar_i / h_i
+    //
+    // and `d = (e_f - e_r) / (k_f - k_r)`. Nothing here needs the truth: the
+    // two cameras are independent instruments whose sensitivity to the same
+    // body rotation has opposite sign, which is the one thing a single camera
+    // can never supply about a constant tilt. Measured on Ford's Log5 the two
+    // read +6.30% and -14.60%, which is 0.80 degrees.
+    if (settings_.split_tilt_gain != 0.0 && reach > 1e-6) {
+      double high_e = 0.0;
+      double high_k = 0.0;
+      double low_e = 0.0;
+      double low_k = 0.0;
+      bool have_high = false;
+      bool have_low = false;
+      for (size_t i = 0; i < solved.size(); ++i) {
+        if (!solved[i].has_value() || !solved[i]->motion.has_value() ||
+          solved[i]->mean_range <= 1e-6)
+        {
+          continue;
+        }
+        const double height = cameras_[i]->model.translation_base_from_camera.z();
+        if (height <= 1e-6) {
+          continue;
+        }
+        const double along =
+          (solved[i]->motion->x * motion->x + solved[i]->motion->y * motion->y) / reach;
+        const double error = (along - reach) / reach;
+        const double facing =
+          cameras_[i]->model.rotation_base_from_camera(0, 2) < 0.0 ? -1.0 : 1.0;
+        const double k = facing * 2.0 * solved[i]->mean_range / height;
+        if (facing > 0.0 && !have_high) {
+          high_e = error; high_k = k; have_high = true;
+        } else if (facing < 0.0 && !have_low) {
+          low_e = error; low_k = k; have_low = true;
+        }
+      }
+      if (have_high && have_low && std::abs(high_k - low_k) > 1e-6) {
+        const double measured = (high_e - low_e) / (high_k - low_k);
+        if (std::isfinite(measured)) {
+          split_tilt_ = std::clamp(
+            split_tilt_ + settings_.split_tilt_gain * measured, -0.05, 0.05);
+          diagnostics_.split_tilt = split_tilt_;
+          ++diagnostics_.split_tilt_samples;
+        }
+      }
     }
   }
 
