@@ -17,6 +17,7 @@ GroundAnchorMap::GroundAnchorMap(const AnchorSettings & settings, int sources)
   by_id_.resize(static_cast<size_t>(sources_));
   const int capacity = std::max(settings_.max_anchors, 1) + 1;
   position_.setZero(capacity, 2);
+  innovation_.setZero(capacity, 2);
   observation_.setZero(capacity);
   variance_.setZero(capacity);
   pending_.assign(static_cast<size_t>(std::max(sources, 1)), {});
@@ -337,7 +338,17 @@ double GroundAnchorMap::weight_at(int64_t slot) const
   // bounded a term worth 0.00015 and measured identical at 5, 10 and 20.
   const double sightings = static_cast<double>(std::max<int64_t>(observation_(slot), 1));
   const double scatter = std::max(variance_(slot), 0.0) / (2.0 * sightings);
-  return 1.0 / std::max(measured + scatter + drift, 1e-12);
+  double worth = 1.0 / std::max(measured + scatter + drift, 1e-12);
+  // And what share of that scatter is a walk rather than noise. See
+  // `drift_weight`: the innovation's squared mean over its mean square is
+  // bounded in [0, 1] by construction and carries no threshold of its own.
+  if (settings_.drift_weight > 0.0 && variance_(slot) > 1e-12) {
+    const double walked = innovation_(slot, 0) * innovation_(slot, 0) +
+      innovation_(slot, 1) * innovation_(slot, 1);
+    const double share = std::min(walked / variance_(slot), 1.0);
+    worth *= std::max(1.0 - settings_.drift_weight * share, 0.0);
+  }
+  return worth;
 }
 void GroundAnchorMap::polar(
   double x, double y, double yaw, std::vector<std::array<double, 7>> & out) const
@@ -716,6 +727,11 @@ void GroundAnchorMap::update(
     }
     const double dx = x - position_(slot, 0);
     const double dy = y - position_(slot, 1);
+    // The innovation's own running mean, on the same gain as everything else
+    // here. What it measures is whether this anchor is walking away from where
+    // it is stored, which is the half of `variance_` that is not noise.
+    innovation_(slot, 0) += gain * (dx - innovation_(slot, 0));
+    innovation_(slot, 1) += gain * (dy - innovation_(slot, 1));
     const double residual = dx * dx + dy * dy;
     variance_(slot) += gain * (residual - variance_(slot));
     // The slow companion. Its gain is fixed rather than shared with the fast
@@ -839,6 +855,8 @@ void GroundAnchorMap::forget(int64_t slot)
   founder_(slot) = -1;
   identifier_(slot) = -1;
   observation_(slot) = 0;
+  innovation_(slot, 0) = 0.0;
+  innovation_(slot, 1) = 0.0;
   // The remembered sightings belong to the anchor that just died, not to
   // whatever is put in this slot next. Leaving them makes a rebuild place the
   // new anchor where the old one was, which measured as eighteen metres.

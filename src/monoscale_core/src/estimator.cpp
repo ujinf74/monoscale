@@ -532,6 +532,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
   anchor_settings.link_adopter_writes = settings.anchor_link_adopter_writes;
   anchor_settings.max_age_frames = settings.anchor_max_age_frames;
   anchor_settings.update_gain = settings.anchor_update_gain;
+  anchor_settings.drift_weight = settings.anchor_drift_weight;
   anchor_settings.select_by_consistency = settings.anchor_select_by_consistency;
   anchor_settings.max_variance = settings.anchor_max_variance;
   anchor_settings.trial_observations = settings.anchor_trial_observations;

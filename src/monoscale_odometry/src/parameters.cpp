@@ -325,6 +325,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   // eagerly absorbs the estimate's own error and stops being able to correct
   // it. Unused while each sighting is weighted by its own precision.
   settings.anchor_update_gain = declare_double("anchor_update_gain", 0.0);
+  settings.anchor_drift_weight = declare_double("anchor_drift_weight", 0.0);
   // Where an anchor's weight stops growing. Reached in a third of a second at
   // 60 Hz, it stops telling a long-lived landmark apart from a fresh one.
   settings.anchor_select_by_consistency = declare_bool("anchor_select_by_consistency", true);

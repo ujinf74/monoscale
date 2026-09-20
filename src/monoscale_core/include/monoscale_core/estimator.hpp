@@ -416,6 +416,7 @@ struct EstimatorSettings
   int max_ground_anchors = 4000;
   int anchor_max_age_frames = 120;
   double anchor_update_gain = 0.0;
+  double anchor_drift_weight = 0.0;
   double anchor_max_variance = 0.09;
   int anchor_trial_observations = 4;
   // Solves an anchor must go unseen before it may be evicted.

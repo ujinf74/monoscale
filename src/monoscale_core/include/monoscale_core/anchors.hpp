@@ -42,6 +42,23 @@ struct AnchorSettings
   // geometry, for the reason `consistent_at` sets out.
   double max_variance = 0.09;
   int trial_observations = 4;
+  // How much of an anchor's weight a systematic walk takes away. Zero is off.
+  //
+  // `variance_` is the running mean of the squared innovation and the position
+  // is their mean, so an anchor that is standing still has a zero-mean
+  // innovation and all of that variance is noise. One that is walking -- a
+  // feature on the vehicle driving ahead, a reflection sliding over bodywork --
+  // keeps a consistently signed innovation, and the squared mean of it is the
+  // share of the variance that is not noise. That share is dimensionless,
+  // bounded in [0, 1], and needs no threshold: the weight is scaled by
+  // `1 - drift_weight * share`.
+  //
+  // What it cannot do is tell a walking anchor from a correct one when the fit
+  // has already been dragged, because both the innovation and the variance are
+  // written in the frame the estimate settled on -- see the note in
+  // `weight_at`. It is a soft version of the consensus the fit already picks,
+  // not an outside opinion about which consensus is right.
+  double drift_weight = 0.0;
   // Off, an anchor is trusted for having been seen often, which was the
   // original rule. On, it also has to keep landing in the same place.
   bool select_by_consistency = true;
@@ -456,6 +473,9 @@ private:
 
   AnchorSettings settings_;
   Points2 position_;
+  // Running mean of the innovation, in metres. Zero for an anchor that stands
+  // still; consistently signed for one that walks. See `drift_weight`.
+  Points2 innovation_;
   Eigen::Matrix<int64_t, Eigen::Dynamic, 1> observation_;
   Eigen::VectorXd variance_;
   Eigen::Matrix<int64_t, Eigen::Dynamic, 1> seen_;
