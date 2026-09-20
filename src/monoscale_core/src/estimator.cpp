@@ -570,6 +570,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
   last_radial_height_.assign(settings.cameras.size(), 0.0);
   last_radial_pitch_.assign(settings.cameras.size(), 0.0);
   camera_travel_.assign(settings.cameras.size(), 0.0);
+  camera_paired_travel_.assign(settings.cameras.size(), 0.0);
   camera_solves_.assign(settings.cameras.size(), 0);
   camera_inliers_.assign(settings.cameras.size(), 0.0);
   camera_spread_.assign(settings.cameras.size(), 0.0);
@@ -3186,6 +3187,7 @@ void Estimator::process_pair()
   }
 
   std::vector<PlanarMotion> motions;
+  std::vector<size_t> motion_camera;
   std::vector<CameraTranslation> precision_inputs;
   bool all_have_spread = true;
   for (size_t i = 0; i < count; ++i) {
@@ -3211,6 +3213,7 @@ void Estimator::process_pair()
     }
     solved[i]->motion = measured;
     motions.push_back(measured);
+    motion_camera.push_back(i);
     if (solved[i]->spread > 0.0) {
       precision_inputs.push_back(
         CameraTranslation{measured.x, measured.y, measured.inliers, solved[i]->spread});
@@ -3237,6 +3240,7 @@ void Estimator::process_pair()
   // between them is a difference in the scale each one derives from its own
   // ground projection, and unlike the radial residual it does not vanish just
   // because the map was built with the same scale.
+  size_t answered = 0;
   for (size_t i = 0; i < solved.size(); ++i) {
     if (!solved[i].has_value()) {
       continue;
@@ -3248,6 +3252,66 @@ void Estimator::process_pair()
       camera_inliers_[i] += static_cast<double>(moved->inliers);
       camera_spread_[i] += solved[i]->spread;
       camera_anchored_[i] += solved[i]->anchored_from_map ? 1 : 0;
+      ++answered;
+    }
+  }
+  // The common subset, which is the only one the cameras can be compared over.
+  if (answered == cameras_.size() && cameras_.size() >= 2) {
+    for (size_t i = 0; i < solved.size() && i < camera_paired_travel_.size(); ++i) {
+      camera_paired_travel_[i] += std::hypot(solved[i]->motion->x, solved[i]->motion->y);
+    }
+    ++camera_paired_solves_;
+  }
+
+  // Equalised against each other, on the common subset, before anything
+  // weighs them.
+  //
+  // Two cameras measuring one hop on a rigid body must agree. Where they do
+  // not the difference is the ratio of the scales their own ground projections
+  // give, and dividing it out is the whole of what a second camera can say
+  // about scale without a reference. It leaves the part both share untouched
+  // by construction -- multiplying every camera by a constant leaves every
+  // ratio where it was -- so this cannot walk the trajectory's scale, and the
+  // level stays with the inertial estimate that is the only absolute thing
+  // here.
+  //
+  // Why it has to happen before the weights: an inverse-variance weight is
+  // right for measurements that differ only by their noise, and these differ
+  // by a bias of a few per cent as well. On Ford's Log5 the precision-optimal
+  // weight on the rear is 0.24 and the measured optimum is 0.02, because at
+  // 0.24 the rear's bias enters at first order while its noise only helps at
+  // second. Equalising is what makes the precision-optimal weight the right
+  // one to use.
+  if (settings_.camera_scale_equalise && camera_paired_solves_ >= 200 &&
+    camera_paired_travel_.size() >= 2)
+  {
+    double total = 0.0;
+    double weight_total = 0.0;
+    for (size_t i = 0; i < camera_paired_travel_.size(); ++i) {
+      const double weight = cameras_[i]->settings.fusion_weight > 0.0
+        ? cameras_[i]->settings.fusion_weight : 1.0;
+      total += weight * camera_paired_travel_[i];
+      weight_total += weight;
+    }
+    const double mean = weight_total > 0.0 ? total / weight_total : 0.0;
+    if (mean > 1e-6) {
+      for (size_t k = 0; k < motions.size(); ++k) {
+        const size_t i = motion_camera[k];
+        if (i >= camera_paired_travel_.size() || camera_paired_travel_[i] <= 1e-6) {
+          continue;
+        }
+        // A sanity bound, not a gain. Past a quarter the two are not measuring
+        // the same hop and the right answer is to stop believing one of them,
+        // which is a different decision from this one.
+        const double correction =
+          std::clamp(mean / camera_paired_travel_[i], 0.75, 1.25);
+        motions[k].x *= correction;
+        motions[k].y *= correction;
+        if (k < precision_inputs.size()) {
+          precision_inputs[k].x *= correction;
+          precision_inputs[k].y *= correction;
+        }
+      }
     }
   }
 
@@ -4394,6 +4458,13 @@ void Estimator::process_pair()
   update.previous_stamp = previous_stamp;
   update.hops_valid = last_hops_valid_;
   update.fused_hop = last_fused_hop_;
+  if (previous_stamp > 0.0 && current_stamp > previous_stamp) {
+    const auto carried = inertial_.predicted_translation(
+      previous_stamp, current_stamp, pose_.yaw);
+    if (carried.has_value()) {
+      update.inertial_hop = *carried;
+    }
+  }
   update.camera_hops = last_camera_hops_;
   update.camera_from_map = last_from_map_;
   update.camera_condition = last_condition_;

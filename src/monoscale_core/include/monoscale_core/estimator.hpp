@@ -130,6 +130,25 @@ struct EstimatorSettings
   bool photometric_null_tilt = false;
   // The gyro's own noise, used to grow the heading's variance between solves.
   // A property of the instrument, not a tuning axis.
+  // Divide out the ratio between the cameras' own scales before fusing them.
+  //
+  // Two cameras measuring one hop on a rigid body must agree, so their
+  // persistent ratio is the difference between the scales their ground
+  // projections give and nothing else -- observable without any reference.
+  // Multiplying every camera by a constant leaves every ratio where it was, so
+  // this cannot walk the trajectory's scale; the level stays with the inertial
+  // estimate, which is the only absolute thing here.
+  //
+  // Off by default because it does not win on both drives it was measured on.
+  // What it does do is make a precision weight mean something: on Ford's Log5
+  // the precision-optimal weight on the rear is 0.24 and without this it
+  // reads 3.486% against the hand-found 0.02's 3.179%, because at 0.24 the
+  // rear's -12% bias enters at first order while its noise only helps at
+  // second. With it, 0.24 reads 3.006% -- the best that drive has given. Log6
+  // still prefers 0.02 (5.119% against 6.002%), which says the two drives'
+  // cameras do not share a bias, and one ratio learned over a drive cannot
+  // serve a bias that changes within it.
+  bool camera_scale_equalise = false;
   double gyro_noise_sigma_rad_s = 1.0e-3;
   // What the ESM's turn is worth as an observation of the handed-in heading,
   // in radians over one hop. 0 is off. Its per-hop scatter measures 0.0003 to
@@ -1123,6 +1142,12 @@ struct Update
   double previous_stamp = 0.0;
   bool hops_valid = false;
   Eigen::Vector2d fused_hop = Eigen::Vector2d::Zero();
+  // The accelerometer's own answer for the same hop, body frame, where it has
+  // one. Diagnostic: it is the only instrument here whose errors are
+  // independent of both cameras, which is what a three-cornered hat needs to
+  // separate their variances without a reference.
+  Eigen::Vector2d inertial_hop =
+    Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
   // Not finite where that camera did not answer this pair.
   std::vector<Eigen::Vector2d> camera_hops;
   // 1 where that camera's hop came from the anchor map rather than the two
@@ -1515,6 +1540,27 @@ private:
   // One ground map for every camera. See GroundAnchorMap's note on sources.
   std::unique_ptr<GroundAnchorMap> anchors_;
   std::vector<double> camera_travel_;
+  // The same travel, summed only over the solves every camera answered.
+  //
+  // `camera_travel_` cannot be compared between cameras: each one accumulates
+  // over its own subset of solves and the subsets differ by hundreds, so the
+  // ratio of the totals carries which solves each camera managed as much as
+  // how far it says the vehicle went. Restricted to the common subset the
+  // ratio is the thing the note above describes -- a difference in the scale
+  // each camera derives from its own ground projection -- and nothing else.
+  //
+  // It is observable without truth because the body is rigid: two cameras
+  // measuring one hop must agree, so their disagreement is their relative
+  // bias and no reference is needed to see it. What it cannot see is the part
+  // both share, which is what the inertial scale is for.
+  std::vector<double> camera_paired_travel_;
+  int64_t camera_paired_solves_ = 0;
+  // The road's photometric length against the solve's, the same way. This is a
+  // third instrument on the same hop and it carries its own scale error; the
+  // running ratio takes the mean of that out and leaves the per-hop deviation,
+  // which is the only part of it worth blending.
+  double photometric_ratio_sum_ = 0.0;
+  double photometric_ratio_solve_ = 0.0;
   // Ground scale correction learned against inertial propagation.
   double imu_scale_ = 1.0;
   // What was handed to the propagator, and what vision measured, at the last

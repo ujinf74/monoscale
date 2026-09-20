@@ -1049,7 +1049,7 @@ int main(int argc, char ** argv)
         // drivers instead of binned by the one the correction already assumes.
         std::FILE * f = std::fopen(hops_path.c_str(), "w");
         if (f != nullptr) {
-          std::fprintf(f, "t0,t1,dt,length,dyaw,curvature,bias,lat,front,rear,fmap,rmap,fwd,yawsign,fcond,fweak,rcond,rweak,fhx,fhy,fpx,fpy,rhx,rhy,rpx,rpy,frng,fn,rrng,rn,pdist,flen,fh,fp,rh,rp,roll,pitch,byaw,broll,bpitch,btx,bty\n");
+          std::fprintf(f, "t0,t1,dt,length,dyaw,curvature,bias,lat,front,rear,fmap,rmap,fwd,yawsign,fcond,fweak,rcond,rweak,fhx,fhy,fpx,fpy,rhx,rhy,rpx,rpy,frng,fn,rrng,rn,pdist,flen,fh,fp,rh,rp,roll,pitch,byaw,broll,bpitch,btx,bty,imu\n");
           for (const auto & hop : hops) {
             if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
               continue;
@@ -1088,7 +1088,7 @@ int main(int argc, char ** argv)
               f, "%.6f,%.6f,%.4f,%.5f,%.6f,%.5f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.5f,%+d,"
               "%.4f,%.5f,%.4f,%.5f,"
               "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
-              "%.4f,%.0f,%.4f,%.0f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.8f,%.8f,%.8f,%.8f,%.8f\n",
+              "%.4f,%.0f,%.4f,%.0f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f\n",
               hop.previous_stamp, hop.stamp, hop.stamp - hop.previous_stamp, length, std::abs(step.yaw),
               std::abs(step.yaw) / length, along(hop.fused_hop), across(hop.fused_hop),
               camera(0), camera(1),
@@ -1106,7 +1106,9 @@ int main(int argc, char ** argv)
               pick(hop.radial_height, 1), pick(hop.radial_pitch, 1),
               hop.roll, hop.pitch, hop.bearing_yaw,
               hop.bearing_roll_raw, hop.bearing_pitch_raw,
-              hop.bearing_tx, hop.bearing_ty);
+              hop.bearing_tx, hop.bearing_ty,
+              hop.inertial_hop.allFinite() ? along(hop.inertial_hop)
+                : std::numeric_limits<double>::quiet_NaN());
           }
           std::fclose(f);
         }
