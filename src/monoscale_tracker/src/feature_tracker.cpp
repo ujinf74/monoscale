@@ -748,6 +748,12 @@ public:
       totals += " " + entry.first + "=" + std::to_string(entry.second);
     }
     RCLCPP_INFO(get_logger(), "published total:%s", totals.c_str());
+    if (esm_masked_frames_ > 0) {
+      RCLCPP_INFO(
+        get_logger(), "esm auto-mask: frames=%ld cells/frame=%.2f",
+        esm_masked_frames_,
+        static_cast<double>(esm_masked_cells_) / static_cast<double>(esm_masked_frames_));
+    }
     RCLCPP_INFO(
       get_logger(), "step sign: frames=%ld negative=%ld flips=%ld",
       sign_frames_, sign_negative_, sign_flips_);
@@ -1010,6 +1016,9 @@ public:
     // median over the `road_step_tiles` x this grid instead of one correlation
     // over the whole of it; see `road_scores`.
     road_step_cell_rows_ = declare_parameter<int>("road_step_cell_rows", 1);
+    // Drop the cells the still picture explains better, inside the fit. Needs
+    // the grid above; see `solve_step_esm`.
+    road_step_auto_mask_ = declare_parameter<bool>("road_step_auto_mask", false);
     road_step_dump_ = declare_parameter<std::string>("road_step_dump", "");
     // Run the optical flow on the GPU.
     //
@@ -3881,7 +3890,66 @@ private:
     if (!road_patch(model, previous, roi, at, patch, mask)) {
       return out;
     }
+    // The cells the motion explains better than the still picture does.
+    //
+    // At a step of zero the induced homography is the identity, so a cell
+    // holding the car ahead, the vehicle's own bodywork or anything above the
+    // horizon is already perfect there and no honest warp can beat it. This
+    // fit is a least squares over the whole region, so those cells pull the
+    // step toward zero with the same authority as the road. Godard et al.
+    // (Monodepth2, ICCV 2019) drop exactly these pixels from a training loss
+    // by comparing the warped error with the unwarped one; the same test
+    // applies to a fit.
+    //
+    // Taken once, at the seed, and held. Recomputing it inside the iteration
+    // makes the cost a different function every step, which is the instability
+    // the follow-up work on auto-masking reports. And if fewer than half the
+    // cells survive, nothing is masked at all: a region where the still
+    // picture wins everywhere is not a region with a few intruders in it, it
+    // is a region this test cannot read.
+    cv::Mat keep;
+    if (road_step_auto_mask_) {
+      double flat[4] = {0.0, turn, 0.0, 0.0};
+      cv::Mat still;
+      if (road_patch(model, previous, roi, flat, still, mask)) {
+        const cv::Mat moved_error = patch - target;
+        const cv::Mat still_error = still - target;
+        const int cols = std::max(road_step_tiles_, 1);
+        const int rows = std::max(road_step_cell_rows_, 1);
+        cv::Mat cell(roi.height, roi.width, CV_32F, cv::Scalar(1.0f));
+        int dropped = 0;
+        for (int r = 0; r < rows; ++r) {
+          const int y0 = r * roi.height / rows;
+          const int y1 = (r + 1) * roi.height / rows;
+          for (int c = 0; c < cols; ++c) {
+            const int x0 = c * roi.width / cols;
+            const int x1 = (c + 1) * roi.width / cols;
+            const cv::Rect box(x0, y0, x1 - x0, y1 - y0);
+            if (box.width < 4 || box.height < 4) {
+              continue;
+            }
+            const cv::Mat a = moved_error(box);
+            const cv::Mat b = still_error(box);
+            if (a.dot(a) >= b.dot(b)) {
+              cell(box).setTo(0.0f);
+              ++dropped;
+            }
+          }
+        }
+        if (dropped > 0 && dropped * 2 <= rows * cols) {
+          keep = cell;
+          esm_masked_cells_ += dropped;
+          ++esm_masked_frames_;
+        }
+      }
+    }
+    const auto weigh = [&keep](cv::Mat & m) {
+        if (!keep.empty()) {
+          m = m.mul(keep);
+        }
+      };
     cv::Mat residual = patch - target;
+    weigh(residual);
     double cost = residual.dot(residual);
     const double seeded = cost;
     double lambda = 1e-3;
@@ -3939,6 +4007,7 @@ private:
         if (built && road_step_esm_analytic_) {
           for (int k = 0; k < freedom; ++k) {
             column[k] = exact[k];
+            weigh(column[k]);
           }
         } else if (built) {
           built = false;  // fall through to the numeric loop
@@ -3955,6 +4024,7 @@ private:
           road_patch(model, previous, roi, down, behind, mask);
         if (built) {
           column[k] = (ahead - behind) / (2.0 * probe[k]);
+          weigh(column[k]);
         }
       }
       if (!built) {
@@ -4005,6 +4075,7 @@ private:
           cv::Mat moved_patch;
           if (inside && road_patch(model, previous, roi, trial, moved_patch, mask)) {
             cv::Mat next = moved_patch - target;
+            weigh(next);
             const double trial_cost = next.dot(next);
             if (trial_cost < cost) {
               // What the accepted step says about the Jacobian that proposed
@@ -5062,6 +5133,9 @@ private:
   bool esm_step_ = true;
   double road_step_band_window_px_ = 3.0;
   int road_step_cell_rows_ = 1;
+  bool road_step_auto_mask_ = false;
+  mutable int64_t esm_masked_cells_ = 0;
+  mutable int64_t esm_masked_frames_ = 0;
   std::array<double, 4> road_step_roi_{0.25, 0.60, 0.75, 1.00};
   std::map<std::string, std::array<double, 4>> road_bands_;
   int road_step_samples_ = 13;
