@@ -210,6 +210,11 @@ Configuration declare_and_read(rclcpp::Node & node)
     camera.lens = monoscale::lens_from_name(model);
     camera.rotation_base_from_camera = matrix_of(rotation);
     camera.translation_base_from_camera = vector_of(translation);
+    camera.ego_mask = node.declare_parameter<std::vector<double>>(
+      name + ".ego_mask", std::vector<double>{});
+    if (!camera.ego_mask.empty() && camera.ego_mask.size() < 4) {
+      throw std::runtime_error(name + " ego_mask needs a span and at least two rows");
+    }
     validate_rotation(name, camera.rotation_base_from_camera);
     settings.cameras.push_back(camera);
   }

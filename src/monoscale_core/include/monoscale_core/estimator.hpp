@@ -74,6 +74,20 @@ struct CameraSettings
   // What this camera counts for when the cameras are combined. 0 on any of
   // them falls back to inlier counts for all.
   double fusion_weight = 0.0;
+  // Where this camera sees its own vehicle, as a silhouette in the field of
+  // view rather than a distance. A roof mount looks across its own bodywork,
+  // and the body does not occupy a range -- it occupies a direction. Cutting it
+  // out with `ground_min_distance_m` throws away every column the body does not
+  // block, which on this rig is most of them: the front sees road to the bottom
+  // row except on the right, and the rear is blocked only by a dome in the
+  // middle while both sides are clear.
+  //
+  // Held in normalised image coordinates so it does not care what resolution
+  // the tracker ran at: `[xn_min, xn_max, t0, t1, ... tN]`, where the `t` are
+  // `(v - cy) / fy` at N+1 points spaced evenly in `xn = (u - cx) / fx` from
+  // `xn_min` to `xn_max`. A point below the interpolated `t` for its own column
+  // is on the vehicle, not on the road.
+  std::vector<double> ego_mask;
   // Calibration, as CameraInfo would report it, at the resolution it describes.
   Eigen::Matrix3d k = Eigen::Matrix3d::Identity();
   Eigen::VectorXd distortion;

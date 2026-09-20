@@ -78,6 +78,32 @@ namespace
 // in SE(2) is not available here; what this recovers is the leading term,
 // which is the entire first-order difference between a path length and a
 // chord.
+// Whether a pixel falls on the vehicle's own bodywork. See `ego_mask`.
+bool on_own_vehicle(
+  const std::vector<double> & mask, const Eigen::Matrix3d & k, double u, double v)
+{
+  if (mask.size() < 4) {
+    return false;
+  }
+  const double low = mask[0];
+  const double high = mask[1];
+  const Eigen::Index count = static_cast<Eigen::Index>(mask.size()) - 2;
+  if (!(high > low) || count < 2) {
+    return false;
+  }
+  const double xn = (u - k(0, 2)) / k(0, 0);
+  if (xn < low || xn > high) {
+    return false;
+  }
+  const double at = (xn - low) / (high - low) * static_cast<double>(count - 1);
+  const Eigen::Index index = std::min(
+    static_cast<Eigen::Index>(at), count - 2);
+  const double fraction = at - static_cast<double>(index);
+  const double threshold = mask[static_cast<size_t>(2 + index)] * (1.0 - fraction) +
+    mask[static_cast<size_t>(3 + index)] * fraction;
+  return (v - k(1, 2)) / k(1, 1) > threshold;
+}
+
 double chord_of_arc(double arc, double yaw)
 {
   const double half = 0.5 * std::abs(yaw);
@@ -1838,6 +1864,26 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       tilt_moves_camera, settings_.ground_max_lateral_m);
   }
   solved.ground_valid = valid_previous && valid_current;
+
+  // The vehicle's own bodywork, taken out by direction rather than by range.
+  // Both views: a feature counts only if neither of its two positions lands on
+  // the car.
+  if (!camera.settings.ego_mask.empty()) {
+    for (Eigen::Index i = 0; i < solved.ground_valid.size(); ++i) {
+      if (!solved.ground_valid(i)) {
+        continue;
+      }
+      if (on_own_vehicle(
+          camera.settings.ego_mask, camera.model.k,
+          current_pixels(i, 0), current_pixels(i, 1)) ||
+        on_own_vehicle(
+          camera.settings.ego_mask, camera.model.k,
+          previous_pixels(i, 0), previous_pixels(i, 1)))
+      {
+        solved.ground_valid(i) = false;
+      }
+    }
+  }
 
   solved.motion_inliers = Mask::Constant(count, false);
 
