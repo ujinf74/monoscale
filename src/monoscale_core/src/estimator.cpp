@@ -3341,12 +3341,31 @@ void Estimator::process_pair()
   // through the map path's front/rear correction, the drift binding; the road
   // fit has no map and cannot replace either. What it has is scale.
   double road_distance = 0.0;
+  double road_weight = 0.0;
   int road_cameras = 0;
   for (const auto & held : cameras_) {
     if (held->photometric_valid && !held->photometric_broken &&
       held->photometric_since_solve > 0.0)
     {
-      road_distance += held->photometric_since_solve;
+      // Each camera's own weight, which is 1 for both on the rig the even
+      // average below was derived on and is not on every rig.
+      //
+      // That derivation stands on a body pitch reaching the two mounts with
+      // opposite sign, so that `[.5, .5]` nulls it. What produces the opposite
+      // sign is the lever `-(x - x_pivot)/h`, and it is only opposite when the
+      // mounts sit either side of the pivot. Ford's two sit 0.16 m apart on
+      // one roof rack: the levers are +0.153 and +0.250, the same sign, and
+      // there is no cancellation for an even average to collect. What it
+      // collects instead is the weaker camera's answer at full strength --
+      // measured on Log5, the front reads 0.99 to 1.03 of truth where the
+      // rear reads 0.30 to 0.53, and their even average is the 0.81 the fused
+      // length carries.
+      // Zero is this setting's "unset" everywhere else it is read, and an
+      // unset rig has to keep the even average it was measured with.
+      const double weight = held->settings.fusion_weight > 0.0
+        ? held->settings.fusion_weight : 1.0;
+      road_distance += weight * held->photometric_since_solve;
+      road_weight += weight;
       ++road_cameras;
     }
   }
@@ -3427,8 +3446,8 @@ void Estimator::process_pair()
   // be spent is on whether a camera is measuring at all, and on weighting this
   // fused length against the pair solve, which is a different instrument and
   // carries no such constraint.
-  double road_mean = road_cameras > 0
-    ? road_distance / road_cameras : std::numeric_limits<double>::quiet_NaN();
+  double road_mean = road_weight > 0.0
+    ? road_distance / road_weight : std::numeric_limits<double>::quiet_NaN();
   // The weight that would null the tilt, `w_front = -g_rear/(g_front - g_rear)`
   // from `w'1 = 1` and `w'g = 0`, with `g` computed inside the fit rather than
   // tuned. Off by default, because measurement says the even average is

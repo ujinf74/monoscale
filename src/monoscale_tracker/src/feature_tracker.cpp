@@ -1006,6 +1006,10 @@ public:
     // Across-track tiles, each answering on its own; the median is taken. 1
     // keeps the single-region search.
     road_step_tiles_ = declare_parameter<int>("road_step_tiles", 1);
+    // Row bands over the same region. Above 1 the region's score becomes the
+    // median over the `road_step_tiles` x this grid instead of one correlation
+    // over the whole of it; see `road_scores`.
+    road_step_cell_rows_ = declare_parameter<int>("road_step_cell_rows", 1);
     road_step_dump_ = declare_parameter<std::string>("road_step_dump", "");
     // Run the optical flow on the GPU.
     //
@@ -3069,6 +3073,21 @@ private:
       build_warp_roi(model, hop, turn, previous.cols, previous.rows, roi, map_x, map_y);
     }
     const int tiles = std::max(road_step_tiles_, 1);
+    // A second axis on the same partition, so the region's score can be a vote
+    // instead of a sum.
+    //
+    // At a step of zero the induced homography is the identity, so every pixel
+    // in the region matches perfectly whether or not it lies on the road. Sky,
+    // the vehicle's own bodywork and the car ahead therefore all vote for zero,
+    // and a single correlation over the whole region lets whichever of them
+    // carries the most contrast decide. That is how the search collapses.
+    //
+    // Scoring cells and taking the median makes the road's own cells decide as
+    // long as they are the majority, which is what the band is for. Nothing is
+    // excluded and no threshold is set: a cell the model does not describe is
+    // simply outvoted.
+    const int rows = std::max(road_step_cell_rows_, 1);
+    const int cells = tiles * rows;
     out.assign(static_cast<size_t>(tiles), -2.0);
     const cv::Mat target = current(roi);
     // Sampling the warp here instead of calling `cv::remap`, which rounds the
@@ -3130,13 +3149,14 @@ private:
     for (int i = 0; i <= tiles; ++i) {
       edge[static_cast<size_t>(i)] = i * roi.width / tiles;
     }
-    std::vector<int64_t> counted(tiles, 0);
-    std::vector<int64_t> sa(tiles, 0), sb(tiles, 0);
-    std::vector<int64_t> saa(tiles, 0), sbb(tiles, 0), sab(tiles, 0);
-    std::vector<double> fa(tiles, 0.0), fb(tiles, 0.0);
-    std::vector<double> faa(tiles, 0.0), fbb(tiles, 0.0), fab(tiles, 0.0);
+    std::vector<int64_t> counted(cells, 0);
+    std::vector<int64_t> sa(cells, 0), sb(cells, 0);
+    std::vector<int64_t> saa(cells, 0), sbb(cells, 0), sab(cells, 0);
+    std::vector<double> fa(cells, 0.0), fb(cells, 0.0);
+    std::vector<double> faa(cells, 0.0), fbb(cells, 0.0), fab(cells, 0.0);
     for (int y = 0; y < roi.height; ++y) {
       const uchar * a = target.ptr<uchar>(y);
+      const int band = std::min(y * rows / roi.height, rows - 1) * tiles;
       if (fused) {
         const double image_y = roi.y + y;
         const uchar * keep_fused = mask.empty() ? nullptr : mask.ptr<uchar>(y);
@@ -3157,13 +3177,14 @@ private:
             laa += va * va;
             lbb += vb * vb;
             lab += va * vb;
-            ++counted[static_cast<size_t>(i)];
+            ++counted[static_cast<size_t>(band + i)];
           }
-          fa[static_cast<size_t>(i)] += la;
-          fb[static_cast<size_t>(i)] += lb;
-          faa[static_cast<size_t>(i)] += laa;
-          fbb[static_cast<size_t>(i)] += lbb;
-          fab[static_cast<size_t>(i)] += lab;
+          const size_t cell = static_cast<size_t>(band + i);
+          fa[cell] += la;
+          fb[cell] += lb;
+          faa[cell] += laa;
+          fbb[cell] += lbb;
+          fab[cell] += lab;
         }
         continue;
       }
@@ -3188,14 +3209,25 @@ private:
           lab += va * vb;
           ++ln;
         }
-        counted[static_cast<size_t>(i)] += ln;
-        sa[static_cast<size_t>(i)] += la;
-        sb[static_cast<size_t>(i)] += lb;
-        saa[static_cast<size_t>(i)] += laa;
-        sbb[static_cast<size_t>(i)] += lbb;
-        sab[static_cast<size_t>(i)] += lab;
+        const size_t cell = static_cast<size_t>(band + i);
+        counted[cell] += ln;
+        sa[cell] += la;
+        sb[cell] += lb;
+        saa[cell] += laa;
+        sbb[cell] += lbb;
+        sab[cell] += lab;
       }
     }
+    // The cells of a column added back, so a tile means what it always meant.
+    const auto pick = [&](size_t cell, double & n, double & a, double & b,
+        double & aa, double & bb, double & ab) {
+        n += static_cast<double>(counted[cell]);
+        a += fused ? fa[cell] : static_cast<double>(sa[cell]);
+        b += fused ? fb[cell] : static_cast<double>(sb[cell]);
+        aa += fused ? faa[cell] : static_cast<double>(saa[cell]);
+        bb += fused ? fbb[cell] : static_cast<double>(sbb[cell]);
+        ab += fused ? fab[cell] : static_cast<double>(sab[cell]);
+      };
     for (int i = 0; i < tiles; ++i) {
       const int width = edge[static_cast<size_t>(i) + 1] - edge[static_cast<size_t>(i)];
       // Too narrow to say anything, and left at the caller's sentinel rather
@@ -3203,26 +3235,40 @@ private:
       if (width < 8) {
         continue;
       }
-      const size_t t = static_cast<size_t>(i);
-      out[t] = fused
-        ? zncc_from_sums(
-          static_cast<double>(width) * roi.height, fa[t], fb[t], faa[t], fbb[t], fab[t])
-        : zncc_from_sums(
-          static_cast<double>(width) * roi.height,
-          static_cast<double>(sa[t]), static_cast<double>(sb[t]),
-          static_cast<double>(saa[t]), static_cast<double>(sbb[t]),
-          static_cast<double>(sab[t]));
+      double n = 0.0, ta = 0.0, tb = 0.0, taa = 0.0, tbb = 0.0, tab = 0.0;
+      for (int r = 0; r < rows; ++r) {
+        pick(static_cast<size_t>(r * tiles + i), n, ta, tb, taa, tbb, tab);
+      }
+      out[static_cast<size_t>(i)] = zncc_from_sums(
+        static_cast<double>(width) * roi.height, ta, tb, taa, tbb, tab);
     }
     if (whole != nullptr) {
+      if (rows > 1) {
+        // The cells that hold enough pixels to carry a correlation, and the
+        // median of what they say. An even count takes the lower middle, so
+        // the statistic never lands between two cells' answers.
+        std::vector<double> votes;
+        votes.reserve(static_cast<size_t>(cells));
+        for (int c = 0; c < cells; ++c) {
+          double n = 0.0, ta = 0.0, tb = 0.0, taa = 0.0, tbb = 0.0, tab = 0.0;
+          pick(static_cast<size_t>(c), n, ta, tb, taa, tbb, tab);
+          if (n >= 64.0) {
+            votes.push_back(zncc_from_sums(n, ta, tb, taa, tbb, tab));
+          }
+        }
+        if (votes.empty()) {
+          *whole = -2.0;
+          return;
+        }
+        const size_t middle = (votes.size() - 1) / 2;
+        std::nth_element(votes.begin(), votes.begin() + middle, votes.end());
+        *whole = votes[middle];
+        return;
+      }
       // Every column, including any the tile loop was too narrow to report.
-      double ta = 0.0, tb = 0.0, taa = 0.0, tbb = 0.0, tab = 0.0;
-      for (int i = 0; i < tiles; ++i) {
-        const size_t t = static_cast<size_t>(i);
-        ta += fused ? fa[t] : static_cast<double>(sa[t]);
-        tb += fused ? fb[t] : static_cast<double>(sb[t]);
-        taa += fused ? faa[t] : static_cast<double>(saa[t]);
-        tbb += fused ? fbb[t] : static_cast<double>(sbb[t]);
-        tab += fused ? fab[t] : static_cast<double>(sab[t]);
+      double n = 0.0, ta = 0.0, tb = 0.0, taa = 0.0, tbb = 0.0, tab = 0.0;
+      for (int c = 0; c < cells; ++c) {
+        pick(static_cast<size_t>(c), n, ta, tb, taa, tbb, tab);
       }
       *whole = zncc_from_sums(
         static_cast<double>(roi.width) * roi.height, ta, tb, taa, tbb, tab);
@@ -5015,6 +5061,7 @@ private:
   bool road_step_esm_ = false;
   bool esm_step_ = true;
   double road_step_band_window_px_ = 3.0;
+  int road_step_cell_rows_ = 1;
   std::array<double, 4> road_step_roi_{0.25, 0.60, 0.75, 1.00};
   std::map<std::string, std::array<double, 4>> road_bands_;
   int road_step_samples_ = 13;
