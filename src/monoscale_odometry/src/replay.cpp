@@ -1600,6 +1600,15 @@ int main(int argc, char ** argv)
               static_cast<double>(diagnostics.landmark_solved), 2), 0.0)) : 0.0,
         diagnostics.landmark_depth);
     }
+    if (diagnostics.bearing_attempts > 0) {
+      std::printf(
+        "bearing fit: %ld attempts, %ld too thin, %ld singular (mean condition %.3g)\n",
+        diagnostics.bearing_attempts, diagnostics.bearing_thin,
+        diagnostics.bearing_singular,
+        diagnostics.bearing_singular > 0
+        ? diagnostics.bearing_condition_sum /
+        static_cast<double>(diagnostics.bearing_singular) : 0.0);
+    }
     if (diagnostics.tilt_probe_n > 1.0) {
       const double aa = diagnostics.tilt_probe_aa;
       const double bb = diagnostics.tilt_probe_bb;

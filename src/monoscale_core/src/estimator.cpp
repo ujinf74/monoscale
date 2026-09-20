@@ -2389,6 +2389,13 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         camera.anchor_tx_last = aligned->bearing_tx;
         camera.anchor_ty_last = aligned->bearing_ty;
       }
+      ++diagnostics_.bearing_attempts;
+      if (aligned->bearing_seen < 8) {
+        ++diagnostics_.bearing_thin;
+      } else if (aligned->bearing_terms == 0) {
+        ++diagnostics_.bearing_singular;
+        diagnostics_.bearing_condition_sum += aligned->bearing_condition;
+      }
       if (settings_.anchor_attitude && aligned->bearing_terms > 0) {
         const double gain = settings_.anchor_attitude_solves > 1.0
           ? 1.0 / settings_.anchor_attitude_solves : 1.0;
@@ -2412,6 +2419,11 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
             camera.anchor_imu_pitch = imu_pitch;
             camera.anchor_ready = true;
           }
+          // Counted here, where the consumer is actually fed. It used to be
+          // counted only inside the `esm_attitude` block, so a rig with that
+          // switched off -- which is most of them -- reported the anchor
+          // attitude starved while `camera_tilt` was using it on every frame.
+          ++diagnostics_.consumer_fed[Diagnostics::kAnchorAttitude];
         }
       }
       camera.radial_height_sum += aligned->radial_height;

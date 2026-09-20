@@ -1264,6 +1264,10 @@ struct Diagnostics
   // accumulate the correlation between what the pair residual says the tilt
   // changed by between two solves and what the gyro integrated over the same
   // interval.
+  int64_t bearing_attempts = 0;
+  int64_t bearing_thin = 0;
+  int64_t bearing_singular = 0;
+  double bearing_condition_sum = 0.0;
   double tilt_probe_n = 0.0;
   double tilt_probe_aa = 0.0;
   double tilt_probe_bb = 0.0;

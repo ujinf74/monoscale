@@ -1511,6 +1511,7 @@ std::optional<AnchorAlignment> align_to_anchors(
   // The angles, from the sphere. Fitted before the ground-domain regression
   // below because it is the one that is entitled to them: that one reports a
   // pitch too, but off a pair of bases that are 98-99 per cent collinear.
+  result.bearing_seen = bearing_terms;
   if (bearing_terms >= 8) {
     if (bearing_nonholonomic) {
       // The zeroed column leaves a singular direction; pin it so the solve is
@@ -1523,6 +1524,7 @@ std::optional<AnchorAlignment> align_to_anchors(
     // A fit standing on a direction the anchors do not span is not a
     // measurement of anything. The population turns over constantly, so this
     // fires on its own where the geometry is thin rather than needing a count.
+    result.bearing_condition = smallest > 1e-18 ? largest / smallest : 1e30;
     if (smallest > 1e-12 && largest / smallest < 1e6) {
       const Eigen::Matrix<double, 5, 1> fit = bearing_normal.ldlt().solve(bearing_rhs);
       if (fit.allFinite()) {

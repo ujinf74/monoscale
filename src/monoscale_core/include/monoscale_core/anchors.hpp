@@ -665,6 +665,11 @@ struct AnchorAlignment
   double bearing_yaw = 0.0;
   // How many bearings the fit stood on, 0 where it did not run.
   int bearing_terms = 0;
+  // Why the bearing fit did or did not produce those terms: how many points
+  // reached it at all, and how far from singular the five-parameter normal
+  // matrix was. Reported, not consumed.
+  int bearing_seen = 0;
+  double bearing_condition = 0.0;
   // The two in-plane translations the same fit solved for. Carried out only to
   // ask whether they are taking the yaw with them: a yaw about the lens and a
   // sideways slide look alike through a patch held four metres off the rotation
