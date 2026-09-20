@@ -1972,16 +1972,22 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // points that would have corrected it and the stretch goes from 52.3% drift
   // to 121.9%. A gate fed by the quantity it is protecting protects the error.
   //
-  // `expected_hop_` is the inertial propagation carried on the fused velocity
-  // and is the reach this wants. It is live on Ford -- tightening
-  // `inertial_gate_m` to 0.05 there moves the stretch, so the optional is
-  // filled -- but it is on the wrong clock: it is `velocity * dt` over the
-  // pair interval, while `last_fused_length_` is the hop over the solve
-  // interval, which on these rigs is about twice as long. Judged against a
-  // `gate` of 0.75 m the first never clears the separability test and the
-  // second does, so swapping the reference silently turns the whole thing off
-  // rather than making it safe. Putting the two on one clock is what this
-  // needs before it can be anything but an experiment.
+  // `expected_hop_` is not that reach, and the reason is worth stating because
+  // it is easy to read the other way. Its `dt` is `current_stamp -
+  // previous_stamp` with `previous_stamp` taken from `solve_frame`, so it is
+  // on this same solve clock -- the two agree there. What it is not is
+  // outside: `fused_world_velocity()` returns the velocity filter's state, and
+  // that filter is updated by vision. The accelerometer only ever flows the
+  // other way, `inertial_.correct_velocity(velocity_filter_.velocity())`. So
+  // `expected_hop_` is the vision hop smoothed, and a floor built from it is
+  // as self-referential as one built from here.
+  //
+  // The accelerometer supplies changes, not a level, which is the whole of
+  // monocular scale observability. The one thing in this stack that turns
+  // excitation into a level is `inertial_scale_gain`, and on Ford's Log5 it
+  // fires 122 times and runs to its clamp, taking a trajectory that was at
+  // 0.995 of truth out to 1.052. There is no outside reach to point this at
+  // yet.
   //
   // So it stands on `last_fused_length_` and is off by default. On the Ford
   // sample's clear stretch it is worth a great deal (43.7% drift to 17.2% at
