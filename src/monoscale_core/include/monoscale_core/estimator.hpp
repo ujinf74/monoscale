@@ -792,6 +792,34 @@ struct EstimatorSettings
   // own variance rather than a number fixed for the drive. That is the next
   // thing this wants.
   double pair_tilt_gain = 0.0;
+  // Carry the tilt the pair residual measures, instead of spending each solve's
+  // estimate on that solve alone.
+  //
+  // The residual's range slope is the only road-referenced observation of the
+  // camera's tilt this stack has -- gravity is the wrong reference, which the
+  // truth-attitude oracle showed by making things worse. But it is noisy: the
+  // tilt it reports changes by 1.15 degrees rms between consecutive solves on
+  // seq00 while the gyro says the body moved 0.55, so about 0.8 degrees of
+  // every reading is the measurement's own noise, and 0.8 degrees is 10% of
+  // the hop at the measured -13%/deg.
+  //
+  // The gyro has the fast part exactly -- 0.011 degrees of integration noise
+  // over a solve interval -- and cannot see the slow part, because the road's
+  // own slope moves under it. So the two are complementary in the strict
+  // sense: predict with the gyro, correct with the residual, and the weight
+  // between them is the ratio of their variances rather than a constant. The
+  // shrinkage `pair_tilt_gain` applies is what this replaces.
+  bool pair_tilt_filter = false;
+  // How fast the road's slope may change, degrees per second, which is the
+  // process noise the gyro cannot cover. Geometric design limits grade change
+  // to roughly half a per cent over thirty metres; at 12 m/s that is 0.3.
+  double pair_tilt_road_rate_deg_s = 0.3;
+  // Whether the gyro carries the state between solves. It measures the body
+  // against gravity, and the body follows the road, so what it reports going
+  // onto a rise is mostly the road's own slope and not a change in the camera's
+  // tilt against it. Off, the filter is a variance-weighted mean of the
+  // measurements and nothing else.
+  bool pair_tilt_use_gyro = true;
   double pitch_centre_x_m = 0.0;
   // Let the body tilt move the camera's height over the road. True is what the
   // projection has always done; false holds the height at its nominal value and
@@ -1231,6 +1259,15 @@ struct Diagnostics
   double landmark_across_sum = 0.0;
   int64_t landmark_filled = 0;
   double pair_tilt_sum = 0.0;
+  // Is the per-frame common-mode tilt a real body motion or the measurement's
+  // own noise? The gyro answers: it sees the first and not the second. These
+  // accumulate the correlation between what the pair residual says the tilt
+  // changed by between two solves and what the gyro integrated over the same
+  // interval.
+  double tilt_probe_n = 0.0;
+  double tilt_probe_aa = 0.0;
+  double tilt_probe_bb = 0.0;
+  double tilt_probe_ab = 0.0;
   int64_t pair_tilt_samples = 0;
   double landmark_along_sq = 0.0;
   double landmark_across_sq = 0.0;
@@ -1466,6 +1503,7 @@ private:
   // correction. The difference of each against now is the pair the scale is
   // read from.
   uint64_t scale_last_restarts_ = 0;
+  std::optional<std::pair<double, double>> tilt_probe_last_;
   std::optional<Eigen::Vector2d> scale_last_correction_;
   std::optional<Eigen::Vector2d> scale_last_measured_;
   // The window the pair is read over: the accelerometer accumulated across the

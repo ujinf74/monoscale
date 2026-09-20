@@ -257,6 +257,12 @@ struct Estimator::Camera
   double band_pitch = 0.0;
   double band_roll = 0.0;
   double band_stamp = 0.0;
+  // The camera's tilt against the road, carried between solves. Predicted by
+  // the gyro, corrected by the pair residual. See `pair_tilt_filter`.
+  double road_tilt = 0.0;
+  double road_tilt_variance = 0.0;
+  double road_tilt_pitch = 0.0;
+  bool road_tilt_ready = false;
   // One flag per axis, because the two are observed by different pairs of
   // bands and either can land without the other. Sharing one flag let the
   // first measurement of the axis that arrived second be folded in as a
@@ -2618,6 +2624,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     double solve_sr = 0.0;
     double solve_srr = 0.0;
     double solve_se = 0.0;
+    double solve_see = 0.0;
     double solve_sre = 0.0;
     // Which way the band sits against the travel. A rearward mount watches its
     // ground recede, so the same tilt error moves its hop the other way while
@@ -2644,6 +2651,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         solve_sr += range;
         solve_srr += range * range;
         solve_se += radial;
+        solve_see += radial * radial;
         solve_sre += range * radial;
         solve_forward += (rx * estimate->motion.x + ry * estimate->motion.y) / range;
         camera.pair_n += 1.0;
@@ -2689,16 +2697,91 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       if (std::abs(d) > 1e-9) {
         const double slope = (solve_n * solve_sre - solve_sr * solve_se) / d;
         const double mean_range = solve_sr / solve_n;
-        const double excess = slope * mean_range * (solve_forward < 0.0 ? -1.0 : 1.0);
+        const double sign = solve_forward < 0.0 ? -1.0 : 1.0;
+        double excess = slope * mean_range * sign;
         const double length = std::hypot(estimate->motion.x, estimate->motion.y);
+        double applied = settings_.pair_tilt_gain;
+        if (settings_.pair_tilt_filter && attitude_ && attitude_->started() &&
+          length > 1e-6 && mean_range > 1e-6)
+        {
+          // The tilt this solve measured, and what that measurement is worth.
+          // `excess/length` is `2 R_bar delta / h`, so `delta` is
+          // `slope sign h / (2 length)`, and its variance follows the slope's.
+          const double height = camera.model.translation_base_from_camera.z();
+          const double lever = height / (2.0 * length);
+          const double measured = slope * sign * lever;
+          const double mean_e = solve_se / solve_n;
+          const double about = solve_see - solve_n * mean_e * mean_e -
+            slope * slope * (solve_srr - solve_sr * solve_sr / solve_n);
+          const double residual_var =
+            std::max(about, 0.0) / std::max(solve_n - 2.0, 1.0);
+          const double measured_var =
+            std::max(residual_var * solve_n / d, 1e-18) * lever * lever;
+          // The gyro has the fast part; the road's own slope is what it cannot
+          // see, and that is the process noise.
+          const double span = std::max(
+            camera.latest->stamp - camera.solve_frame->stamp, 1e-3);
+          const double turn = settings_.gyro_noise_sigma_rad_s * std::sqrt(span);
+          const double grade =
+            settings_.pair_tilt_road_rate_deg_s * M_PI / 180.0 * span;
+          const double carried = attitude_->pitch();
+          if (!camera.road_tilt_ready) {
+            camera.road_tilt = measured;
+            camera.road_tilt_variance = measured_var;
+            camera.road_tilt_ready = true;
+          } else {
+            // Opposite conventions: `attitude_->pitch()` is positive nose-down
+            // -- `pose_z_ -= x tan(pitch)` -- while a nose-up camera sees the
+            // road further off and reads the hop long, so `excess` and with it
+            // `measured` are positive nose-up. The probe finds the two
+            // anti-correlated at -0.25 on seq00 for exactly this reason.
+            if (settings_.pair_tilt_use_gyro) {
+              camera.road_tilt -= carried - camera.road_tilt_pitch;
+            }
+            camera.road_tilt_variance += turn * turn + grade * grade;
+          }
+          camera.road_tilt_pitch = carried;
+          const double weight = camera.road_tilt_variance /
+            (camera.road_tilt_variance + measured_var);
+          camera.road_tilt += weight * (measured - camera.road_tilt);
+          camera.road_tilt_variance *= 1.0 - weight;
+          // Carried, so it is spent in full rather than shrunk.
+          // `delta = (excess / length) h / (2 R_bar)` inverts to
+          // `excess = delta length 2 R_bar / h`. The `length` is not optional:
+          // `excess` is a distance, `delta` an angle, and dropping it applies
+          // the correction 1/length times too small.
+          excess = camera.road_tilt * 2.0 * mean_range * length /
+            std::max(height, 1e-6);
+          applied = 1.0;
+        }
         if (std::isfinite(excess) && length > 1e-6 &&
           std::abs(excess) < 0.5 * length)
         {
-          const double factor = 1.0 - settings_.pair_tilt_gain * excess / length;
+          const double factor = 1.0 - applied * excess / length;
           solved.motion->x *= factor;
           solved.motion->y *= factor;
           diagnostics_.pair_tilt_sum += excess / length;
           ++diagnostics_.pair_tilt_samples;
+          // `excess / length` is `2 R_bar delta / h`, so the tilt the residual
+          // just measured comes back out of it. Differenced between two solves
+          // and set against what the gyro integrated over the same interval,
+          // the correlation says whether that tilt is the body moving or this
+          // measurement's own noise.
+          if (attitude_ && attitude_->started()) {
+            const double height = camera.model.translation_base_from_camera.z();
+            const double measured_tilt =
+              (excess / length) * height / (2.0 * std::max(mean_range, 1e-6));
+            const double carried = attitude_->pitch();
+            if (tilt_probe_last_.has_value()) {
+              const double a = measured_tilt - tilt_probe_last_->first;
+              const double b = carried - tilt_probe_last_->second;
+              diagnostics_.tilt_probe_n += 1.0;
+              diagnostics_.tilt_probe_aa += a * a;
+              diagnostics_.tilt_probe_bb += b * b;
+              diagnostics_.tilt_probe_ab += a * b;
+            }
+            tilt_probe_last_ = std::make_pair(measured_tilt, carried);
+          }
         }
       }
     }

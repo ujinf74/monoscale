@@ -1600,6 +1600,16 @@ int main(int argc, char ** argv)
               static_cast<double>(diagnostics.landmark_solved), 2), 0.0)) : 0.0,
         diagnostics.landmark_depth);
     }
+    if (diagnostics.tilt_probe_n > 1.0) {
+      const double aa = diagnostics.tilt_probe_aa;
+      const double bb = diagnostics.tilt_probe_bb;
+      std::printf(
+        "tilt probe: n=%.0f  pair rms %.4f deg  gyro rms %.4f deg  correlation %+.3f\n",
+        diagnostics.tilt_probe_n,
+        std::sqrt(aa / diagnostics.tilt_probe_n) * 180.0 / M_PI,
+        std::sqrt(bb / diagnostics.tilt_probe_n) * 180.0 / M_PI,
+        (aa > 0.0 && bb > 0.0) ? diagnostics.tilt_probe_ab / std::sqrt(aa * bb) : 0.0);
+    }
     if (diagnostics.inertial_scale_samples > 0) {
       std::printf(
         "inertial scale: %.5f from %ld stretches  uu=%.2f uw=%.2f ww=%.2f  frame offset %+.1f deg\n",
