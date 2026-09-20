@@ -423,6 +423,9 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.inertial_hop_weight = declare_double("inertial_hop_weight", 0.0);
   settings.inertial_hop_equalise = declare_bool("inertial_hop_equalise", true);
   settings.inertial_hop_gate_m = declare_double("inertial_hop_gate_m", 0.0);
+  settings.fusion_weight_quorum = declare_double("fusion_weight_quorum", 0.0);
+  settings.photometric_revive_collapsed =
+    declare_bool("photometric_revive_collapsed", false);
   settings.pitch_centre_x_m = declare_double("pitch_centre_x_m", 0.0);
   settings.ground_motion_floor = declare_double("ground_motion_floor", 0.0);
   settings.ground_height_from_tilt =

@@ -186,6 +186,24 @@ struct EstimatorSettings
   // normal, and the answer collapses to zero or below -- and a prediction good
   // to 7% of the hop separates that from an honest one with room to spare.
   double inertial_hop_gate_m = 0.0;
+  // The share of the rig's declared fusion weight that has to answer before a
+  // hop is believed. Zero accepts any camera that answers.
+  //
+  // `fuse_planar_motions` normalises over the cameras that answered, so a
+  // weight is a ratio and not a statement of precision: the moment the camera
+  // declared at 1.0 falls silent, the one declared at 0.02 is normalised to
+  // 1.0 and decides the hop alone. On Ford's Log6 that happens on 101 solves,
+  // 3.0% of the drive, and those 101 carry -141.8 m of its -201.1 m length
+  // error -- 70%. The rear's own two-frame fallback collapses 12.8% of the
+  // answers it gives, to a median of 0.146 m whatever the true hop was, which
+  // is harmless at 2% of the weight and is not at 100%.
+  //
+  // Declaring a camera at 2% is a statement that it may not carry a hop by
+  // itself. This is that statement enforced.
+  double fusion_weight_quorum = 0.0;
+  // Replace the fused hop with the road's length where the road reads longer
+  // than `max_scale_error` allows. See the note in `process_pair`.
+  bool photometric_revive_collapsed = false;
   double gyro_noise_sigma_rad_s = 1.0e-3;
   // What the ESM's turn is worth as an observation of the handed-in heading,
   // in radians over one hop. 0 is off. Its per-hop scatter measures 0.0003 to
@@ -1319,6 +1337,8 @@ struct Diagnostics
   int64_t inertial_scale_samples = 0;
   // Hops the accelerometer refused and replaced. See `inertial_hop_gate_m`.
   int64_t inertial_hop_gated = 0;
+  // Solves where too little of the rig's declared weight answered.
+  int64_t fusion_quorum_failed = 0;
   // How the off-plane landmarks are doing: how many are held, how many know
   // their depth well enough to vote, and how often they could answer for a hop
   // against how often they were asked.

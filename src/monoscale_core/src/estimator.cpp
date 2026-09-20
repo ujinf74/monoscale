@@ -2275,10 +2275,35 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     }
     Points2 world;
     Weights weights;
-    Weights scale;
+    // How far each point may sit from the mode before it stops being an
+    // inlier, relative to this solve's own mean range.
+    //
+    // `align_to_anchors` has taken a `residual_scale` since it was written and
+    // `anchors.cpp` explains at length why a gate fixed in metres discards the
+    // distant structure the map exists to hold: a point is located by a
+    // bearing, so one pixel of bearing error moves it `(R^2+h^2)/h` along the
+    // line of sight. It was declared here and passed unfilled, so `scale_of()`
+    // returned 1.0 on every point of every solve and the feature has never
+    // run. On the rig it was derived on the band is 0.5 to 8 m and the
+    // difference is small; on a band that reaches 30 m it is a factor of
+    // fourteen across it.
+    //
+    // Normalised to the mean range, so the gate is exactly what it was at the
+    // middle of the band and only its distribution across the band changes.
+    Weights scale(chosen);
     {
       Stopwatch lookup(diagnostics_, "lookup");
       anchors_->anchor_view(camera.source, selected_ids, world, weights);
+    }
+    {
+      const double height = std::abs(lens_height);
+      const double middle = solved.mean_range * solved.mean_range + height * height;
+      for (Eigen::Index i = 0; i < chosen; ++i) {
+        const double dx = body(i, 0) - lens.x();
+        const double dy = body(i, 1) - lens.y();
+        const double reach = dx * dx + dy * dy + height * height;
+        scale(i) = middle > 1e-9 ? reach / middle : 1.0;
+      }
     }
     // Range is deliberately not folded in here. An anchor already carries a
     // weight -- how many sightings agree on it -- and multiplying range on top
@@ -3352,6 +3377,24 @@ void Estimator::process_pair()
   {
     fusion_weights.clear();
   }
+  // Enough of the rig has to have answered. See `fusion_weight_quorum`.
+  if (settings_.fusion_weight_quorum > 0.0 && !motions.empty()) {
+    double declared = 0.0;
+    for (const auto & held : cameras_) {
+      declared += held->settings.fusion_weight > 0.0 ? held->settings.fusion_weight : 1.0;
+    }
+    double answered = 0.0;
+    for (size_t k = 0; k < motion_camera.size(); ++k) {
+      const size_t i = motion_camera[k];
+      answered += i < cameras_.size() && cameras_[i]->settings.fusion_weight > 0.0
+        ? cameras_[i]->settings.fusion_weight : 1.0;
+    }
+    if (declared > 1e-9 && answered / declared < settings_.fusion_weight_quorum) {
+      motions.clear();
+      precision_inputs.clear();
+      ++diagnostics_.fusion_quorum_failed;
+    }
+  }
   auto motion = fuse_planar_motions(motions, fusion_weights);
   // The hop's error shape, averaged over whichever cameras answered. They are
   // normalised, so the mean is a shape and not a magnitude; the magnitude is
@@ -3725,8 +3768,6 @@ void Estimator::process_pair()
   // pointed. Three drives at one speed agreed with each other for weeks about a
   // number that came from neither the estimator nor the road.
   last_photometric_distance_ = road_mean;
-  last_fused_length_ = motion.has_value()
-    ? std::hypot(motion->x, motion->y) : std::numeric_limits<double>::quiet_NaN();
   if (settings_.photometric_step_gain > 0.0 && !settings_.photometric_on_pairs &&
     road_cameras > 0 &&
     motion.has_value() && !(settings_.photometric_when_mapless && any_from_map))
@@ -3764,8 +3805,31 @@ void Estimator::process_pair()
       // instruments by an order of magnitude. Both routes to a hop -- corners
       // and direct photometry -- are limited by the same road surface at the
       // same ranges.
-      const double disagreement = std::abs(measured / length - 1.0);
-      if (settings_.max_scale_error > 0.0 && disagreement > settings_.max_scale_error) {
+      const double fused_gap = measured / length - 1.0;
+      // A solve whose own road says it went far further than its points did
+      // has not disagreed with the road -- it has collapsed, and the road is
+      // the only instrument still measuring. Over Log6's solves where the
+      // front camera fell silent the fused vision hop reads 0.236 of truth,
+      // the accelerometer's prediction 0.669, and the road's length 1.003; the
+      // two-sided bound throws the road away for disagreeing with the wreck
+      // beside it.
+      //
+      // One-sided is not a guess about which is right. Both fail the same way,
+      // by collapsing toward zero: over both drives the road exceeds 1.35x of
+      // truth on 0.1-0.2% of hops and the pair solve on 1.6%, while under 0.65x
+      // they run 2.3-9.7% and 2.8-5.2%. Reading far longer is evidence about
+      // the solve, not about the road. Taken whole, because a quarter of the
+      // way from 0.236 is still not a hop.
+      const bool collapsed = settings_.photometric_revive_collapsed &&
+        settings_.max_scale_error > 0.0 && fused_gap > settings_.max_scale_error;
+      if (collapsed) {
+        const double ratio = measured / length;
+        motion->x *= ratio;
+        motion->y *= ratio;
+        ++diagnostics_.photometric_uses;
+      } else if (settings_.max_scale_error > 0.0 &&
+        std::abs(fused_gap) > settings_.max_scale_error)
+      {
         ++diagnostics_.photometric_rejected;
       } else if (settings_.hop_from_turn && yaw_delta.has_value() &&
         std::isfinite(*yaw_delta))
@@ -4269,6 +4333,21 @@ void Estimator::process_pair()
       }
     }
   }
+
+  // The reach the next solve's motion floor stands on, taken after the gate
+  // above rather than before it.
+  //
+  // The floor arms only while `motion_share * |last_fused_length_| > gate`, so
+  // writing it from the raw hop closed a latch: one collapsed hop -- a quarter
+  // of them come out under 0.20 m -- leaves a floor of 0.1 m against a 0.75 m
+  // gate, the one instrument that rejects points which did not move switches
+  // itself off, and the next hop collapses for the same reason. Two measured
+  // populations at 12-20 m/s say the size of it: where the floor was armed the
+  // front camera falls silent on 5.3% of solves and the hop bias is -0.003,
+  // and where it was not, 49.2% and -0.872. The floor has to stand on the hop
+  // that was kept.
+  last_fused_length_ = motion.has_value()
+    ? std::hypot(motion->x, motion->y) : std::numeric_limits<double>::quiet_NaN();
 
   const double vision_speed = (motion.has_value() && dt > 1e-4)
     ? std::hypot(motion->x, motion->y) / dt

@@ -1224,10 +1224,14 @@ std::optional<AnchorAlignment> align_to_anchors(
         const double dx = votes(i, 0) - centre.x();
         const double dy = votes(i, 1) - centre.y();
         const double distance = dx * dx + dy * dy;
-        const bool inside = distance <= threshold_squared;
+        // The same widening the mode search above already applies. Leaving it
+        // out here let a point carry the mode and then be refused by the gate
+        // that scores it -- one quantity judged two ways in one function.
+        const double widen = scale_of(i);
+        const bool inside = distance <= threshold_squared * widen;
         inliers[static_cast<size_t>(i)] = inside ? 1 : 0;
         robust[static_cast<size_t>(i)] = soft_squared > 0.0
-          ? std::exp(-distance / soft_squared) : (inside ? 1.0 : 0.0);
+          ? std::exp(-distance / (soft_squared * widen)) : (inside ? 1.0 : 0.0);
         kept += inside ? 1 : 0;
       }
       if (kept < min_inliers) {
@@ -1390,7 +1394,7 @@ std::optional<AnchorAlignment> align_to_anchors(
     const double ry = world_points(i, 1) - (s * body_points(i, 0) + c * body_points(i, 1)) -
       centre.y();
     const double residual_squared = rx * rx + ry * ry;
-    const bool inside = residual_squared <= threshold_squared;
+    const bool inside = residual_squared <= threshold_squared * scale_of(i);
     result.inliers(i) = inside;
     if (!inside) {
       continue;
