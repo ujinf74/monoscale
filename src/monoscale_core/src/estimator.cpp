@@ -2000,10 +2000,17 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // 0.995 of truth out to 1.052. There is no outside reach to point this at
   // yet.
   //
-  // So it stands on `last_fused_length_` and is off by default. On the Ford
-  // sample's clear stretch it is worth a great deal (43.7% drift to 17.2% at
-  // 0.6, hop bias -31.5% to -2.3%) and on the jam it is worth less than
-  // nothing, because there the reach it is built from is the error.
+  // So it stands on `last_fused_length_`, which is self-referential, and that
+  // is still its one real risk: on the Ford sample's jam, where the estimator's
+  // own hop already reads 1.85x long, the floor built from it rejects the slow
+  // points that would have corrected it.
+  //
+  // It is off by default all the same, but no longer because it is only worth
+  // having on a stretch that behaves. Swept on the nine KITTI sequences it is
+  // worth 0.23 points at 0.5 -- 5.231% to 4.998% -- and the sweep's minimum
+  // lands on the derived boundary rather than beside it: 0.3 gives 5.226 and
+  // 0.7 gives 5.074. It earns six of the nine, and the three it costs it costs
+  // by 0.07 points or less.
   //
   // Half the hop is the decision boundary, not a tuned number: it is where a
   // point is as close to "moved with the road" as it is to "did not move", so
