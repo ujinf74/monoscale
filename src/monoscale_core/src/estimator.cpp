@@ -1068,7 +1068,24 @@ void Estimator::ingest_imu(const ImuSample & measured)
     reported = gyro_yaw_;
   }
   imu_yaw_samples_.emplace_back(sample.stamp, reported);
-  while (imu_yaw_samples_.size() > 400) {
+  // Bounded by time, not by count. A cap of 400 samples is 40 seconds of
+  // history at KITTI's 10 Hz and 2.14 at Ford's 187, and what is looked up in
+  // here is `previous_stamp` -- the solve frame's, which is deliberately held
+  // where it is whenever this lookup misses. So one interval longer than the
+  // window starts a runaway: the frame is held, the gap grows, every later
+  // lookup misses too, and the heading falls back to the road's own yaw and
+  // never comes back. Measured on Ford's Log5, where a 2.84 s stretch without
+  // a solve crosses 2.14: 863 of 2775 solves miss, the heading stays right
+  // while the road is straight, and the first real turn is lost whole -- 72
+  // degrees in four seconds.
+  while (imu_yaw_samples_.size() > 2 &&
+    sample.stamp - imu_yaw_samples_.front().first > settings_.imu_yaw_history_sec)
+  {
+    imu_yaw_samples_.pop_front();
+  }
+  // A backstop for a source that reports without advancing its stamp, which
+  // the time bound above cannot see.
+  while (imu_yaw_samples_.size() > 20000) {
     imu_yaw_samples_.pop_front();
   }
 

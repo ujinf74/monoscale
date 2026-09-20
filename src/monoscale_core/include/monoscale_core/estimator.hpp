@@ -185,6 +185,9 @@ struct EstimatorSettings
   // the same 0.326. A bound stated in seconds has to be stated once, against
   // the instrument's own rate.
   double imu_max_gap_sec = 0.12;
+  // How long the heading history is kept for, in seconds. It has to cover the
+  // longest interval a solve can span, because that is what is looked up in it.
+  double imu_yaw_history_sec = 10.0;
 
   double ground_max_distance_m = 25.0;
   // How far to either side of the track the ground band reaches. The range

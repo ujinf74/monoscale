@@ -93,6 +93,7 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.imu_max_age_sec = declare_double("imu_max_age_sec", 0.02);
   // Largest gap between IMU samples still worth interpolating across.
   settings.imu_max_gap_sec = declare_double("imu_max_gap_sec", 0.12);
+  settings.imu_yaw_history_sec = declare_double("imu_yaw_history_sec", 10.0);
   // CARLA reports a valid pinhole CameraInfo derived from the blueprint FOV.
   topics.use_camera_info = declare_bool("use_camera_info", true);
   topics.odometry = declare_string("odometry_topic", topics.odometry);
