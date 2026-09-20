@@ -1909,16 +1909,20 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // to 121.9%. A gate fed by the quantity it is protecting protects the error.
   //
   // `expected_hop_` is the inertial propagation carried on the fused velocity
-  // and would be that reach, but it is empty here on Ford from the first frame
-  // to the last -- the velocity filter never settles on that rig -- so wiring
-  // this to it turns the whole test off rather than making it safe.
+  // and is the reach this wants. It is live on Ford -- tightening
+  // `inertial_gate_m` to 0.05 there moves the stretch, so the optional is
+  // filled -- but it is on the wrong clock: it is `velocity * dt` over the
+  // pair interval, while `last_fused_length_` is the hop over the solve
+  // interval, which on these rigs is about twice as long. Judged against a
+  // `gate` of 0.75 m the first never clears the separability test and the
+  // second does, so swapping the reference silently turns the whole thing off
+  // rather than making it safe. Putting the two on one clock is what this
+  // needs before it can be anything but an experiment.
   //
   // So it stands on `last_fused_length_` and is off by default. On the Ford
-  // sample's clear stretch it is worth a great deal (43.7% drift to 10.1% at
+  // sample's clear stretch it is worth a great deal (43.7% drift to 17.2% at
   // 0.6, hop bias -31.5% to -2.3%) and on the jam it is worth less than
-  // nothing. Until there is a reach that vision does not set, that is what
-  // this is: an instrument for a stretch where the hop is known to be honest,
-  // not a default.
+  // nothing, because there the reach it is built from is the error.
   //
   // Half the hop is the decision boundary, not a tuned number: it is where a
   // point is as close to "moved with the road" as it is to "did not move", so
