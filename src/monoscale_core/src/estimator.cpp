@@ -4216,7 +4216,10 @@ void Estimator::process_pair()
     if (carried.has_value()) {
       const double vision = std::hypot(motion->x, motion->y);
       const double inertial = carried->norm();
-      if (vision > 0.05 && inertial > 0.05) {
+      // Only the reference has to be a measurement. Requiring the vision hop
+      // to be one as well exempted the hops that had collapsed furthest --
+      // 5% of them read under 0.05 m -- from the gate that exists for them.
+      if (inertial > 0.05) {
         // Least squares, not a ratio of lengths. The magnitude of a noisy
         // two-vector is biased upward by its own noise, by different amounts
         // for two instruments of different precision, so a ratio of summed
