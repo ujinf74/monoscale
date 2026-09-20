@@ -420,6 +420,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.pair_tilt_use_gyro = declare_bool("pair_tilt_use_gyro", true);
   settings.pair_scale_gain = declare_double("pair_scale_gain", 0.0);
   settings.camera_scale_equalise = declare_bool("camera_scale_equalise", false);
+  settings.inertial_hop_weight = declare_double("inertial_hop_weight", 0.0);
+  settings.inertial_hop_equalise = declare_bool("inertial_hop_equalise", true);
   settings.pitch_centre_x_m = declare_double("pitch_centre_x_m", 0.0);
   settings.ground_motion_floor = declare_double("ground_motion_floor", 0.0);
   settings.ground_height_from_tilt =

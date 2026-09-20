@@ -149,6 +149,30 @@ struct EstimatorSettings
   // cameras do not share a bias, and one ratio learned over a drive cannot
   // serve a bias that changes within it.
   bool camera_scale_equalise = false;
+  // How much of the hop the accelerometer's own answer carries.
+  //
+  // Measured against truth on Ford's Log5 the accelerometer's prediction for
+  // one hop is as precise as the front camera -- relative sd 0.068 against
+  // 0.076, and 0.089 against 0.090 on Log6 -- and correlated with it 0.37. Two
+  // estimators that good and that independent combine to 23% better than
+  // either, at a weight of (sa^2 - r sa sb)/(sa^2 + sb^2 - 2 r sa sb) = 0.59
+  // on Log5 and 0.51 on Log6.
+  //
+  // Taken here rather than through `fusion_model: displacement`, which is the
+  // route that already existed and spends the independence: its velocity is a
+  // smoothing of past vision, so folding it back in raises the hop sequence's
+  // lag-1 autocorrelation 0.595 -> 0.678 and its accumulation 3.66 -> 4.08
+  // times a random walk. A weight on the prediction itself keeps each hop's
+  // own accelerometer content and adds no memory the propagator did not
+  // already have.
+  double inertial_hop_weight = 0.0;
+  // Divide out the accelerometer hop's own scale against vision's before
+  // blending, the way `camera_scale_equalise` does between cameras. The
+  // propagator's velocity is vision-corrected, so the two share a scale in
+  // principle and disagree in practice: on Log5 the prediction reads +5.7% of
+  // truth against the fused hop's +3.8%. Blending a biased instrument at 0.59
+  // spends that difference at first order.
+  bool inertial_hop_equalise = true;
   double gyro_noise_sigma_rad_s = 1.0e-3;
   // What the ESM's turn is worth as an observation of the handed-in heading,
   // in radians over one hop. 0 is off. Its per-hop scatter measures 0.0003 to
@@ -1561,6 +1585,10 @@ private:
   // which is the only part of it worth blending.
   double photometric_ratio_sum_ = 0.0;
   double photometric_ratio_solve_ = 0.0;
+  // The same running ratio between the accelerometer's hop and vision's.
+  double inertial_hop_sum_ = 0.0;
+  double vision_hop_sum_ = 0.0;
+  int64_t inertial_hop_count_ = 0;
   // Ground scale correction learned against inertial propagation.
   double imu_scale_ = 1.0;
   // What was handed to the propagator, and what vision measured, at the last

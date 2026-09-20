@@ -4205,6 +4205,47 @@ void Estimator::process_pair()
     }
   }
 
+  // The accelerometer's own hop, blended in at a fixed weight. See
+  // `inertial_hop_weight`.
+  if (settings_.inertial_hop_weight > 0.0 && motion.has_value() && dt > 1e-4 &&
+    previous_stamp > 0.0 && current_stamp > previous_stamp)
+  {
+    const auto carried =
+      inertial_.predicted_translation(previous_stamp, current_stamp, pose_.yaw);
+    if (carried.has_value()) {
+      const double vision = std::hypot(motion->x, motion->y);
+      const double inertial = carried->norm();
+      if (vision > 0.05 && inertial > 0.05) {
+        // Least squares, not a ratio of lengths. The magnitude of a noisy
+        // two-vector is biased upward by its own noise, by different amounts
+        // for two instruments of different precision, so a ratio of summed
+        // magnitudes carries that difference as a scale. Projecting one onto
+        // the other does not: measured on Log5 the ratio form left the fused
+        // hop 2.535% long against vision's own 1.452%, which cost more than
+        // the 19% of hop noise the blend had just bought.
+        inertial_hop_sum_ += carried->x() * motion->x + carried->y() * motion->y;
+        vision_hop_sum_ += vision * vision;
+        ++inertial_hop_count_;
+        double scale = 1.0;
+        bool ready = !settings_.inertial_hop_equalise;
+        if (settings_.inertial_hop_equalise && inertial_hop_count_ >= 200 &&
+          std::abs(inertial_hop_sum_) > 1e-6)
+        {
+          scale = std::clamp(vision_hop_sum_ / inertial_hop_sum_, 0.75, 1.25);
+          ready = true;
+        }
+        // Nothing is blended until the ratio exists. Blending the raw
+        // prediction for the first two hundred hops spends its whole scale
+        // error on the stretch the trajectory is least able to absorb it.
+        if (ready) {
+          const double w = std::clamp(settings_.inertial_hop_weight, 0.0, 1.0);
+          motion->x = (1.0 - w) * motion->x + w * scale * carried->x();
+          motion->y = (1.0 - w) * motion->y + w * scale * carried->y();
+        }
+      }
+    }
+  }
+
   const double vision_speed = (motion.has_value() && dt > 1e-4)
     ? std::hypot(motion->x, motion->y) / dt
     : std::numeric_limits<double>::infinity();
