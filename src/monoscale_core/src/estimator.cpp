@@ -2040,8 +2040,13 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   // have to resolve it -- applying it there costs the stretch 52.3% drift
   // against 121.9%. So the floor has to clear `gate`, which is the stack's own
   // statement of how far a point may sit from the plane and still be one.
-  if (settings_.ground_motion_floor > 0.0 && std::isfinite(last_fused_length_)) {
-    const double floor = settings_.ground_motion_floor * std::abs(last_fused_length_);
+  //
+  // The two bands do not carry the same traffic, so the share is a per-camera
+  // setting with the global one as its default. See `CameraSettings`.
+  const double motion_share = camera.settings.motion_floor >= 0.0
+    ? camera.settings.motion_floor : settings_.ground_motion_floor;
+  if (motion_share > 0.0 && std::isfinite(last_fused_length_)) {
+    const double floor = motion_share * std::abs(last_fused_length_);
     if (floor > gate) {
       const double c = std::cos(*yaw_for_solve);
       const double sn = std::sin(*yaw_for_solve);

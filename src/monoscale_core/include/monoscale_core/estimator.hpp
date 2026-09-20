@@ -88,6 +88,15 @@ struct CameraSettings
   // `xn_min` to `xn_max`. A point below the interpolated `t` for its own column
   // is on the vehicle, not on the road.
   std::vector<double> ego_mask;
+  // This camera's own motion floor, overriding `ground_motion_floor`. Negative
+  // takes the global one.
+  //
+  // The two bands do not carry the same traffic. A forward camera looks at the
+  // road ahead of the car in front of it; a rear one looks at the road under
+  // the car behind, and that car keeps station far more often. On Ford's Log5
+  // the front's hop bias is +6.30% and the rear's -14.60%, and raising the one
+  // floor they share to help the rear costs the front more than it buys.
+  double motion_floor = -1.0;
   // Calibration, as CameraInfo would report it, at the resolution it describes.
   Eigen::Matrix3d k = Eigen::Matrix3d::Identity();
   Eigen::VectorXd distortion;

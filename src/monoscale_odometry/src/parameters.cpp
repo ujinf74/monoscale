@@ -212,6 +212,7 @@ Configuration declare_and_read(rclcpp::Node & node)
     camera.translation_base_from_camera = vector_of(translation);
     camera.ego_mask = node.declare_parameter<std::vector<double>>(
       name + ".ego_mask", std::vector<double>{});
+    camera.motion_floor = node.declare_parameter<double>(name + ".motion_floor", -1.0);
     if (!camera.ego_mask.empty() && camera.ego_mask.size() < 4) {
       throw std::runtime_error(name + " ego_mask needs a span and at least two rows");
     }
