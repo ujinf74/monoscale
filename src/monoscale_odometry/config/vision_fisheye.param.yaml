@@ -92,6 +92,24 @@
     # that is why the photometric length's bias splits by road surface with it
     # free and does not with it fixed.
     #
+    # **And it is a statement about this rig's road, not about roll.** Ford's
+    # two drives say the opposite, and the reason is on the ground rather than
+    # in the fit: a real road is crowned for drainage, about 2% of cross slope,
+    # which is 1.15 degrees of plane roll held almost constant across a traffic
+    # lane. A rendered road has none, so there was no roll to free here. The
+    # band this file describes cannot express that tilt at dof 3, the residual
+    # goes to pitch -- the family's only outlet, and 0.93 correlated with the
+    # step -- and from there into the step as scale. Measured on Ford with
+    # everything else held, 3 against 4:
+    #
+    #   Log5 (tuned)    t_err 3.592% -> 3.365%, ATE 42.4 m -> 29.8 m,
+    #                   hop length bias +3.525% -> +1.239%
+    #   Log6 (held out) t_err 2.516% -> 2.424%, ATE 11.52 m -> 10.28 m
+    #
+    # The bias falling to a third is what says it is the crown: freeing roll
+    # takes the scale error out, not the noise. The warps go 484592 to 820922
+    # on Log5, which is what that file is buying.
+    #
     # 3 is taken on the held-out set: -2.8% and -8.1% on ATE, -7.6% and -18.0%
     # on the final error, with the bench a wash inside its 1.05x repeat floor
     # and its worst drive 2.7% better. It is also cheaper, measured on
