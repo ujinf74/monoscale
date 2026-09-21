@@ -640,6 +640,13 @@ struct TrackState
   // The four-parameter answer, when `road_step_esm` asked for one. Its step
   // replaces the search's; its three angles are what nothing else here emits.
   RoadSolve road_esm;
+  // This camera's road band, for the detector's quota and the parallax window.
+  // Global until now, which cannot be right on a rig whose two mounts see
+  // different bands: the front's runs 6 to 30 m and the rear's 10 to 30, and
+  // one rectangle aims part of the rear's budget at rows nearer than it can
+  // use -- which on this rig is where the following vehicle and the vehicle's
+  // own boot are. The photometric window is already per camera for this.
+  std::array<double, 4> detection_band{0.20, 0.50, 0.80, 1.00};
   // Where the next frame's search starts. Smoothed, and never published.
   double road_bracket = std::numeric_limits<double>::quiet_NaN();
   // Average |answer - bracket| / |answer| over recent frames. Negative until
@@ -1189,6 +1196,7 @@ public:
       states_[name].target = max_features_;
       states_[name].skip_bottom = declare_parameter<double>(
         name + ".detection_skip_bottom_fraction", skip_bottom_);
+      states_[name].detection_band = load_detection_band(name);
       if (predict_from_motion_ || road_from_step_) {
         models_[name] = load_ground_model(name);
         road_bands_[name] = load_road_band(name);
@@ -1861,10 +1869,10 @@ private:
       // the sightings that reached 5-8 frames from 112 down to 65.
       std::vector<cv::Point2f> from;
       std::vector<cv::Point2f> to;
-      const double x0 = road_roi_[0] * gray.cols;
-      const double y0 = road_roi_[1] * gray.rows;
-      const double x1 = road_roi_[2] * gray.cols;
-      const double y1 = road_roi_[3] * gray.rows;
+      const double x0 = state.detection_band[0] * gray.cols;
+      const double y0 = state.detection_band[1] * gray.rows;
+      const double x1 = state.detection_band[2] * gray.cols;
+      const double y1 = state.detection_band[3] * gray.rows;
       for (size_t i = 0; i < current_points.size(); ++i) {
         const cv::Point2f & q = current_points[i];
         if (q.x >= x0 && q.x <= x1 && q.y >= y0 && q.y <= y1) {
@@ -2196,9 +2204,11 @@ private:
   {
     const cv::Rect roi(
       cv::Point(
-        cvRound(road_roi_[0] * current.cols), cvRound(road_roi_[1] * current.rows)),
+        cvRound(state.detection_band[0] * current.cols),
+        cvRound(state.detection_band[1] * current.rows)),
       cv::Point(
-        cvRound(road_roi_[2] * current.cols), cvRound(road_roi_[3] * current.rows)));
+        cvRound(state.detection_band[2] * current.cols),
+        cvRound(state.detection_band[3] * current.rows)));
     const cv::Rect bounded = roi & cv::Rect(0, 0, current.cols, current.rows);
     if (bounded.width < 32 || bounded.height < 32) {
       return;
@@ -2739,8 +2749,9 @@ private:
           for (int cx = 0; cx < columns; ++cx) {
             const double mx = (cx + 0.5) / columns;
             const double my = (cy + 0.5) / rows;
-            const bool hit = mx >= road_roi_[0] && mx <= road_roi_[2] &&
-              my >= road_roi_[1] && my <= road_roi_[3];
+            const bool hit = mx >= state.detection_band[0] &&
+              mx <= state.detection_band[2] &&
+              my >= state.detection_band[1] && my <= state.detection_band[3];
             on_road[static_cast<size_t>(cy * columns + cx)] = hit;
             inside += hit ? 1 : 0;
           }
@@ -4822,6 +4833,22 @@ private:
       declare_parameter<double>(name + ".road_step_roi_y0", road_step_roi_[1]),
       declare_parameter<double>(name + ".road_step_roi_x1", road_step_roi_[2]),
       declare_parameter<double>(name + ".road_step_roi_y1", road_step_roi_[3])};
+  }
+
+  // Where this camera's road is, for the detector's quota and the parallax
+  // window. Global until now, which cannot be right on a rig whose two mounts
+  // see different bands: the front's runs 6 to 30 m and the rear's 10 to 30,
+  // and a single rectangle aims part of the rear's budget at rows nearer than
+  // it can use -- which on this rig is where the following vehicle and the
+  // vehicle's own boot are. The photometric window is already per camera for
+  // the same reason.
+  std::array<double, 4> load_detection_band(const std::string & name)
+  {
+    return {
+      declare_parameter<double>(name + ".road_roi_x0", road_roi_[0]),
+      declare_parameter<double>(name + ".road_roi_y0", road_roi_[1]),
+      declare_parameter<double>(name + ".road_roi_x1", road_roi_[2]),
+      declare_parameter<double>(name + ".road_roi_y1", road_roi_[3])};
   }
 
   GroundModel load_ground_model(const std::string & name)
