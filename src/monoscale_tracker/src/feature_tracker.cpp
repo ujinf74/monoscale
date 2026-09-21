@@ -2737,6 +2737,41 @@ private:
     // turns over. Sequences 02 and 08 are the two that arrived last and both
     // lose by it. The aim is right and the size of the win was two sequences'
     // worth of luck.
+    //
+    // **Ford takes it at 0.5, and the reason is the population it halves.**
+    // The band there is 6 to 30 m against this file's 0.5 to 8, so it subtends
+    // less and the flat quota starves it harder: ground points reach the solve
+    // at 40 and 71 per solve on the two drives, against the 24 the map path
+    // needs before it will answer at all. Half the budget aimed at the band,
+    // tuned drive then held out:
+    //
+    //   ground points per solve   40 -> 68          71 -> 103
+    //   the front camera silent   20% -> 8.6%       2.6% -> 1.4%
+    //   solve failures            479 -> 187        513 -> 214
+    //   worst 2% of hops lose     113.8 -> 89.0 m   164.3 -> 88.8 m
+    //   summed length error       +63.6 -> +114.4   -204.9 -> +56.5 m
+    //
+    // The fourth line decides it. That population is this rig's length error --
+    // on the held-out drive 2% of the hops carry 80% of it -- and it halves on
+    // both drives.
+    //
+    // What it costs is track life, and the cost is structural rather than an
+    // accident: the band's near rows carry the most metric information and the
+    // most image flow at once, 41.8 px per metre of hop at 6 m against 1.7 at
+    // 30, so a detector aimed there packs the budget into the points hardest
+    // to follow. Survival falls 1641 to 1126 a frame and 1508 to 1358, drift
+    // rises, and since anchors are made of track life the map's answer rate
+    // falls 40% to 34% and 51% to 44%. ATE follows, 0.570% to 0.680% and
+    // 0.196% to 0.373%.
+    //
+    // `motion_warp` is the right answer to that and cannot be used yet. It
+    // returns a third of the lost life -- survival 1126 to 1214, map 34% to
+    // 36% -- but it lives inside `motion_prediction`, which predicts from
+    // `shared_step_`: a corner vote whose sign is negative on 35% of frames
+    // here, and on 27% even when `road_step_photometric` hands it the
+    // photometric search instead. A quarter of the frames guessing backwards
+    // costs more than the life is worth, measured twice -- the worst 2% go
+    // back from 89.0 m to 108.3, and drift rises rather than falls.
     std::vector<int> quotas(static_cast<size_t>(columns * rows), 0);
     {
       const int flat = std::max(state.target, 1) / (columns * rows) + 1;
