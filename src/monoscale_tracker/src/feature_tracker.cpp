@@ -1773,18 +1773,49 @@ private:
           state.road_step = answer;
           state.road_bracket = std::isfinite(state.road_bracket)
             ? state.road_bracket + 0.7 * (answer - state.road_bracket) : answer;
+          // And this is the step everything downstream predicts from, when it
+          // is asked for.
+          //
+          // `road_step_photometric` already existed and did not do this. It ran
+          // `measure_step_photometric` a *second* time, centred on
+          // `shared_step_` itself, and wrote the result back -- so the corner
+          // vote's answer seeds a search that overwrites the corner vote, and a
+          // `shared_step_` that has collapsed toward zero brackets its
+          // replacement within a hundredth of a metre of where it already is.
+          // The answer above is the one that has been through the derived band,
+          // the cell median, the auto-mask and the four-parameter fit; it reads
+          // 1.03 of truth at an interquartile spread of 5% and 1.003 over the
+          // hops where the point solve collapses. Handing that over is what the
+          // setting was for.
+          if (road_step_photometric_ && name == step_reference_ &&
+            std::isfinite(answer))
+          {
+            std::lock_guard<std::mutex> guard(step_lock_);
+            // Per nominal frame, which is the unit `shared_step_` carries --
+            // `hop = step * reach` is what reads it. `answer` is already in
+            // that unit; `answer * span` is this frame's metres and multiplies
+            // the gap in twice.
+            shared_step_ = answer;
+            step_ready_ = true;
+          }
         }
       }
     }
     stage.road = lap();
-    if (predict_from_motion_ && turn_known && name == step_reference_ &&
-      previous_points.size() >= 60)
+    // One quantity, one owner. With `road_step_photometric` the road's own
+    // answer is what `shared_step_` carries, and running the corner vote as
+    // well makes two writers: the road writes the answer and the vote then
+    // blends half way back toward its own, every frame, so what the prediction
+    // reads oscillates between two instruments. A prediction that jumps is
+    // worse than none -- measured, track survival 1214 a frame against 970.
+    if (predict_from_motion_ && !road_step_photometric_ && turn_known &&
+      name == step_reference_ && previous_points.size() >= 60)
     {
       const auto found = models_.find(name);
       if (found != models_.end() && found->second.ready) {
         measure_step(found->second, previous_points, current_points,
           gray.cols, gray.rows, turn, reach);
-        if ((road_step_photometric_ || !road_step_dump_.empty()) &&
+        if (!road_step_dump_.empty() &&
           !state.previous_gray.empty() && state.previous_gray.size() == gray.size())
         {
           double held = 0.0;
@@ -1812,11 +1843,8 @@ private:
               std::fflush(road_step_file_);
             }
           }
-          if (road_step_photometric_ && std::isfinite(photometric)) {
-            std::lock_guard<std::mutex> guard(step_lock_);
-            shared_step_ = photometric;
-            step_ready_ = true;
-          }
+          // The write-back that used to live here is gone; see where
+          // `shared_step_` is set from the primary answer above.
         }
       }
     }
