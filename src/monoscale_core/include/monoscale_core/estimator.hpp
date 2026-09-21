@@ -185,6 +185,26 @@ struct EstimatorSettings
   // both drives -- the map did not answer, the point count is a third of
   // normal, and the answer collapses to zero or below -- and a prediction good
   // to 7% of the hop separates that from an honest one with room to spare.
+  //
+  // Ford takes 1.2 rather than the 0.8 that population sizing gives, and the
+  // reason is that the population moved. A factorial over four axes -- this,
+  // `photometric_step_gain`, `ground_min_inliers` and `max_scale_error`, three
+  // levels each, scored on ATE over distance on both drives -- puts the joint
+  // optimum at 1.2 here with the gain at 0.40, and it is separated: 0.823 of
+  // summed ATE against 0.919 for the next combination. Tuned drive then held
+  // out, against the coordinate-wise optimum the two had been sitting at:
+  //
+  //   ATE/distance   0.680% -> 0.610%    0.513% -> 0.213%
+  //   summed length  +114.4 m -> +112.2  -52.8 m -> +3.9
+  //
+  // Both moved for the reason each was sized by. The gate was set to fire on
+  // the 3% of hops that carried the length error, and `detection_road_share`
+  // halved that population, so it should bite less. The gain weighs the road's
+  // length against the pair solve, and the same change cut the pair solve's
+  // longitudinal noise by a third, so the road should carry more. What did not
+  // move is `ground_min_inliers`, which wins at 20 in all eight of the best
+  // combinations even though the points reaching a solve went from 40 and 71
+  // to 68 and 103.
   double inertial_hop_gate_m = 0.0;
   // The share of the rig's declared fusion weight that has to answer before a
   // hop is believed. Zero accepts any camera that answers.
