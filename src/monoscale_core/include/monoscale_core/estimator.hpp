@@ -390,6 +390,32 @@ struct EstimatorSettings
   double imu_scale_gain = 0.0;
   // Hops shorter than this carry more noise than signal in that ratio.
   double imu_scale_min_hop_m = 0.05;
+  // The anchors' own read on where the ground is, spent rather than discarded.
+  //
+  // `radial_height` already regresses the anchor radial residual onto a height
+  // basis and a pitch basis every solve, and the answer has been going to a
+  // diagnostic and nowhere else. It earns its place where the pitch half does
+  // not: regressing the relative hop error on `radial_height / h` gives a slope
+  // of -0.297 on Ford's Log5 and -0.283 on Log6, the same gain on two drives
+  // that differ threefold in that error. The pitch half's gain is not stable --
+  // injecting +/-0.5 degrees moves it 2.6x one way and 0.47x the other.
+  //
+  // Filtered, because the quantity it stands for is load and suspension sag and
+  // those move over a minute, while the per-solve estimate does not: Log6's
+  // per-hop spread is 0.32 m against Log5's 0.19 m, and feeding it raw hands
+  // the filter that spread. A first-order lag of `tau` solves over the shape
+  // error (ATE with the global rotation and scale removed, which is what no
+  // scale knob can reach):
+  //
+  //   tau=600, gain   0.0     0.3     0.4     0.5
+  //   Log5          0.598%  0.316%  0.236%  0.177%
+  //   Log6          0.246%  0.249%  0.263%  0.293%
+  //
+  // A plateau rather than a peak -- tau 300 to 600 and gain 0.3 to 0.5 all land
+  // Log5 between 0.18 and 0.32% with Log6 inside a tenth of where it started.
+  double ground_height_feedback_gain = 0.0;
+  // In solves. Ford runs about 7.4 a second, so 600 is a minute and a third.
+  double ground_height_feedback_tau = 600.0;
   double inertial_scale_gain = 0.0;
   // How many solves the accelerometer is integrated over before the pair is
   // read out.
@@ -1646,6 +1672,9 @@ private:
   int64_t inertial_hop_count_ = 0;
   // Ground scale correction learned against inertial propagation.
   double imu_scale_ = 1.0;
+  // The lagged `radial_height`, and whether it has been seeded.
+  double ground_height_state_ = 0.0;
+  bool ground_height_ready_ = false;
   // What was handed to the propagator, and what vision measured, at the last
   // correction. The difference of each against now is the pair the scale is
   // read from.

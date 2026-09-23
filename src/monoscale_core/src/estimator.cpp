@@ -4603,6 +4603,35 @@ void Estimator::process_pair()
     }
   }
 
+  // Spend the anchors' height residual rather than reporting it. The reasoning
+  // and the measured gain are on `ground_height_feedback_gain`.
+  if (settings_.ground_height_feedback_gain != 0.0 && motion.has_value() &&
+    !last_radial_height_.empty() && std::isfinite(last_radial_height_.front()) &&
+    !cameras_.empty())
+  {
+    // Clamped before the lag, not after: one wild solve should not be allowed
+    // to set the state it then takes a minute to walk back.
+    const double residual = std::clamp(last_radial_height_.front(), -0.6, 0.6);
+    const double tau = std::max(settings_.ground_height_feedback_tau, 1.0);
+    if (!ground_height_ready_) {
+      ground_height_state_ = residual;
+      ground_height_ready_ = true;
+    } else {
+      ground_height_state_ += (residual - ground_height_state_) / tau;
+    }
+    const double height =
+      std::abs(cameras_.front()->model.translation_base_from_camera.z());
+    const double shift = settings_.ground_height_feedback_gain *
+      ground_height_state_ / std::max(height, 1e-6);
+    // A tenth is already more than load can move the ground under a car, and
+    // past it the reciprocal stops being a small correction.
+    if (std::abs(shift) < 0.1) {
+      const double factor = 1.0 / (1.0 - shift);
+      motion->x *= factor;
+      motion->y *= factor;
+    }
+  }
+
   const bool warming_up = !map_ready_ && !aligned_from_map;
   // The cap is on how far the vehicle can plausibly have moved, so it has to
   // cover the whole interval the update is closing. Against the map -- which
