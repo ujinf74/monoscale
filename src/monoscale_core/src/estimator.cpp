@@ -3767,6 +3767,31 @@ void Estimator::process_pair()
   // repeats to 0.012% is precise, and precision says nothing about where it is
   // pointed. Three drives at one speed agreed with each other for weeks about a
   // number that came from neither the estimator nor the road.
+  // A learned scale has to reach both lengths or it reaches neither.
+  //
+  // `imu_scale_` multiplies the camera's ranges, so the pair solve's hop moves
+  // with it. This road length does not: it is computed in the tracker from the
+  // camera height in that node's parameters and arrives already in metres,
+  // blind to anything the estimator has since learned. Correcting the scale
+  // therefore shortened one instrument and left the other standing, and the
+  // blend pulled back toward the one that had not moved -- on Ford's Log5 the
+  // estimator drove `imu_scale_` to 0.977 while the trajectory came out 1.2%
+  // **longer**. The correction was not weak or mis-signed; half the system
+  // never saw it.
+  //
+  // This is the same asymmetry wearing a third face. `ground_range_scale_*`
+  // reads as a dead knob at every value because the pair ranges it moves are
+  // renormalised against a road length that stayed put, and
+  // `ground_plane_offset_m` moves the trajectory the wrong way for the same
+  // reason -- shrinking the pair's ranges makes the road read relatively longer
+  // and the blend follows it up.
+  //
+  // So the road length takes the same learned scale the ranges do. Only the
+  // learned part: `camera.settings.range_scale` is static calibration and the
+  // tracker already holds its own copy of that in the camera height.
+  if (std::isfinite(road_mean)) {
+    road_mean *= imu_scale_;
+  }
   last_photometric_distance_ = road_mean;
   if (settings_.photometric_step_gain > 0.0 && !settings_.photometric_on_pairs &&
     road_cameras > 0 &&
@@ -4577,7 +4602,6 @@ void Estimator::process_pair()
       motion->scale = 1.0;
     }
   }
-
 
   const bool warming_up = !map_ready_ && !aligned_from_map;
   // The cap is on how far the vehicle can plausibly have moved, so it has to
