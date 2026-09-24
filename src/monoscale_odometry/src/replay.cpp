@@ -1653,6 +1653,11 @@ int main(int argc, char ** argv)
     std::printf(
       "two-frame dh/h[%zu]: %+.5f  n=%ld\n",
       i, diagnostics.pair_radial[i], diagnostics.pair_radial_samples[i]);
+    if (i < diagnostics.ground_pitch.size() && diagnostics.ground_pitch[i] != 0.0) {
+      std::printf(
+        "  loop pitch[%zu]: %+.5f deg\n", i,
+        diagnostics.ground_pitch[i] * 180.0 / M_PI);
+    }
   }
   for (size_t i = 0; i < diagnostics.radial_samples.size(); ++i) {
     if (diagnostics.radial_samples[i] == 0) {

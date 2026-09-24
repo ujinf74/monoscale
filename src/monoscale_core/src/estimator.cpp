@@ -223,6 +223,17 @@ struct Estimator::Camera
   double pair_srr = 0.0;
   double pair_se = 0.0;
   double pair_sre = 0.0;
+  // The same sums with a forgetting factor, for the pitch loop to read. The
+  // cumulative ones above keep every sample the drive ever took, which is what
+  // a diagnostic wants and the opposite of what a loop does.
+  double lead_n = 0.0;
+  double lead_sr = 0.0;
+  double lead_srr = 0.0;
+  double lead_se = 0.0;
+  double lead_sre = 0.0;
+  // Radians, about the camera's own x axis, added to the mount.
+  double ground_pitch = 0.0;
+  double ground_pitch_steps = 0.0;
   // Learned correction on top of the configured range scale. The radial
   // residual regressed against range is exactly dh/h -- a ground point read
   // through a camera height that is wrong by dh lands wrong by range*dh/h --
@@ -907,8 +918,16 @@ CameraModel Estimator::frame_model(const Camera & camera, int width, int height)
     k.row(0) *= static_cast<double>(width) / camera.calibration_width;
     k.row(1) *= static_cast<double>(height) / camera.calibration_height;
   }
+  // The loop's learned pitch rides on the mount rather than replacing it, and
+  // it is applied here because this is the one place the projection's rotation
+  // is built -- everything downstream of it inherits the correction.
+  Eigen::Matrix3d mount = camera.calibration.rotation_base_from_camera;
+  if (camera.ground_pitch != 0.0) {
+    mount = mount *
+      Eigen::Matrix3d(Eigen::AngleAxisd(camera.ground_pitch, Eigen::Vector3d::UnitX()));
+  }
   CameraModel model = make_camera_model(
-    k, camera.calibration.rotation_base_from_camera,
+    k, mount,
     camera.calibration.translation_base_from_camera, camera.calibration.distortion,
     camera.calibration.lens);
   model.level_frame_origin = settings_.level_frame_origin;
@@ -2711,6 +2730,11 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         camera.pair_srr += range * range;
         camera.pair_se += radial;
         camera.pair_sre += range * radial;
+        camera.lead_n += 1.0;
+        camera.lead_sr += range;
+        camera.lead_srr += range * range;
+        camera.lead_se += radial;
+        camera.lead_sre += range * radial;
         // The projection can read its own height back out of the residual, so
         // let it. Applied as a direct map from the accumulated regression, not
         // as an integrator: the integrator form was what went unstable when
@@ -3166,6 +3190,7 @@ void Estimator::process_pair()
   // solve holds a reference and does not know which one it was handed.
   diagnostics_.radial_linear.assign(count, 0.0);
   diagnostics_.pair_radial.assign(count, 0.0);
+  diagnostics_.ground_pitch.assign(count, 0.0);
   if (settings_.remember_sighting_poses) {
     diagnostics_.remembered_sightings = anchors_->remembered();
     diagnostics_.pose_history = static_cast<int64_t>(pose_history_.size());
@@ -3208,6 +3233,51 @@ void Estimator::process_pair()
     if (camera.radial_samples > 0) {
       const double n = static_cast<double>(camera.radial_samples);
       diagnostics_.radial_linear[i] = camera.radial_linear_sum / n;
+    }
+    diagnostics_.ground_pitch[i] = camera.ground_pitch;
+  }
+  // The pitch loop. Reads the forgetting sums, steps the mount, forgets.
+  if (settings_.ground_pitch_loop_rate != 0.0) {
+    const double tau = std::max(settings_.ground_pitch_loop_tau, 1.0);
+    const double keep = 1.0 - 1.0 / tau;
+    for (size_t i = 0; i < count; ++i) {
+      Camera & camera = *cameras_[i];
+      if (camera.lead_n > 64.0 &&
+        camera.settings.fusion_weight >= settings_.ground_pitch_loop_min_weight) {
+        const double d =
+          camera.lead_n * camera.lead_srr - camera.lead_sr * camera.lead_sr;
+        if (std::abs(d) > 1e-9) {
+          const double slope =
+            (camera.lead_n * camera.lead_sre - camera.lead_sr * camera.lead_se) / d;
+          if (std::isfinite(slope)) {
+            // Bounded by what a mount can plausibly have moved. Load and
+            // suspension are tenths of a degree; a whole one is a different
+            // fault and this loop is not the place to absorb it.
+            // Minus: injecting positive pitch raises the slope, so the step
+            // that cancels it goes the other way.
+            //
+            // And the rearward camera answers the same body pitch with the
+            // opposite sign -- the ESM's own tilt leak reads -8.1 per radian on
+            // Ford's front and +10.1 on its rear -- so without this the rear
+            // loop runs to the bound and takes the fusion with it.
+            const double facing =
+              camera.model.rotation_base_from_camera(0, 2) < 0.0 ? -1.0 : 1.0;
+            double step = settings_.ground_pitch_loop_rate;
+            if (settings_.ground_pitch_loop_settle > 0.0) {
+              step /= 1.0 + camera.ground_pitch_steps /
+                settings_.ground_pitch_loop_settle;
+            }
+            camera.ground_pitch = std::clamp(
+              camera.ground_pitch - facing * step * slope, -0.0175, 0.0175);
+            camera.ground_pitch_steps += 1.0;
+          }
+        }
+      }
+      camera.lead_n *= keep;
+      camera.lead_sr *= keep;
+      camera.lead_srr *= keep;
+      camera.lead_se *= keep;
+      camera.lead_sre *= keep;
     }
   }
 

@@ -413,6 +413,55 @@ struct EstimatorSettings
   //
   // A plateau rather than a peak -- tau 300 to 600 and gain 0.3 to 0.5 all land
   // Log5 between 0.18 and 0.32% with Log6 inside a tenth of where it started.
+  // The pitch loop that does close, on the observable that supports one.
+  //
+  // `pair_radial` -- the two-frame pair solve's radial residual regressed on
+  // range, over 170k points a drive -- answers a camera pitch injection with a
+  // straight line and a zero. Injecting -0.2 to +0.2 degrees on Ford:
+  //
+  //   Log6  slope 0.01535 per degree, zero at -0.0014 deg, R^2 0.993
+  //   Log5  slope 0.02290 per degree, zero at -0.1541 deg, R^2 0.998
+  //
+  // The drives' zeros differ by 0.1527 degrees. Four lidars put the same
+  // difference at 0.154. The observable finds it from the cameras alone, and
+  // Log6 -- whose calibration is same-day -- it leaves where it is.
+  //
+  // Unlike `radial_height`, which is the same residual split onto a height
+  // basis and a pitch basis: over a band whose depression is 3 degrees those
+  // two bases are nearly collinear, the split is ill-conditioned, and the
+  // halves come back non-monotonic. Unsplit, the residual is clean.
+  //
+  // Rate in radians of pitch per unit of slope per solve; the loop settles
+  // where the slope vanishes, so this is a pace and not a calibration.
+  double ground_pitch_loop_rate = 0.0;
+  // Solves. The sums the slope is read from forget at this rate, because a
+  // cumulative regression keeps the pre-correction samples and settles short.
+  double ground_pitch_loop_tau = 400.0;
+  // The loop runs where the camera's length is trusted, and nowhere else.
+  //
+  // Ford's forward band runs 7 to 30 m and answers a pitch injection with
+  // 0.0153 per degree and a clean zero. The rearward band loses its near half
+  // to the vehicle's own bodywork and answers with -0.004 per degree around a
+  // standing +0.008 that no pitch removes -- there is nothing there to drive to
+  // zero, so an integrator pointed at it walks to its bound and takes the
+  // fusion with it. Measured: Log6 ends at +1.0027 degrees of rear correction,
+  // ATE 13.6 m to 29.2 m.
+  //
+  // Gating on the regression's own leverage does not separate them; the rear
+  // has range spread, it just has no response. What does separate them is
+  // already in the configuration -- Ford weighs the rear at 0.02 against the
+  // front's 1.0, for the same reason. A camera whose length the fusion does not
+  // trust is not one to take a mount correction from.
+  double ground_pitch_loop_min_weight = 0.0;
+  // Solves after which the step is halved, halved again at three times, and so
+  // on -- a 1/k schedule, so the loop converges and then stops moving.
+  //
+  // A fixed step does not stop. Held out, the loop ends at -0.019 degrees of
+  // correction, which is the right answer to within a fiftieth, and Log6's ATE
+  // still goes 13.6 m to 28.7 m: what costs is not where it settles but that it
+  // keeps walking there, and a wandering mount is a time-varying scale where a
+  // wrong constant is only a wrong constant.
+  double ground_pitch_loop_settle = 0.0;
   double ground_height_feedback_gain = 0.0;
   // In solves. Ford runs about 7.4 a second, so 600 is a minute and a third.
   double ground_height_feedback_tau = 600.0;
@@ -1388,6 +1437,7 @@ struct Diagnostics
   int64_t photometric_chances = 0;
   int64_t photometric_mapless = 0;
   std::vector<double> pair_radial;
+  std::vector<double> ground_pitch;
   std::vector<int64_t> pair_radial_samples;
   std::vector<int64_t> radial_samples;
 
