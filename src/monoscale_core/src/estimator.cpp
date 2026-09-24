@@ -4014,6 +4014,22 @@ void Estimator::process_pair()
         // reading of the sweep is simpler than that: the pair solve's *length*
         // is not a competitive measurement. The cameras set the direction and
         // the map binding; the road sets the scale, alone.
+        //
+        // **On a real road it is competitive, and that is why Ford runs 0.40.**
+        // The 0.08% above is the simulator's rendered surface at 0.6 to 8 m.
+        // Ford's band is 7 to 30 m of asphalt near the sampling limit, and the
+        // two instruments measured over Log6's 3355 hops come out a factor of
+        // 1.4 apart rather than ten:
+        //
+        //   road 0.1225 m of per-hop noise, 8.6% of a 1.42 m hop
+        //   pair 0.1719 m,                 12.1%
+        //
+        // Their errors correlate only 0.28, so the blend is worth having -- but
+        // it is a blend of two comparable instruments, not a switch to the good
+        // one. Sweeping the gain on the held-out drive with everything else
+        // fixed gives shape error 0.245% at 0.40 against 0.409% at 0.55, 0.314%
+        // at 0.70 and 0.295% at 1.00. The value that looked like a deviation
+        // from the paragraph above is the paragraph not travelling.
         const double gain = settings_.photometric_step_gain;
         // Applied to the fused hop, and only where the map is silent.
         //
