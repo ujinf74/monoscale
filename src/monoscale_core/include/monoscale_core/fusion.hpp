@@ -39,6 +39,14 @@ public:
     // Velocity noise of a vision solve carrying the reference inlier count.
     double vision_noise = 0.25;
     double vision_reference_inliers = 300.0;
+    // The power the inlier ratio is raised to before it scales the variance.
+    //
+    // One is the independent-samples law. Anything else was built to replace a
+    // threshold with a weighting and does not, which is the finding rather than
+    // the knob: see `filter_weigh_by_matches` in estimator.hpp. Held out, the
+    // shape error reads 0.245% at every power from 1 to 3 while the rejection
+    // it was meant to imitate reads 0.129%.
+    double vision_inlier_exponent = 1.0;
     double initial_variance = 25.0;
     double innovation_gate = 9.0;
     // A measurement that fails the consistency check is not discarded, its
@@ -125,6 +133,8 @@ public:
     double bias_walk = 0.05;
     double vision_noise_m = 0.02;
     double vision_reference_inliers = 300.0;
+    // See the velocity filter's copy above.
+    double vision_inlier_exponent = 1.0;
     double initial_velocity_variance = 25.0;
     double initial_bias_variance = 1.0;
     double innovation_gate = 9.0;

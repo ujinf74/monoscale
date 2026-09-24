@@ -516,6 +516,7 @@ std::optional<PlanarMotion> fuse_planar_motions(
   double cosine = 0.0;
   double scale = 0.0;
   int inliers = 0;
+  int matches = 0;
   for (size_t i = 0; i < motions.size(); ++i) {
     const auto & motion = motions[i];
     const double weight = weight_of(i) / total;
@@ -525,8 +526,9 @@ std::optional<PlanarMotion> fuse_planar_motions(
     cosine += weight * std::cos(motion.yaw);
     scale += weight * motion.scale;
     inliers += motion.inliers;
+    matches += motion.matches;
   }
-  return PlanarMotion{x, y, std::atan2(sine, cosine), inliers, scale};
+  return PlanarMotion{x, y, std::atan2(sine, cosine), inliers, scale, matches};
 }
 
 void triangulate_temporal_points(

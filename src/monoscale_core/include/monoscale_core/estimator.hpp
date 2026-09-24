@@ -541,6 +541,14 @@ struct EstimatorSettings
   // Seed the anchor alignment with the previous hop instead of the median vote.
   bool align_seed_from_last_hop = false;
   int align_restarts = 1;
+  // The map path's own floor, separate from the solve's.
+  //
+  // `ground_min_inliers` gates two different things: whether the camera solves
+  // at all, and whether the solve is placed against the anchor map rather than
+  // the two views. Raising it from 20 to 50 on Ford drops the held-out drive's
+  // solves by 15% and its *anchored* solves by 56%, so most of what it does is
+  // the second. Split, because the two questions do not have the same answer.
+  int ground_map_min_inliers = 0;
   int ground_min_inliers = 24;
   double max_scale_error = 0.08;
   double max_translation_per_frame_m = 1.0;
@@ -1132,6 +1140,41 @@ struct EstimatorSettings
   double filter_vision_noise_m = 0.005;
   double filter_bias_walk = 0.01;
   double filter_reference_inliers = 300.0;
+  // See `vision_inlier_exponent` in fusion.hpp. One reproduces the
+  // independent-samples law the filter has always used.
+  double filter_inlier_exponent = 1.0;
+  // Weigh the vision measurement by the count of points matched between the
+  // two frames rather than by the count that survived the robust fit.
+  //
+  // The two are different numbers and the solve's own floor is on the first.
+  // Raising `ground_min_inliers` from 20 to 50 -- which rejects on the match
+  // count -- takes the held-out drive's shape error from 0.245% to 0.129%;
+  // steepening the variance law on the *inlier* count does nothing for it
+  // (0.245% at any exponent from 1 to 3). What the floor is selecting on is
+  // not what the filter is weighing by.
+  //
+  // Rejecting costs the drive with fewer features far more: Log5 loses 35% of
+  // its solves to that floor against Log6's 15%, because an absolute count
+  // meets two drives that differ 1.5x in how many points they have, and its
+  // shape error goes 0.463% to 1.146%. Weighing should keep the solve and spend
+  // the same selectivity on its variance.
+  //
+  // **It does not work, and the reason is worth more than the knob.** With the
+  // count reaching the filter -- it has to be summed through
+  // `fuse_planar_motions` or the fused motion carries a zero and the weighting
+  // silently falls back -- the held-out shape error reads:
+  //
+  //   power           1.0     1.5     2.0     2.5    | reject at 50
+  //   Log6 shape    0.315%  0.241%  0.323%  0.324%   | 0.129%
+  //   Log5 shape    0.557%  0.531%  0.550%  0.551%   | 1.146%
+  //
+  // Nothing approaches the rejection, and Log5 is worse everywhere. A weight is
+  // the instrument for noise: an error with zero mean does less harm the less
+  // you believe it. That including these solves at *any* weight costs says
+  // their error does not have zero mean, and a bias is not diluted by
+  // disbelief -- only by exclusion. The floor is selecting against bias, not
+  // against variance, and that is why a variance law cannot stand in for it.
+  bool filter_weigh_by_matches = false;
   double filter_innovation_gate = 9.0;
 
 

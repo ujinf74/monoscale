@@ -536,6 +536,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
       filter.acceleration_noise = settings.filter_acceleration_noise;
       filter.vision_noise = settings.filter_vision_noise;
       filter.vision_reference_inliers = settings.filter_reference_inliers;
+      filter.vision_inlier_exponent = settings.filter_inlier_exponent;
       filter.innovation_gate = settings.filter_innovation_gate;
       return filter;
     } ())
@@ -618,6 +619,7 @@ Estimator::Estimator(const EstimatorSettings & settings)
     filter.bias_walk = settings.filter_bias_walk;
     filter.vision_noise_m = settings.filter_vision_noise_m;
     filter.vision_reference_inliers = settings.filter_reference_inliers;
+      filter.vision_inlier_exponent = settings.filter_inlier_exponent;
     filter.innovation_gate = settings.filter_innovation_gate;
     displacement_filter_ = std::make_unique<PlanarDisplacementFilter>(filter);
   }
@@ -1807,7 +1809,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       }
     }
   }
-  if (static_cast<int>(matched_now.size()) < settings_.ground_min_inliers) {
+  const int matched_count = static_cast<int>(matched_now.size());
+  if (matched_count < settings_.ground_min_inliers) {
     remember_solve_pixels(camera);
     return std::nullopt;
   }
@@ -2276,7 +2279,9 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
   camera_known_[camera.source] += static_cast<double>(anchored.count());
   camera_looks_[camera.source] += 1;
 
-  if (anchored.count() >= settings_.ground_min_inliers) {
+  const int map_floor = settings_.ground_map_min_inliers > 0
+    ? settings_.ground_map_min_inliers : settings_.ground_min_inliers;
+  if (anchored.count() >= map_floor) {
     std::vector<Eigen::Index> selected;
     selected.reserve(static_cast<size_t>(anchored.count()));
     for (size_t i = 0; i < usable.size(); ++i) {
@@ -2533,6 +2538,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       camera.last_placed = placed;
       camera.placed_fresh = true;
       motion.inliers = static_cast<int>(aligned->inliers.count());
+      motion.matches = matched_count;
       motion.scale = 1.0;
       solved.motion = motion;
       // Stays true in either formulation: it means the map answered this
@@ -4589,7 +4595,9 @@ void Estimator::process_pair()
         velocity_shape = turn_matrix * last_hop_shape_ * turn_matrix.transpose();
         velocity_shape_ptr = &velocity_shape;
       }
-      if (!velocity_filter_.update(*measured, motion->inliers, extra, velocity_shape_ptr)) {
+      const int support = settings_.filter_weigh_by_matches && motion->matches > 0
+        ? motion->matches : motion->inliers;
+      if (!velocity_filter_.update(*measured, support, extra, velocity_shape_ptr)) {
         ++diagnostics_.filter_rejections;
       }
       // What the accelerometer integrated since the last correction, against

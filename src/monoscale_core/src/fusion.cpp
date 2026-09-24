@@ -45,7 +45,9 @@ double PlanarVelocityFilter::measurement_variance(int inliers) const
 {
   const double count = std::max(static_cast<double>(inliers), 1.0);
   const double scale = settings_.vision_reference_inliers / count;
-  return settings_.vision_noise * settings_.vision_noise * scale;
+  const double shaped = settings_.vision_inlier_exponent == 1.0
+    ? scale : std::pow(scale, settings_.vision_inlier_exponent);
+  return settings_.vision_noise * settings_.vision_noise * shaped;
 }
 
 bool PlanarVelocityFilter::update(
@@ -170,7 +172,10 @@ double PlanarDisplacementFilter::measurement_variance(int inliers, double spread
   const double count = std::max(static_cast<double>(inliers), 1.0);
   const double floor =
     settings_.vision_noise_m * settings_.vision_noise_m *
-    (settings_.vision_reference_inliers / count);
+    (settings_.vision_inlier_exponent == 1.0
+    ? settings_.vision_reference_inliers / count
+    : std::pow(settings_.vision_reference_inliers / count,
+    settings_.vision_inlier_exponent));
   if (spread > 0.0) {
     return std::max(floor, spread * spread / count);
   }

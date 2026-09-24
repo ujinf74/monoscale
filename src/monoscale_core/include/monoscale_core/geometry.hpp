@@ -79,6 +79,10 @@ struct PlanarMotion
   double yaw = 0.0;
   int inliers = 0;
   double scale = 1.0;
+  // Points matched between the two frames before any robust fit -- a different
+  // and larger number than `inliers`, and the one the solve's floor is on.
+  // Last, so the aggregate initialisers elsewhere keep their positions.
+  int matches = 0;
 };
 
 struct Pose2

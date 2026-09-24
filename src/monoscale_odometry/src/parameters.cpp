@@ -272,6 +272,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.align_seed_from_last_hop = declare_bool("align_seed_from_last_hop", false);
   settings.align_restarts = declare_int("align_restarts", 1);
   settings.ground_min_inliers = declare_int("ground_min_inliers", 24);
+  settings.ground_map_min_inliers =
+    declare_int("ground_map_min_inliers", 0);
   settings.max_scale_error = declare_double("max_scale_error", 0.08);
   settings.max_translation_per_frame_m = declare_double("max_translation_per_frame_m", 1.0);
   settings.max_yaw_per_frame_rad = declare_double("max_yaw_per_frame_rad", 0.35);
@@ -519,6 +521,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.filter_vision_noise_m = declare_double("filter_vision_noise_m", 0.005);
   settings.filter_bias_walk = declare_double("filter_bias_walk", 0.01);
   settings.filter_reference_inliers = declare_double("filter_reference_inliers", 300.0);
+  settings.filter_inlier_exponent = declare_double("filter_inlier_exponent", 1.0);
+  settings.filter_weigh_by_matches = declare_bool("filter_weigh_by_matches", false);
   settings.filter_innovation_gate = declare_double("filter_innovation_gate", 9.0);
 
   // The MSCKF's own numbers, read only when `fusion_model` asks for it.
