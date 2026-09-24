@@ -416,6 +416,24 @@ struct EstimatorSettings
   double ground_height_feedback_gain = 0.0;
   // In solves. Ford runs about 7.4 a second, so 600 is a minute and a third.
   double ground_height_feedback_tau = 600.0;
+  // **It cannot be closed, and the reason is what this quantity is.**
+  //
+  // The obvious improvement is to route the correction into the ranges instead
+  // of the hop, so the next solve's anchors re-triangulate on the corrected
+  // ground, the residual they report shrinks, and the loop settles where it
+  // vanishes -- a fixed point rather than the fitted -0.29 the regression gave.
+  // Built and measured on Log6, as an integrator on the residual paced by
+  // `tau`, the reported residual *grows*: 0.0197 m open, 0.0630 m at rate 0.3,
+  // 0.0427 m at 3.0. Reversing the sign does not rescue it -- 0.0852, 0.0448,
+  // 0.0542 at -0.3, -1.0, -3.0 -- and the drives do not converge to a common
+  // answer, which is the tell: Log6's length bias reads -2.32%, -0.56%, -4.57%
+  // and +0.35% across those rates.
+  //
+  // Scaling the ranges in either direction makes the residual worse, so the
+  // geometry as it stands already sits at its minimum. `radial_height`
+  // *predicts* the hop error -- the slope holds at -0.29 and -0.28 across two
+  // drives whose hop error differs threefold -- but it is not a parameter of
+  // the projection that a scale can null. There is no fixed point to find.
   double inertial_scale_gain = 0.0;
   // How many solves the accelerometer is integrated over before the pair is
   // read out.
