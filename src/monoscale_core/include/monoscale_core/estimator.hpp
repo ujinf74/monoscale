@@ -593,6 +593,32 @@ struct EstimatorSettings
   // what says the count is right.
   double ground_min_inlier_share = 0.0;
   int ground_map_min_inliers = 0;
+  // **50 is better than 20 and is not deployable, and the reason is the road
+  // rather than the setting.**
+  //
+  // Held out, raising it takes the shape error from 0.245% to 0.129% over a
+  // plateau running 40 to 50, three times the 0.04 that metric can resolve.
+  // The other drive collapses on the same change -- 0.463% to 1.146% -- because
+  // this is the consensus a robust fit has to reach and Log5's road cannot
+  // gather fifty points into one. It reaches 59 where Log6 reaches 78.
+  //
+  // Everything that could supply those points was tried and none of it does.
+  // Corner quality 0.01 to 0.004 moves the inliers 59 to 60. Spacing 8 px to 5
+  // makes it worse, 55. A 31 px tracking window instead of 21 recovers points
+  // at the tracker -- lost per frame 41 to 24 -- and loses them again at the
+  // road: usable 83 to 77, inliers 59 to 54, the consensus spread 0.278 to
+  // 0.303 and the official translation error 2.632% to 3.574%. On a plane
+  // viewed at three degrees a wider window straddles depth, so the patch
+  // deforms between frames and tracks that survive are tracks that are wrong.
+  //
+  // What separates the two drives is the surface. The road band carries 44.0 of
+  // mean gradient energy on Log6 and 34.6 on Log5, and every stage compounds
+  // it: 1429 tracked points against 1255, 103 usable against 83, 78 inliers
+  // against 59.
+  //
+  // So 50 buys a real improvement on roads with texture to spare and refuses to
+  // answer at all on roads without it. Twenty answers everywhere. That is the
+  // trade, and it is not a tuning question.
   int ground_min_inliers = 24;
   double max_scale_error = 0.08;
   double max_translation_per_frame_m = 1.0;
