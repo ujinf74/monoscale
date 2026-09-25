@@ -433,6 +433,15 @@ struct EstimatorSettings
   //
   // Rate in radians of pitch per unit of slope per solve; the loop settles
   // where the slope vanishes, so this is a pace and not a calibration.
+  //
+  // Whatever is read off this, read it against what the metrics can resolve.
+  // Perturbing the mount by 0.004 degrees -- a fortieth of the correction the
+  // observable prescribes, and physically nothing -- moves Ford's ATE by 48%
+  // on one drive and 60% on the other, non-monotonically: the held-out drive
+  // reads 23.4, 16.7, 13.6, 34.9 and 18.3 m across -0.008 to +0.008. Shape
+  // moves 17%, the official translation error 10%, and the per-hop rms 2% on
+  // the held-out drive. Judge with the last two. ATE is worth reading only
+  // where something has changed by more than a factor of two.
   double ground_pitch_loop_rate = 0.0;
   // Solves. The sums the slope is read from forget at this rate, because a
   // cumulative regression keeps the pre-correction samples and settles short.
@@ -548,6 +557,42 @@ struct EstimatorSettings
   // the two views. Raising it from 20 to 50 on Ford drops the held-out drive's
   // solves by 15% and its *anchored* solves by 56%, so most of what it does is
   // the second. Split, because the two questions do not have the same answer.
+  // The solve's floor as a share of what could have matched, beside the
+  // absolute one.
+  //
+  // `ground_min_inliers` at 50 rather than 20 takes the held-out drive's shape
+  // error from 0.245% to 0.129% over a plateau running 40 to 50, and is
+  // unusable there: it is a count, the two drives differ 1.5x in how many
+  // points they carry, and Log5 loses 35% of its solves to it against Log6's
+  // 15% -- its shape error goes 0.463% to 1.146%. Weighing rather than
+  // rejecting does not stand in for it; see `filter_weigh_by_matches`.
+  //
+  // So keep the rejection and make what it rejects the same thing on both
+  // drives: a fraction of `min(held, current)`, the most that could have been
+  // matched between the two frames. The absolute floor stays underneath as the
+  // case where there is nothing to take a fraction of.
+  //
+  // **It does not stand in for the count either**, and that is the answer to
+  // what the count was doing. Held out:
+  //
+  //   share        0.25    0.40    0.55   | count at 50
+  //   Log6 shape  0.246%  0.264%  0.265%  | 0.129%
+  //
+  // The share never moves the hold-out off its baseline. What 50 is selecting
+  // is not solves whose match *fraction* is poor -- it is solves with fewer
+  // than about fifty points in absolute terms, which is a property of how many
+  // points a robust plane-and-motion fit needs before it stops breaking down,
+  // and has nothing to do with how many the drive had to offer.
+  //
+  // Which means the floor's form was never wrong. Log5 simply cannot meet it:
+  // 1255 tracked points against Log6's 1429, 83 usable on the road against
+  // 103, 59 inliers against 78 -- a gap that widens at every stage, on a drive
+  // whose road band carries 27% less gradient energy. The repair is on the
+  // supply side, not here.
+  //
+  // Left in place and off. It is the wrong lever, but knowing it is wrong is
+  // what says the count is right.
+  double ground_min_inlier_share = 0.0;
   int ground_map_min_inliers = 0;
   int ground_min_inliers = 24;
   double max_scale_error = 0.08;

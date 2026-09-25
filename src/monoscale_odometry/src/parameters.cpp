@@ -272,6 +272,8 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.align_seed_from_last_hop = declare_bool("align_seed_from_last_hop", false);
   settings.align_restarts = declare_int("align_restarts", 1);
   settings.ground_min_inliers = declare_int("ground_min_inliers", 24);
+  settings.ground_min_inlier_share =
+    declare_double("ground_min_inlier_share", 0.0);
   settings.ground_map_min_inliers =
     declare_int("ground_map_min_inliers", 0);
   settings.max_scale_error = declare_double("max_scale_error", 0.08);

@@ -1810,7 +1810,14 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     }
   }
   const int matched_count = static_cast<int>(matched_now.size());
-  if (matched_count < settings_.ground_min_inliers) {
+  int floor_count = settings_.ground_min_inliers;
+  if (settings_.ground_min_inlier_share > 0.0) {
+    const double available = static_cast<double>(std::min(held, current));
+    floor_count = std::max(
+      floor_count,
+      static_cast<int>(std::ceil(settings_.ground_min_inlier_share * available)));
+  }
+  if (matched_count < floor_count) {
     remember_solve_pixels(camera);
     return std::nullopt;
   }
@@ -3262,19 +3269,20 @@ void Estimator::process_pair()
             // Minus: injecting positive pitch raises the slope, so the step
             // that cancels it goes the other way.
             //
-            // And the rearward camera answers the same body pitch with the
-            // opposite sign -- the ESM's own tilt leak reads -8.1 per radian on
-            // Ford's front and +10.1 on its rear -- so without this the rear
-            // loop runs to the bound and takes the fusion with it.
-            const double facing =
-              camera.model.rotation_base_from_camera(0, 2) < 0.0 ? -1.0 : 1.0;
+            // No facing term. A rearward camera answers the same body pitch
+            // with the opposite sign -- the ESM's tilt leak reads -8.1 per
+            // radian on Ford's front and +10.1 on its rear -- and flipping the
+            // step for it was tried and does not help, because the rear's
+            // slope has no zero to reach either way. It is excluded by
+            // `ground_pitch_loop_min_weight` instead, so nothing here ever runs
+            // on a camera that faces backwards.
             double step = settings_.ground_pitch_loop_rate;
             if (settings_.ground_pitch_loop_settle > 0.0) {
               step /= 1.0 + camera.ground_pitch_steps /
                 settings_.ground_pitch_loop_settle;
             }
             camera.ground_pitch = std::clamp(
-              camera.ground_pitch - facing * step * slope, -0.0175, 0.0175);
+              camera.ground_pitch - step * slope, -0.0175, 0.0175);
             camera.ground_pitch_steps += 1.0;
           }
         }
