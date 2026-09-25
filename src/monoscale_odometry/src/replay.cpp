@@ -1049,7 +1049,7 @@ int main(int argc, char ** argv)
         // drivers instead of binned by the one the correction already assumes.
         std::FILE * f = std::fopen(hops_path.c_str(), "w");
         if (f != nullptr) {
-          std::fprintf(f, "t0,t1,dt,length,dyaw,curvature,bias,lat,front,rear,fmap,rmap,fwd,yawsign,fcond,fweak,rcond,rweak,fhx,fhy,fpx,fpy,rhx,rhy,rpx,rpy,frng,fn,rrng,rn,pdist,flen,fh,fp,rh,rp,roll,pitch,byaw,broll,bpitch,btx,bty,imu\n");
+          std::fprintf(f, "t0,t1,dt,length,dyaw,curvature,bias,lat,front,rear,fmap,rmap,fwd,yawsign,fcond,fweak,rcond,rweak,fhx,fhy,fpx,fpy,rhx,rhy,rpx,rpy,frng,fn,rrng,rn,pdist,flen,matches,fh,fp,rh,rp,roll,pitch,byaw,broll,bpitch,btx,bty,imu\n");
           for (const auto & hop : hops) {
             if (hop.previous_stamp < truth.front().stamp || hop.stamp > truth.back().stamp) {
               continue;
@@ -1088,7 +1088,7 @@ int main(int argc, char ** argv)
               f, "%.6f,%.6f,%.4f,%.5f,%.6f,%.5f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.5f,%+d,"
               "%.4f,%.5f,%.4f,%.5f,"
               "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
-              "%.4f,%.0f,%.4f,%.0f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f\n",
+              "%.4f,%.0f,%.4f,%.0f,%.5f,%.5f,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f\n",
               hop.previous_stamp, hop.stamp, hop.stamp - hop.previous_stamp, length, std::abs(step.yaw),
               std::abs(step.yaw) / length, along(hop.fused_hop), across(hop.fused_hop),
               camera(0), camera(1),
@@ -1101,7 +1101,7 @@ int main(int argc, char ** argv)
               gain(hop.camera_pitch_gain, 1, 0), gain(hop.camera_pitch_gain, 1, 1),
               pick(hop.camera_mean_range, 0), pick(hop.camera_point_count, 0),
               pick(hop.camera_mean_range, 1), pick(hop.camera_point_count, 1),
-              hop.photometric_distance, hop.fused_length,
+              hop.photometric_distance, hop.fused_length, hop.matches,
               pick(hop.radial_height, 0), pick(hop.radial_pitch, 0),
               pick(hop.radial_height, 1), pick(hop.radial_pitch, 1),
               hop.roll, hop.pitch, hop.bearing_yaw,

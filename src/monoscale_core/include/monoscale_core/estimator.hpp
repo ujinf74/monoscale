@@ -578,11 +578,10 @@ struct EstimatorSettings
   //   share        0.25    0.40    0.55   | count at 50
   //   Log6 shape  0.246%  0.264%  0.265%  | 0.129%
   //
-  // The share never moves the hold-out off its baseline. What 50 is selecting
-  // is not solves whose match *fraction* is poor -- it is solves with fewer
-  // than about fifty points in absolute terms, which is a property of how many
-  // points a robust plane-and-motion fit needs before it stops breaking down,
-  // and has nothing to do with how many the drive had to offer.
+  // The share never moves the hold-out off its baseline, and the two are not
+  // even gating the same thing: this one rejects a solve whose matched
+  // fraction is thin, while `ground_min_inliers` sets the consensus the robust
+  // fit has to reach. Both are floors and they select different populations.
   //
   // Which means the floor's form was never wrong. Log5 simply cannot meet it:
   // 1255 tracked points against Log6's 1429, 83 usable on the road against
@@ -1191,12 +1190,19 @@ struct EstimatorSettings
   // Weigh the vision measurement by the count of points matched between the
   // two frames rather than by the count that survived the robust fit.
   //
-  // The two are different numbers and the solve's own floor is on the first.
-  // Raising `ground_min_inliers` from 20 to 50 -- which rejects on the match
-  // count -- takes the held-out drive's shape error from 0.245% to 0.129%;
-  // steepening the variance law on the *inlier* count does nothing for it
-  // (0.245% at any exponent from 1 to 3). What the floor is selecting on is
-  // not what the filter is weighing by.
+  // **This was built on a misreading and is kept for what the misreading
+  // found.** `ground_min_inliers` does not count matched points: it is passed
+  // into `align_to_anchors` and `estimate_planar_motion_with_yaw` as the
+  // consensus a robust fit must reach before it will answer. The match count
+  // runs about 988 a hop on Ford, so the check at the top of `solve_camera`
+  // that also reads the setting almost never fires. Raising 20 to 50 demands a
+  // broader agreement, not a bigger sample.
+  //
+  // Which is why neither weighting works, and the reason is sharper than the
+  // one first written here. A narrow consensus is not a noisy answer, it is the
+  // mode search having settled on a small cluster -- a wrong answer, with a
+  // mean that is not zero. Disbelief dilutes noise; it does nothing to a fit
+  // that has locked onto the wrong points.
   //
   // Rejecting costs the drive with fewer features far more: Log5 loses 35% of
   // its solves to that floor against Log6's 15%, because an absolute count
@@ -1443,6 +1449,9 @@ struct Update
   std::vector<double> radial_pitch;
   double photometric_distance = 0.0;
   double fused_length = 0.0;
+  // Points matched between the two frames, summed over the cameras that
+  // answered. The floor `ground_min_inliers` is on this, not on the inliers.
+  int matches = 0;
   // What the pose was actually moved by, after the filters and the rejection
   // gate have had it. `fused_hop` is what the cameras said; this is what the
   // map got. They are not the same quantity and only this one moves the pose.
@@ -1865,6 +1874,7 @@ private:
   std::vector<double> last_radial_pitch_;
   double last_photometric_distance_ = 0.0;
   double last_fused_length_ = 0.0;
+  int last_matches_ = 0;
   // Shortest mean reach any camera had last frame, which is what
   // `equalise_reach` trims the others back to.
   double reach_target_ = std::numeric_limits<double>::quiet_NaN();

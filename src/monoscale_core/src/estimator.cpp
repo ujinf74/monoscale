@@ -4473,6 +4473,7 @@ void Estimator::process_pair()
   // that was kept.
   last_fused_length_ = motion.has_value()
     ? std::hypot(motion->x, motion->y) : std::numeric_limits<double>::quiet_NaN();
+  last_matches_ = motion.has_value() ? motion->matches : 0;
 
   const double vision_speed = (motion.has_value() && dt > 1e-4)
     ? std::hypot(motion->x, motion->y) / dt
@@ -4776,6 +4777,7 @@ void Estimator::process_pair()
   update.radial_pitch = last_radial_pitch_;
   update.photometric_distance = last_photometric_distance_;
   update.fused_length = last_fused_length_;
+  update.matches = last_matches_;
 
 
   if (rejected) {
