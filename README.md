@@ -95,8 +95,8 @@ one millimetre of it moved the benchmark by half. A real vehicle's ride height
 moves with load, tyre pressure and suspension travel, and none of that exists in
 these recordings.
 
-**Everything here is measured in simulation.** CARLA, one town, one weather, one
-sun angle, `-quality-level=Low`. Two facts follow that a reader should have
+**The numbers above are measured in simulation.** CARLA, one town, one weather,
+one sun angle, `-quality-level=Low`. Two facts follow that a reader should have
 before the numbers. The rendered road's texture is what the photometric
 alignment reads, and changing the quality level alone moves the length bias by a
 factor of sixty. And **the simulated IMU carries zero noise on every axis** --
@@ -109,6 +109,44 @@ integrated from the gyro and its bias is corrected by the road fit's own yaw
 observation. The orientation CARLA reports -- which is truth to 0.000000 deg on
 these bags -- is not read. What has not been tested is that integration against
 a gyro with real angle random walk.
+
+**It has since been run on a real vehicle, once.** Ford Multi-AV Seasonal, two
+5.2 km drives from one car (2017-10-26, V2), Log5 tuned and Log6 held out,
+scored the KITTI way:
+
+| | t_err | r_err | ATE | drift |
+| --- | ---: | ---: | ---: | ---: |
+| Log5, tuned | 2.30 % | 0.345 deg/100m | 26.7 m | 0.56 % |
+| Log6, held out | 2.33 % | 0.366 deg/100m | 15.6 m | 0.33 % |
+
+That is two orders of magnitude worse than the figures at the top of this file,
+and the reason is geometry rather than tuning. The cameras are roof-mounted, so
+the car's own roof takes everything closer than six metres and the front band is
+6-30 m -- **11.8 degrees** of road against the simulated rig's fifty. The
+measurement was taken apart to check that claim: cutting the per-hop noise by a
+sixth does not move `t_err`, nor does rescaling the whole trajectory by its best
+constant, nor does letting the anchor map answer twice as many hops. What is
+left is a local scale error of about six per cent rms over 100 m windows whose
+mean is right, and the only thing that predicts it on both drives is which part
+of the band answered -- a scale that depends on the range that answered is a
+plane whose tilt and height were never separated.
+
+The quantity that governs this is the angular extent of road the camera sees,
+
+    extent = atan(h / d_near) - atan(h / d_far)
+
+and it is the near edge that carries it: on this vehicle 30 m to 40 m is worth
+0.76 deg and 6 m to 4 m is worth 6.85 deg. Pushing the near edge in makes both
+drives worse and the held-out one sharply (2.33 % at 6.0 m, 3.24 % at 5.5 m,
+4.03 % at 5.0 m), because that is where the bodywork is. Twenty degrees is
+where the noise is still near one per cent, ten is the knee, and a camera that
+cannot reach twenty is short of geometry rather than of tuning.
+
+So the claim is the modest one: on a vehicle the method was not designed around,
+with a real IMU on real asphalt at up to 34 m/s, it ran and it landed where its
+mounting said it would. It is one vehicle and two drives, both of which needed
+their calibration repaired first, and no third rear-equipped drive exists to
+check it against.
 
 None of that is a reason to discount the method. It is the list of things that
 would have to be measured again on a vehicle, and it is written down here rather
