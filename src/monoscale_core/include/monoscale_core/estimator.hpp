@@ -413,6 +413,27 @@ struct EstimatorSettings
   //
   // A plateau rather than a peak -- tau 300 to 600 and gain 0.3 to 0.5 all land
   // Log5 between 0.18 and 0.32% with Log6 inside a tenth of where it started.
+  //
+  // **Every number above is a single sample, and Ford runs this at zero.**
+  // Re-measured over five perturbations of the mount worth a fortieth of a
+  // degree, the shape error it was credited with improving reads 0.597% to
+  // 0.576% -- inside the +/-10% that ensemble already spans -- and the 0.449%
+  // quoted above was the lucky end of it. What it does buy is spread:
+  //
+  //   gain    ATE median / spread    shape median / spread
+  //   0.3        0.988% / +/-35%        0.576% / +/-10%
+  //   0.0        1.005% / +/- 5%        0.597% / +/- 1%
+  //
+  // Seven times the ATE scatter and ten times the shape's, for a median that
+  // does not move. It is the amplifier behind Log5's sensitivity: over the same
+  // ensemble, disabling `pair_scale_gain` leaves +/-22%, `anchor_drift_weight`
+  // or the attitude bias tau leave +/-33%, and this one leaves +/-5%.
+  //
+  // The structure is `inertial_scale_gain`'s: a global scalar driven by a noisy
+  // estimate. And the estimate is the predictor documented below, not a
+  // parameter -- scaling the ranges either way makes its residual worse, so
+  // there is no fixed point and the integrator wanders. Integrating a predictor
+  // is the mistake, and it does not become right by being slow.
   // The pitch loop that does close, on the observable that supports one.
   //
   // `pair_radial` -- the two-frame pair solve's radial residual regressed on
