@@ -2390,7 +2390,12 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
       Stopwatch align(diagnostics_, "align");
       aligned = align_to_anchors(
         body, world, weights, handed, gate,
-        settings_.ground_min_inliers,
+        // `map_floor`, not `ground_min_inliers`. The entry check above already
+        // uses it, but the consensus inside the alignment kept reading the
+        // ground solve's threshold, so `ground_map_min_inliers` could only ever
+        // refuse frames the alignment would have refused anyway -- sweeping it
+        // from 20 down to 6 left Ford's anchored count at exactly 289.
+        map_floor,
         // Never. This read `align_solves_yaw && heading_.enabled()`, and the
         // deployed `gyro_bias_sigma_rad_s` of 0.0 made the second term false on
         // every frame, so the alignment has never solved for yaw in any
