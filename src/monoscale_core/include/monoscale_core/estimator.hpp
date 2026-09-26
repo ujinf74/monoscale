@@ -938,6 +938,46 @@ struct EstimatorSettings
   // all -- so the effective measurement range differs by surface, which a
   // residual plane error then turns into a length.
   double photometric_step_gain = 0.0;
+  // How hard the blend leans on the fit's own report of how well it matched.
+  //
+  // The gain above is a constant and the instrument it weighs is not. Over
+  // Log6's 3334 hops the photometric residual against truth sorts cleanly by
+  // `1 - score`:
+  //
+  //   1 - score   <0.004  <0.008  <0.016  <0.032  rest
+  //   |residual|  0.0357  0.0365  0.0517  0.0693  0.1119   metres
+  //   hops           323     725     718     857    711
+  //
+  // A threefold spread the blend currently spends nothing on. The gain becomes
+  // `gain * (reference / badness)^k` with `badness = 1 - score`, clamped so it
+  // can neither exceed one nor go negative.
+  //
+  // **Measured and it does not work, for the reason 8bfb92f already gave.**
+  // Sweeping `k` over 0.2, 0.4 and 0.7 leaves the held-out per-hop rms inside
+  // its 2% resolution -- 0.1607, 0.1633, 0.1592, 0.1622 -- and takes the
+  // official translation error from 2.404% to 2.707%, 3.023% and 2.802%.
+  //
+  // The score does predict the error, threefold, and the instruments do not
+  // degrade together at the same rate: across those bands the road's residual
+  // runs 0.0356 to 0.1071 m while the pair solve's runs 0.1018 to 0.1206, so
+  // their ratio moves from 0.35 to 0.89. There is information here. It is the
+  // wrong information.
+  //
+  // Per-hop accuracy is not what a trajectory accumulates. Over Log5's 2322
+  // hops the road length is the *better* instrument per hop -- 0.1262 m of rms
+  // against the pair solve's 0.1586 -- and the *worse* one to walk on: 99.1 m
+  // of accumulated length error against 54.9. Its lag-1 autocorrelation is
+  // 0.615 where the pair solve's is 0.430, so its error persists and sums while
+  // the noisier one cancels. Log6 says the same more quietly, 69.9 m against
+  // 65.3.
+  //
+  // Which is why the variance arithmetic asks for 0.92 and a sweep answers
+  // 0.40. The blend is not choosing the accurate instrument, it is choosing the
+  // one that cancels, and every weighting keyed to per-hop error -- this, the
+  // inlier exponent, the match count -- optimises the wrong quantity.
+  double photometric_score_gain = 0.0;
+  // The badness the gain is quoted at. Log6's median `1 - score` is 0.0147.
+  double photometric_score_reference = 0.0147;
   // Frames whose road did not land on itself this well are not used. The
   // alignment reads 0.93 to 0.99 when it has the surface; the tail events that
   // wreck a hop at full gain are the frames where it does not.

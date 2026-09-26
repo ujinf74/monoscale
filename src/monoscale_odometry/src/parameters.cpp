@@ -396,6 +396,10 @@ Configuration declare_and_read(rclcpp::Node & node)
   settings.rebuild_measure_only = declare_bool("rebuild_measure_only", false);
   settings.fusion_gain_mode = declare_int("fusion_gain_mode", 0);
   settings.equalise_reach = declare_bool("equalise_reach", false);
+  settings.photometric_score_gain =
+    declare_double("photometric_score_gain", 0.0);
+  settings.photometric_score_reference =
+    declare_double("photometric_score_reference", 0.0147);
   settings.photometric_step_gain =
     declare_double("photometric_step_gain", 0.0);
   settings.photometric_min_score =

@@ -251,6 +251,12 @@ struct Estimator::Camera
   int64_t radial_terms = 0;
   double photometric_since_solve = 0.0;
   // The tilt leak this camera reported, averaged over the hops in the sum.
+  // The fit's own correlation over the solve interval, carried to the blend.
+  // It knows when it is wrong: over Log6's 3334 hops the photometric residual
+  // against truth runs 0.0357 m where `1 - score` is under 0.004 and 0.1119 m
+  // where it is over 0.032, rising as about its cube root.
+  double photometric_score_sum = 0.0;
+  int64_t photometric_score_count = 0;
   double photometric_leak_sum = 0.0;
   int64_t photometric_leak_count = 0;
   // The variance of that sum, from the fit's own covariance. Summed over the
@@ -962,6 +968,10 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
   {
     camera.photometric_since_solve += incoming.photometric_step;
     camera.photometric_valid = true;
+    if (std::isfinite(incoming.photometric_score)) {
+      camera.photometric_score_sum += incoming.photometric_score;
+      ++camera.photometric_score_count;
+    }
     if (std::isfinite(incoming.esm_tilt_leak)) {
       camera.photometric_leak_sum += incoming.esm_tilt_leak;
       ++camera.photometric_leak_count;
@@ -4114,7 +4124,25 @@ void Estimator::process_pair()
         // fixed gives shape error 0.245% at 0.40 against 0.409% at 0.55, 0.314%
         // at 0.70 and 0.295% at 1.00. The value that looked like a deviation
         // from the paragraph above is the paragraph not travelling.
-        const double gain = settings_.photometric_step_gain;
+        double gain = settings_.photometric_step_gain;
+        // Leaned on the fit's own score. See `photometric_score_gain`.
+        if (settings_.photometric_score_gain != 0.0) {
+          double weight = 0.0;
+          double count = 0.0;
+          for (const auto & held : cameras_) {
+            if (held->photometric_score_count > 0) {
+              weight += held->photometric_score_sum /
+                static_cast<double>(held->photometric_score_count);
+              count += 1.0;
+            }
+          }
+          if (count > 0.0) {
+            const double badness = std::max(1.0 - weight / count, 1e-4);
+            const double ratio = settings_.photometric_score_reference / badness;
+            gain = std::clamp(
+              gain * std::pow(ratio, settings_.photometric_score_gain), 0.0, 1.0);
+          }
+        }
         // Applied to the fused hop, and only where the map is silent.
         //
         // Where the map answers, the hop is a displacement with a pose
@@ -4226,6 +4254,8 @@ void Estimator::process_pair()
   for (auto & held : cameras_) {
     held->photometric_since_solve = 0.0;
     held->photometric_leak_sum = 0.0;
+    held->photometric_score_sum = 0.0;
+    held->photometric_score_count = 0;
     held->photometric_leak_count = 0;
     held->photometric_valid = false;
     held->photometric_broken = false;
