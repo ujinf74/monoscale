@@ -452,6 +452,21 @@ struct EstimatorSettings
   // two bases are nearly collinear, the split is ill-conditioned, and the
   // halves come back non-monotonic. Unsplit, the residual is clean.
   //
+  // **But unsplit it also cannot tell pitch from height on its own, and the
+  // lidar is what settles which one this is.** A height error scales every
+  // range alike, so its residual is `R dh/h` and linear in range -- which is
+  // the reading `pair_scale_gain` takes. A pitch error gives `-R^2 dd/h`,
+  // quadratic. Over 7 to 30 m those two bases correlate 0.987, so the slope
+  // answers to both, and the drives' 0.153 degrees of difference reads equally
+  // as 6.1 cm of height.
+  //
+  // Four lidars put the drives' height difference at 2 mm and a second pass at
+  // 4 to 9 mm. Six centimetres is an order out, so the slope difference is not
+  // height; the same lidars put the pitch difference at 0.154 degrees, which is
+  // what it is. Without that measurement this observable could not have been
+  // assigned, and the assignment is what makes the correction below legitimate
+  // rather than a curve fit.
+  //
   // Rate in radians of pitch per unit of slope per solve; the loop settles
   // where the slope vanishes, so this is a pace and not a calibration.
   //
