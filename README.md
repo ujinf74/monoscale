@@ -111,17 +111,33 @@ these bags -- is not read. What has not been tested is that integration against
 a gyro with real angle random walk.
 
 **It has since been run on a real vehicle, once.** Ford Multi-AV Seasonal, two
-5.2 km drives from one car (2017-10-26, V2), Log5 tuned and Log6 held out,
-scored the KITTI way:
+5.2 km drives from one car (2017-10-26, V2), Log5 tuned and Log6 held out:
 
-| | t_err | r_err | ATE | drift |
-| --- | ---: | ---: | ---: | ---: |
-| Log5, tuned | 2.30 % | 0.345 deg/100m | 26.7 m | 0.56 % |
-| Log6, held out | 2.33 % | 0.366 deg/100m | 15.6 m | 0.33 % |
+| | ATE / distance | final / distance | hop % | walk | t_err | r_err |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Log5, tuned | 0.510 % | 0.558 % | 4.14 | 4.82 | 2.30 % | 0.345 deg/100m |
+| Log6, held out | **0.297 %** | 0.326 % | 3.72 | **1.67** | 2.33 % | 0.366 deg/100m |
 
-That is two orders of magnitude worse than the figures at the top of this file,
-and the reason is geometry rather than tuning. The cameras are roof-mounted, so
-the car's own roof takes everything closer than six metres and the front band is
+The first four columns are `monoscale_evaluation/benchmark.py`, the same code
+and the same definitions as the table at the top of this file; the last two are
+KITTI's, which these drives are long enough to support and the CARLA ones are
+not. Read the held-out row: 0.297 % of distance against the 0.178 % the
+held-out park manoeuvres score, a factor of 1.7.
+
+That comparison should not be pushed far, and the benchmark file says why --
+ATE over distance still mixes path lengths, and these drives are 5.2 km against
+29 to 150 m. The column that survives the gap is `walk`, which divides what the
+trajectory accumulated by what independent hops predict it should, so 1.0 means
+the estimator adds no memory of its own and the number does not care how long
+the drive was. CARLA reads 1.10 on the bench and 0.76 held out; Ford reads
+**1.67** held out and 4.82 tuned. Accumulation is the part that carried over.
+
+What did not carry over is `hop %`, the per-hop error as a fraction of the hop.
+A ground feature is worth about 1 % of the displacement being measured, so 1.0
+is the floor; CARLA reads 0.14 on the bench and 0.83 held out, and these drives
+read **3.7 and 4.1**. A single observation is worth several times less here, and
+the reason is geometry rather than tuning. The cameras are roof-mounted, so the
+car's own roof takes everything closer than six metres and the front band is
 6-30 m -- **11.8 degrees** of road against the simulated rig's fifty. The
 measurement was taken apart to check that claim: cutting the per-hop noise by a
 sixth does not move `t_err`, nor does rescaling the whole trajectory by its best
@@ -146,7 +162,9 @@ So the claim is the modest one: on a vehicle the method was not designed around,
 with a real IMU on real asphalt at up to 34 m/s, it ran and it landed where its
 mounting said it would. It is one vehicle and two drives, both of which needed
 their calibration repaired first, and no third rear-equipped drive exists to
-check it against.
+check it against. The harness that fetches and scores those drives lives in
+`tools/`, which this repository does not track, so unlike the CARLA figures
+these are recorded here rather than reproducible from a clone.
 
 None of that is a reason to discount the method. It is the list of things that
 would have to be measured again on a vehicle, and it is written down here rather
