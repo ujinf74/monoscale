@@ -779,6 +779,28 @@ struct EstimatorSettings
   double radial_min_range_m = 1.5;
 
   int max_ground_anchors = 4000;
+  // **Ford wants this far larger than the simulator does: 1600 against 350.**
+  //
+  // A longer-lived anchor binds the pose to a reference held over a longer
+  // baseline, and the scale is what that buys. Over five-perturbation
+  // ensembles, medians:
+  //
+  //   age        350     600    1600    2600    4000
+  //   Log5 ATE  1.005%  0.737%  0.554%  0.566%  0.566%
+  //   Log5 shape 0.597%  0.522%  0.465%  0.463%  0.463%
+  //   Log6 ATE  0.348%  0.328%  0.297%  0.315%      -
+  //
+  // Monotone to 1600 on both drives and flat past it -- Log5's 2600 and 4000
+  // are identical, so the age has stopped binding. The spread tightens with
+  // it, Log5 +/-5% to +/-3% and Log6 +/-10% to +/-6%, so the difference is
+  // well clear of what these metrics resolve.
+  //
+  // The gain is in the scale, and it says something further. The optimal
+  // scale goes 1.0220 to 1.0060 on Log5 and 1.0080 to 1.0060 on Log6 -- the
+  // two drives converge on the same 0.6%. A quantity that differed per drive
+  // and now agrees is a rig constant, and 0.6% of 1.5934 m is 0.96 cm of
+  // camera height. Four lidars could not pin the absolute height better than
+  // +/-1.7 cm, so a centimetre is exactly what they cannot exclude.
   int anchor_max_age_frames = 120;
   double anchor_update_gain = 0.0;
   double anchor_drift_weight = 0.0;
