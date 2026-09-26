@@ -492,6 +492,40 @@ struct EstimatorSettings
   // *predicts* the hop error -- the slope holds at -0.29 and -0.28 across two
   // drives whose hop error differs threefold -- but it is not a parameter of
   // the projection that a scale can null. There is no fixed point to find.
+  // **Ford runs this at zero, and the reason is the estimator's own arithmetic
+  // rather than a sweep.**
+  //
+  // The loop regresses the vision's velocity change on the accelerometer's over
+  // windows that pass `inertial_scale_excitation_m_s`. The replay already prints
+  // the raw sums it is built from, so its standard error can be read off
+  // directly -- `resid = sqrt(uu(1-rho^2)/n)`, `SE = resid/(sqrt(n) sigma_i)`:
+  //
+  //   drive  window  stretches  estimate      SE     |signal|/SE
+  //   Log5       20        119    -6.00%   18.4%            0.33
+  //   Log5      100         24    +0.85%    3.8%            0.23
+  //   Log6       20        161    -1.53%    6.8%            0.22
+  //   Log6      100         35    +5.65%    4.4%            1.29
+  //
+  // The scale error being chased is about 1%. The uncertainty is 4 to 18%, and
+  // the sign reverses when the window changes -- on a quantity that is
+  // physically constant, which settles it.
+  //
+  // The accelerometer is not at fault: over one-second windows its velocity
+  // change is unbiased to 0.2-0.4% under every gating rule tried. The other side
+  // of the comparison is, and the supply is thin. The vision's velocity carries
+  // about 11% of noise a hop (0.16 m of hop rms on a 1.42 m hop) and only 24 to
+  // 161 windows in five kilometres clear the excitation gate, because these
+  // drives are mostly motorway and an accelerometer cannot see scale on a
+  // straight run at constant speed.
+  //
+  // Lengthening the window to 100 does improve Log5's ATE median, 0.937% to
+  // 0.595% over a seven-perturbation ensemble. That is a quieter reading of an
+  // estimate that still carries no information, and which way it leans is a
+  // property of this drive's random walk. `t_err` moves at no gain and no
+  // window -- Log6 reads 2.50 to 2.63% across all of them -- which is what an
+  // input that adds nothing looks like on the metric that can resolve it.
+  //
+  // An estimator whose signal sits below its own noise is not used.
   double inertial_scale_gain = 0.0;
   // How many solves the accelerometer is integrated over before the pair is
   // read out.
