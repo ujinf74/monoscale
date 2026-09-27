@@ -1,8 +1,8 @@
 # monoscale
 
 **Metric visual-inertial odometry whose scale comes from the ground plane**, and
-an occupancy grid built from the same images. No stereo, no lidar, no learned
-model, no prior map. One camera is enough, N is allowed, and they are free not
+an occupancy grid built from the same images. No stereo, no lidar in the loop,
+no learned model, no prior map. One camera is enough, N is allowed, and they are free not
 to overlap -- the two on this vehicle face opposite ways and share no field of
 view at all.
 
@@ -128,14 +128,57 @@ observation. The orientation CARLA reports -- which is truth to 0.000000 deg on
 these bags -- is not read. What has not been tested is that integration against
 a gyro with real angle random walk.
 
-**The real-vehicle column is one car and two drives.** Ford Multi-AV Seasonal,
-2017-10-26, V2, Log5 and Log6, 5.2 km each. Both needed their calibration
-repaired before they would score at all -- Log5's recorded IMU orientation is
-88309 all-zero quaternions, recoverable only from a second topic, and its mount
-pitch was out by 0.154 degrees -- and no third drive with a rear camera exists
-to check the pair against. KITTI cannot be that third witness: it has no rear
-camera, and putting Ford in the same condition accounts for most of the gap
-between the two benchmarks.
+**The real-vehicle column is two of that car's seven cameras.** Ford Multi-AV
+Seasonal, 2017-10-26, V2, Log5 and Log6, 5.2 km each. The vehicle carries seven
+cameras and four lidars; what was read is **FrontLeft and RearLeft** -- one
+forward, one rearward, the same two-camera arrangement as the simulated rig --
+plus `/imu`. The right-hand pair was deliberately left out, because it shares
+azimuth with its partners and so adds no tilt axis the fit did not already have,
+and the side cameras are unusable at these speeds: the road sweeps laterally
+faster than the tracker can follow and the flow collapses into the hundreds of
+pixels. None of the four lidars is in the loop.
+
+One of them is in the calibration, though, and the top of this file should not be
+read as saying otherwise. Log5's front mount is rotated 0.148 degrees from
+Log6's, and that correction was measured by the lidars rather than by the
+cameras -- over a 6-30 m band a height error and a tilt error produce residuals
+whose bases correlate 0.987, so the images cannot tell the two apart, and the
+thing that separates them is a range sensor that measures height directly. The
+running system consumes two image streams and an IMU; the number that told it
+where one of those cameras points did not come from either. The cameras do see
+the slope -- the pair solve's radial residual crosses zero at 0.153 degrees, which
+is the same angle -- so what the lidar supplied is not the measurement but the
+attribution, and that is the whole of its role here.
+
+Log5 arrives without an attitude, and is scored without one. Its `/imu`
+orientation is 88309 all-zero quaternions -- the field is present on every
+message and identically zero, which a quaternion-to-matrix routine turns into an
+identity rotation and a level vehicle without raising anything. Log6's is
+intact.
+
+Nothing fills it. Ford's bag carries an onboard INS pose that would, and it is
+refused: the sensors this stack may read are two cameras and an IMU, and a pose
+solution is neither. `/pose_ground_truth` is refused twice over, being the
+lidar-map-matched pose the scoring compares against. Nor can the IMU recover it
+alone -- Ford's accelerometer has gravity already removed, so it cannot find
+level even at rest, and roll and pitch here are mostly road camber and grade,
+the slow band a gyro high-pass deletes. Measured on Log6, where the answer is
+known, the best gyro reconstruction leaves 0.63 deg rms of roll and 0.65 of
+pitch against a signal whose own rms is 0.85: it explains 40 % and is not worth
+pretending about.
+
+Taking the vehicle as level costs 0.08 pp, and that is measured rather than
+argued. The gravity term cancels -- the conversion adds gravity through the
+recorded attitude and the propagator removes it through the same one, so an
+identity there is consistent rather than wrong, and what is actually lost is the
+rotation of the vehicle's own acceleration. Flattening Log6's good attitude to
+identity on purpose and rescoring gives `t_err` 2.332 to 2.411 %, ATE 15.60 to
+15.97 m, `walk` 1.67 to 1.68 and `hop %` 3.72 to 3.73, all inside the +/-0.23 pp
+the metric can resolve.
+
+No third drive with a rear camera exists to check the pair against, and KITTI
+cannot stand in: it has no rear camera at all, and putting Ford in the same
+condition accounts for most of the gap between the two benchmarks.
 
 They also are not one regime. Log5 runs at 13.7 m/s median against Log6's 7.4,
 its hops are 1.99 m against 1.18, and it is the worse of the two on `walk` by a
