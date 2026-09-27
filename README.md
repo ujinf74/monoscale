@@ -6,28 +6,46 @@ model, no prior map. One camera is enough, N is allowed, and they are free not
 to overlap -- the two on this vehicle face opposite ways and share no field of
 view at all.
 
-On a 111 m drive in CARLA, against the ground-truth pose:
+It has been measured in two places, and they are far enough apart that one
+number would misdescribe both. Same code and same definitions throughout --
+`monoscale_evaluation/benchmark.py`, tuned figure first, held-out second:
 
-| | mean | worst |
+| | CARLA, 29-150 m | Ford Multi-AV, 5.2 km |
 | --- | ---: | ---: |
-| **ATE / distance travelled** | **0.0237 %** | 0.0391 % |
-| **final error / distance** | **0.0324 %** | 0.0627 % |
-| held-out, never tuned on | **0.1781 %** | 0.2659 % |
+| **ATE / distance** | **0.0237 %** / **0.1781 %** | 0.510 % / **0.297 %** |
+| final error / distance | 0.0324 % / 0.2659 % | 0.558 % / 0.326 % |
+| `hop %`, what one observation is worth | 0.14 / 0.83 | 4.14 / 3.72 |
+| `walk`, accumulation over random walk | 1.10 / 0.76 | 4.82 / **1.67** |
+| road visible to the front camera | 49.6 deg | 11.8 deg |
 
-In millimetres, because a percentage of distance is hard to feel: **26 mm of
-ATE over a 111 m drive**, and 79 mm over a 30 m parking manoeuvre that no
-parameter was ever chosen against.
+In millimetres, because a percentage of distance is hard to feel: 26 mm of ATE
+over a 111 m simulated drive, and 15.6 m over a 5.2 km real one. Neither number
+is the other's failure -- the bottom row is most of why they differ, and the
+rest of that argument is in
+[what it assumes](#what-it-assumes-and-where-it-has-not-been-tested).
+
+What transferred from the simulator to the vehicle is `walk`, which is
+accumulation and is the hard half of odometry: 1.67 held out against 1.10 and
+0.76. What did not is `hop %`, the worth of a single ground observation, and
+that follows the angle in the bottom row rather than anything in the code.
 
 ![Estimate against ground truth](media/trajectories.png)
 
-At the scale of the drive the two lines are one. The right-hand panel zooms until the gap is visible and puts a scale bar beside it, because a figure where nothing can be seen proves nothing. Regenerate it with
-`monoscale_evaluation/plot_trajectories.py <slalom_dir> <park_dir> <out.png>` from any pair of `--tum` outputs.
+The CARLA slalom and the held-out park manoeuvre. At the scale of the drive the
+two lines are one; the right-hand panel zooms until the gap is visible and puts
+a scale bar beside it, because a figure where nothing can be seen proves
+nothing. Regenerate it with `monoscale_evaluation/plot_trajectories.py
+<slalom_dir> <park_dir> <out.png>` from any pair of `--tum` outputs.
 
-The held-out figure is the one to read. Two drives are kept out of every sweep
-and every judgement, and they earn their place: in one week they refused four
-changes that had won on the tuning set, including the removal of the last fitted
-multiplier in the stack. Numbers, the set they come from and how to reproduce
-them are in [`src/monoscale_evaluation/README.md`](src/monoscale_evaluation/README.md).
+The held-out figures are the ones to read. In CARLA two parking drives are kept
+out of every sweep and every judgement, and they earn their place: in one week
+they refused four changes that had won on the tuning set, including the removal
+of the last fitted multiplier in the stack. On Ford, Log6 plays the same part and
+no parameter was ever chosen against it. Numbers, the set they come from and how
+to reproduce them are in
+[`src/monoscale_evaluation/README.md`](src/monoscale_evaluation/README.md); the
+Ford harness is in the untracked `tools/`, so those two figures are recorded
+here rather than reproducible from a clone.
 
 ## What it is for
 
@@ -110,42 +128,36 @@ observation. The orientation CARLA reports -- which is truth to 0.000000 deg on
 these bags -- is not read. What has not been tested is that integration against
 a gyro with real angle random walk.
 
-**It has since been run on a real vehicle, once.** Ford Multi-AV Seasonal, two
-5.2 km drives from one car (2017-10-26, V2), Log5 tuned and Log6 held out:
+**The real-vehicle column is one car and two drives.** Ford Multi-AV Seasonal,
+2017-10-26, V2, Log5 and Log6, 5.2 km each. Both needed their calibration
+repaired before they would score at all -- Log5's recorded IMU orientation is
+88309 all-zero quaternions, recoverable only from a second topic, and its mount
+pitch was out by 0.154 degrees -- and no third drive with a rear camera exists
+to check the pair against. KITTI cannot be that third witness: it has no rear
+camera, and putting Ford in the same condition accounts for most of the gap
+between the two benchmarks.
 
-| | ATE / distance | final / distance | hop % | walk | t_err | r_err |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Log5, tuned | 0.510 % | 0.558 % | 4.14 | 4.82 | 2.30 % | 0.345 deg/100m |
-| Log6, held out | **0.297 %** | 0.326 % | 3.72 | **1.67** | 2.33 % | 0.366 deg/100m |
+They also are not one regime. Log5 runs at 13.7 m/s median against Log6's 7.4,
+its hops are 1.99 m against 1.18, and it is the worse of the two on `walk` by a
+factor of 2.9 -- in the direction this method's own rule predicts, since the
+accuracy goes as camera height over distance travelled per frame. One number
+cannot describe it. A specification would have to read "this much at this speed
+with this much road in view".
 
-The first four columns are `monoscale_evaluation/benchmark.py`, the same code
-and the same definitions as the table at the top of this file; the last two are
-KITTI's, which these drives are long enough to support and the CARLA ones are
-not. Read the held-out row: 0.297 % of distance against the 0.178 % the
-held-out park manoeuvres score, a factor of 1.7.
-
-That comparison should not be pushed far, and the benchmark file says why --
-ATE over distance still mixes path lengths, and these drives are 5.2 km against
-29 to 150 m. The column that survives the gap is `walk`, which divides what the
-trajectory accumulated by what independent hops predict it should, so 1.0 means
-the estimator adds no memory of its own and the number does not care how long
-the drive was. CARLA reads 1.10 on the bench and 0.76 held out; Ford reads
-**1.67** held out and 4.82 tuned. Accumulation is the part that carried over.
-
-What did not carry over is `hop %`, the per-hop error as a fraction of the hop.
-A ground feature is worth about 1 % of the displacement being measured, so 1.0
-is the floor; CARLA reads 0.14 on the bench and 0.83 held out, and these drives
-read **3.7 and 4.1**. A single observation is worth several times less here, and
-the reason is geometry rather than tuning. The cameras are roof-mounted, so the
-car's own roof takes everything closer than six metres and the front band is
-6-30 m -- **11.8 degrees** of road against the simulated rig's fifty. The
-measurement was taken apart to check that claim: cutting the per-hop noise by a
-sixth does not move `t_err`, nor does rescaling the whole trajectory by its best
-constant, nor does letting the anchor map answer twice as many hops. What is
-left is a local scale error of about six per cent rms over 100 m windows whose
-mean is right, and the only thing that predicts it on both drives is which part
-of the band answered -- a scale that depends on the range that answered is a
-plane whose tilt and height were never separated.
+The geometry claim above was taken apart before it was made, because it is the
+easy thing to assert. Cutting the per-hop noise by a sixth -- carrying the
+inertial attitude between anchor fixes takes the fused hop noise from 10.78 % to
+8.91 % and the accumulating common mode from 18.6 % to 14.0 % -- does not move
+the segment error at all. Neither does rescaling the whole trajectory by its best
+constant, worth 0.30 pp on one drive and nothing on the other. Neither does
+letting the anchor map answer 2.2x as many hops. What is left is a *local* scale
+error, 6.2 % and 6.6 % rms over 100 m windows while its mean is +1.4 % and
++0.2 %: the mean is right and each stretch is wrong. Grade, speed, curvature, hop
+count, hop length and map share each take under 6 % of its variance. The mean
+range of the band takes 6 and 10 %, and the pitch gain 9 and 18 %, with the same
+sign on both drives -- a scale that depends on which range answered is a plane
+whose tilt and height were never separated, and over a 6-30 m band those two
+bases correlate 0.987.
 
 The quantity that governs this is the angular extent of road the camera sees,
 
@@ -158,13 +170,21 @@ drives worse and the held-out one sharply (2.33 % at 6.0 m, 3.24 % at 5.5 m,
 where the noise is still near one per cent, ten is the knee, and a camera that
 cannot reach twenty is short of geometry rather than of tuning.
 
-So the claim is the modest one: on a vehicle the method was not designed around,
-with a real IMU on real asphalt at up to 34 m/s, it ran and it landed where its
-mounting said it would. It is one vehicle and two drives, both of which needed
-their calibration repaired first, and no third rear-equipped drive exists to
-check it against. The harness that fetches and scores those drives lives in
-`tools/`, which this repository does not track, so unlike the CARLA figures
-these are recorded here rather than reproducible from a clone.
+So the claim that column supports is the modest one: on a vehicle the method was
+not designed around, with a real IMU on real asphalt at up to 24 m/s, it ran and
+it landed where its mounting said it would. What it does not support is a number
+for a product. Two facts stand in the way and neither is measurement noise: the
+calibration is fragile, in that perturbing the mount pitch by 0.004 degrees --
+a fortieth of the correction this vehicle actually needed -- swings ATE by tens
+of per cent, while the same vehicle's pitch moved 0.154 degrees over three
+months; and about 0.6 % of residual scale is a rig constant worth 0.96 cm of
+camera height that the lidars, the accelerometer and the truth trajectory each
+fail to determine.
+
+The single measurement worth most next is not a parameter. It is one drive from
+a rear-equipped vehicle whose camera can see road inside six metres -- a bumper
+or mirror mount rather than a roof one. That tests the claim in the row above
+better than any further tuning of this rig can.
 
 None of that is a reason to discount the method. It is the list of things that
 would have to be measured again on a vehicle, and it is written down here rather
