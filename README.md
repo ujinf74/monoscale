@@ -12,10 +12,10 @@ number would misdescribe both. Same code and same definitions throughout --
 
 | | CARLA, 29-150 m | Ford Multi-AV, 5.2 km |
 | --- | ---: | ---: |
-| **ATE / distance** | **0.0237 %** / **0.1781 %** | 0.447 % / **0.182 %** |
-| final error / distance | 0.0324 % / 0.2659 % | 0.491 % / **0.097 %** |
-| `hop %`, what one observation is worth | 0.14 / 0.83 | 3.62 / 3.48 |
-| `walk`, accumulation over random walk | 1.10 / 0.76 | 5.14 / **1.15** |
+| **ATE / distance** | **0.0237 %** / **0.1781 %** | 0.451 % / **0.182 %** |
+| final error / distance | 0.0324 % / 0.2659 % | 0.519 % / **0.097 %** |
+| `hop %`, what one observation is worth | 0.14 / 0.83 | 3.24 / 3.48 |
+| `walk`, accumulation over random walk | 1.10 / 0.76 | 5.07 / **1.15** |
 | road visible to the front camera | 49.6 deg | 11.8 deg |
 
 In millimetres, because a percentage of distance is hard to feel: 26 mm of ATE
@@ -220,6 +220,19 @@ fit effectively unconstrained in one direction, and 3e4 refuses half of them.
 The three together are worth 2.299 -> 2.089 % and 2.332 -> 2.184 % of segment
 error, 26.68 -> 23.42 m and 15.60 -> 9.54 m of ATE, and 17.15 -> 5.09 m of final
 error on the held-out drive. The first two are worth almost nothing apart.
+
+One more figure moved for a duller reason, and it is worth writing down because
+the check that catches it is cheap. Thirteen of the tracker's settings are
+written into the tracks before the estimator ever sees them -- the photometric
+region of interest, its tiles and cell rows, the auto mask, the detector's road
+share, the alignment's degrees of freedom -- and Log5's tracks had been built
+before those were tuned. The tracker's *code* was unchanged, so a vintage check
+on the binary passed; what was stale was the configuration baked in beside it.
+Rebuilding them takes Log5 from 2.09 % to 1.85 % of segment error and its
+`hop %` from 3.62 to 3.24, while its accumulated figures move the other way a
+little. Log6's tracks were already current and are bit-identical, which is why
+the held-out column does not move. A parameter that the tracker reads cannot be
+swept at replay: `--set road_step_esm:=false` is bit-identical there.
 
 What remains is a *local* scale error, about 6 % rms over 100 m windows while its
 mean is right. Grade, speed, curvature, hop count, hop length and map share each
