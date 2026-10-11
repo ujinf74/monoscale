@@ -12,14 +12,14 @@ number would misdescribe both. Same code and same definitions throughout --
 
 | | CARLA, 29-150 m | Ford Multi-AV, 5.2 km |
 | --- | ---: | ---: |
-| **ATE / distance** | **0.0237 %** / **0.1781 %** | 0.510 % / **0.297 %** |
-| final error / distance | 0.0324 % / 0.2659 % | 0.558 % / 0.326 % |
-| `hop %`, what one observation is worth | 0.14 / 0.83 | 4.14 / 3.72 |
-| `walk`, accumulation over random walk | 1.10 / 0.76 | 4.82 / **1.67** |
+| **ATE / distance** | **0.0237 %** / **0.1781 %** | 0.476 % / **0.191 %** |
+| final error / distance | 0.0324 % / 0.2659 % | 0.552 % / **0.130 %** |
+| `hop %`, what one observation is worth | 0.14 / 0.83 | 3.70 / 3.46 |
+| `walk`, accumulation over random walk | 1.10 / 0.76 | 5.93 / **1.21** |
 | road visible to the front camera | 49.6 deg | 11.8 deg |
 
 In millimetres, because a percentage of distance is hard to feel: 26 mm of ATE
-over a 111 m simulated drive, and 15.6 m over a 5.2 km real one. Neither number
+over a 111 m simulated drive, and 10.0 m over a 5.2 km real one. Neither number
 is the other's failure -- the bottom row is most of why they differ, and the
 rest of that argument is in
 [what it assumes](#what-it-assumes-and-where-it-has-not-been-tested).
@@ -187,29 +187,57 @@ accuracy goes as camera height over distance travelled per frame. One number
 cannot describe it. A specification would have to read "this much at this speed
 with this much road in view".
 
-The geometry claim above was taken apart before it was made, because it is the
-easy thing to assert. Cutting the per-hop noise by a sixth -- carrying the
-inertial attitude between anchor fixes takes the fused hop noise from 10.78 % to
-8.91 % and the accumulating common mode from 18.6 % to 14.0 % -- does not move
-the segment error at all. Neither does rescaling the whole trajectory by its best
-constant, worth 0.30 pp on one drive and nothing on the other. Neither does
-letting the anchor map answer 2.2x as many hops. What is left is a *local* scale
-error, 6.2 % and 6.6 % rms over 100 m windows while its mean is +1.4 % and
-+0.2 %: the mean is right and each stretch is wrong. Grade, speed, curvature, hop
-count, hop length and map share each take under 6 % of its variance. The mean
-range of the band takes 6 and 10 %, and the pitch gain 9 and 18 %, with the same
-sign on both drives -- a scale that depends on which range answered is a plane
-whose tilt and height were never separated, and over a 6-30 m band those two
-bases correlate 0.987.
+The length is 85 to 89 % of it, and that is an oracle rather than an argument:
+feeding the truth hop length takes the segment error from 3.869 % to 0.429 % on
+Log5 and 2.824 % to 0.418 % on Log6, while feeding the truth lateral moves it by
+0.013 pp. Heading and direction are not the problem; the scalar magnitude of
+each hop is.
+
+And the length error is a tilt residual. Seventy-five points enter a solve, one
+of them at 13 m is worth 0.112 m of hop per pixel of bearing error, and
+averaging them independently would give 0.0135 m -- 0.77 % of the hop. The
+measured error is 0.2953 m, **twenty-two times that**, the same factor on both
+drives. The effective count is below one, which is what happens when a residual
+common to the whole patch is indistinguishable from a tilt: it does not average
+away, so the measurement is really a single observation, the patch's mean
+bearing shift. Tilt reaches the length as `(R^2 + h^2) / h`, 122 m/rad at 13 m,
+which is 2.1 m per degree against a 2 m hop. The whole error is 0.077 to 0.103
+degrees of apparent tilt.
+
+That is why the only thing that has moved this number is an outside tilt
+reference, and why most attempts did not. Reducing the per-hop noise alone does
+nothing -- the inertial carry on its own takes the fused hop noise from 10.78 %
+to 8.91 % and leaves the segment error where it was. Neither does rescaling the
+trajectory by its best constant, worth 0.30 pp on one drive and nothing on the
+other, nor letting the anchor map answer 2.2x as many hops. What worked was
+noticing that the map's tilt estimate was itself drifting: Log5's fix changes by
+0.080, 0.579 and 1.860 degrees over 1, 100 and 1000 solves against a standing
+deviation of 1.016, which is a random walk and cannot be smoothed. Admitting
+only better-determined anchors halves it, and only then does carrying the gyro
+between fixes help. The pair is worth 2.299 -> 2.130 % and 2.332 -> 2.197 % of
+segment error, 15.60 -> 10.05 m and 26.68 -> 24.90 m of ATE, and 17.15 -> 6.81 m
+of final error on the held-out drive. Each half alone is worth almost nothing.
+
+What remains is a *local* scale error, about 6 % rms over 100 m windows while its
+mean is right. Grade, speed, curvature, hop count, hop length and map share each
+take under 6 % of its variance. The mean range of the band takes 6 and 10 %, and
+the pitch gain 9 and 18 %, with the same sign on both drives -- a scale that
+depends on which range answered is a plane whose tilt and height were never
+separated, and over a 6-30 m band those two bases correlate 0.987.
 
 The quantity that governs this is the angular extent of road the camera sees,
 
     extent = atan(h / d_near) - atan(h / d_far)
 
 and it is the near edge that carries it: on this vehicle 30 m to 40 m is worth
-0.76 deg and 6 m to 4 m is worth 6.85 deg. Pushing the near edge in makes both
-drives worse and the held-out one sharply (2.33 % at 6.0 m, 3.24 % at 5.5 m,
-4.03 % at 5.0 m), because that is where the bodywork is. Twenty degrees is
+0.76 deg and 6 m to 4 m is worth 6.85 deg. Trimming the far edge instead trades
+one against the other and loses -- 30 m to 16 m takes the front's hop noise from
+19.05 % to 13.95 % and the segment error the wrong way, from 2.33 % to 2.99 %,
+because the far points that set the amplification are the same ones that set the
+angle. Pulling the near edge in would improve both at once, and it is where the
+bodywork is: the held-out drive reads 2.20 % at 6.0 m, 2.29 % at 5.5 and 3.19 %
+at 5.0, and the front's hop noise rises rather than falls on the way, which is
+the signature of new bad points rather than better geometry. Twenty degrees is
 where the noise is still near one per cent, ten is the knee, and a camera that
 cannot reach twenty is short of geometry rather than of tuning.
 

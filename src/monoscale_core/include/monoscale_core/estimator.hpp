@@ -804,6 +804,34 @@ struct EstimatorSettings
   int anchor_max_age_frames = 120;
   double anchor_update_gain = 0.0;
   double anchor_drift_weight = 0.0;
+  // Ford runs 0.03, and the reason is the anchor tilt rather than the anchor.
+  //
+  // The hop length is 85-89% of Ford's translation error, measured by oracle:
+  // feeding the truth hop length takes `t_err` from 3.869% to 0.429% on Log5
+  // and 2.824% to 0.418% on Log6, while feeding the truth lateral moves it by
+  // 0.013 pp. And the length error is a tilt residual. Seventy-five points go
+  // into a solve, one point at 13 m is worth 0.112 m of hop per pixel, and
+  // independent averaging would give 0.0135 m -- 0.77% of the hop. The measured
+  // error is 0.2953 m, twenty-two times that, the same factor on both drives.
+  // The effective count is below one: a residual common to the patch is
+  // indistinguishable from a tilt and does not average away, so the measurement
+  // is one observation, the patch's mean bearing shift. Tilt reaches the length
+  // as (R^2+h^2)/h, 122 m/rad at 13 m, which is 2.1 m per degree against a 2 m
+  // hop -- so the whole error is 0.077 to 0.103 degrees.
+  //
+  // Which makes an outside tilt reference worth having, and the map is the only
+  // one here. What stopped it is that the reference drifts. Log5's `bpitch` is
+  // not white: its change over 1, 100 and 1000 solves is 0.080, 0.579 and 1.860
+  // degrees against a standing deviation of 1.016, which is a random walk, and
+  // `anchor_attitude_solves` cannot smooth one. Log6's saturates -- 0.055,
+  // 0.153, 0.277 against 0.186 -- which is why Log6 alone tolerated a shorter
+  // constant.
+  //
+  // 0.03 halves the walk: Log5's sd 1.016 -> 0.446 and its 1000-solve change
+  // 1.860 -> 0.837. 0.01 breaks it again (sd 2.035) by starving the fit of
+  // anchors. The plateau is 0.02 to 0.05. See
+  // `anchor_attitude_imu_carry_sec`, which is the other half and useless
+  // without this one.
   double anchor_max_variance = 0.09;
   int anchor_trial_observations = 4;
   // Solves an anchor must go unseen before it may be evicted.
@@ -1294,6 +1322,28 @@ struct EstimatorSettings
   // corner says how long the inertial attitude is trusted for. Handing over the
   // whole of it instead costs sequence 10 its hop noise, 33.9% to 68.2%, which
   // is the filter's own 1.46 degree error arriving at -21% each. Zero is off.
+  //
+  // Ford runs 0.5, with `anchor_max_variance` at 0.03, and neither is worth
+  // much alone: the variance gate by itself is -0.08 pp on Log5 and nothing on
+  // Log6, the carry by itself -0.08 and +0.04. The pair is the point, because a
+  // high pass needs a reference that is not already walking away. Together:
+  //
+  //             t_err          fused hop      ATE            final
+  //   Log5   2.299 -> 2.130   10.78 -> 8.57   26.68 -> 24.90  29.21 -> 28.91 m
+  //   Log6   2.332 -> 2.197   14.89 -> 12.06  15.60 -> 10.05  17.15 ->  6.81 m
+  //
+  // Both drives, every absolute figure, and Log6's 6.81 m is 0.13% of 5254 m.
+  // The one that moves the wrong way is Log5's `walk`, 4.82 -> 5.93, and that
+  // is its denominator: the hop deviation fell by a fifth, so the random walk
+  // it is divided by fell with it while the absolute error improved.
+  //
+  // Both axes are plateaux rather than points. Over `anchor_max_variance` at
+  // this carry: 0.02 reads 2.338/2.178, 0.03 2.130/2.197, 0.05 2.145/2.230,
+  // 0.09 2.219/2.373. Over the carry at 0.03: 0.0 reads 2.220/2.332, 0.5
+  // 2.130/2.197, 0.7 2.179/2.314, 1.0 2.273/2.297.
+  //
+  // `anchor_attitude_solves` stays at 100. The walk is halved, not removed, so
+  // 30 still costs both drives -- 2.335 and 2.400.
   double anchor_attitude_imu_carry_sec = 0.0;
   double attitude_slope_tau_sec = 0.0;
   double vision_scale = 1.0;
