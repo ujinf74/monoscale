@@ -2413,7 +2413,8 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
         gate_centre.has_value() ? &*gate_centre : nullptr,
         settings_.inertial_gate_m, scale,
         settings_.anchor_bearing_nonholonomic,
-        settings_.anchor_bearing_cell_rad, settings_.anchor_bearing_cell_rho);
+        settings_.anchor_bearing_cell_rad, settings_.anchor_bearing_cell_rho,
+        settings_.anchor_bearing_max_condition);
     }
     if (aligned.has_value()) {
       camera.last_translation = aligned->translation;

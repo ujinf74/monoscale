@@ -12,14 +12,14 @@ number would misdescribe both. Same code and same definitions throughout --
 
 | | CARLA, 29-150 m | Ford Multi-AV, 5.2 km |
 | --- | ---: | ---: |
-| **ATE / distance** | **0.0237 %** / **0.1781 %** | 0.476 % / **0.191 %** |
-| final error / distance | 0.0324 % / 0.2659 % | 0.552 % / **0.130 %** |
-| `hop %`, what one observation is worth | 0.14 / 0.83 | 3.70 / 3.46 |
-| `walk`, accumulation over random walk | 1.10 / 0.76 | 5.93 / **1.21** |
+| **ATE / distance** | **0.0237 %** / **0.1781 %** | 0.447 % / **0.182 %** |
+| final error / distance | 0.0324 % / 0.2659 % | 0.491 % / **0.097 %** |
+| `hop %`, what one observation is worth | 0.14 / 0.83 | 3.62 / 3.48 |
+| `walk`, accumulation over random walk | 1.10 / 0.76 | 5.14 / **1.15** |
 | road visible to the front camera | 49.6 deg | 11.8 deg |
 
 In millimetres, because a percentage of distance is hard to feel: 26 mm of ATE
-over a 111 m simulated drive, and 10.0 m over a 5.2 km real one. Neither number
+over a 111 m simulated drive, and 9.5 m over a 5.2 km real one. Neither number
 is the other's failure -- the bottom row is most of why they differ, and the
 rest of that argument is in
 [what it assumes](#what-it-assumes-and-where-it-has-not-been-tested).
@@ -214,9 +214,12 @@ noticing that the map's tilt estimate was itself drifting: Log5's fix changes by
 0.080, 0.579 and 1.860 degrees over 1, 100 and 1000 solves against a standing
 deviation of 1.016, which is a random walk and cannot be smoothed. Admitting
 only better-determined anchors halves it, and only then does carrying the gyro
-between fixes help. The pair is worth 2.299 -> 2.130 % and 2.332 -> 2.197 % of
-segment error, 15.60 -> 10.05 m and 26.68 -> 24.90 m of ATE, and 17.15 -> 6.81 m
-of final error on the held-out drive. Each half alone is worth almost nothing.
+between fixes help, and then refusing the fits that stand on a direction the
+anchors do not span -- the condition gate was hardcoded at 1e6, which admits a
+fit effectively unconstrained in one direction, and 3e4 refuses half of them.
+The three together are worth 2.299 -> 2.089 % and 2.332 -> 2.184 % of segment
+error, 26.68 -> 23.42 m and 15.60 -> 9.54 m of ATE, and 17.15 -> 5.09 m of final
+error on the held-out drive. The first two are worth almost nothing apart.
 
 What remains is a *local* scale error, about 6 % rms over 100 m windows while its
 mean is right. Grade, speed, curvature, hop count, hop length and map share each

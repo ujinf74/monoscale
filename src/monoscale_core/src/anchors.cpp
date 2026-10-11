@@ -971,7 +971,7 @@ std::optional<AnchorAlignment> align_to_anchors(
   const Eigen::Vector2d * translation_prior, int restarts, double ambiguity,
   const Eigen::Vector2d * inertial_hop, double inertial_gate,
   const Weights & residual_scale, bool bearing_nonholonomic, double bearing_cell_rad,
-  double bearing_cell_rho)
+  double bearing_cell_rho, double bearing_max_condition)
 {
   const Eigen::Index count = body_points.rows();
   if (count < std::max<Eigen::Index>(2, min_inliers) || world_points.rows() != count) {
@@ -1529,7 +1529,7 @@ std::optional<AnchorAlignment> align_to_anchors(
     // measurement of anything. The population turns over constantly, so this
     // fires on its own where the geometry is thin rather than needing a count.
     result.bearing_condition = smallest > 1e-18 ? largest / smallest : 1e30;
-    if (smallest > 1e-12 && largest / smallest < 1e6) {
+    if (smallest > 1e-12 && largest / smallest < bearing_max_condition) {
       const Eigen::Matrix<double, 5, 1> fit = bearing_normal.ldlt().solve(bearing_rhs);
       if (fit.allFinite()) {
         // Negated on the way out. The bases above are `-w x b`, so the fit

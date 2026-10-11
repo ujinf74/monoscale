@@ -426,6 +426,8 @@ Configuration declare_and_read(rclcpp::Node & node)
     declare_bool("anchor_bearing_nonholonomic", false);
   settings.anchor_bearing_cell_rad = declare_double("anchor_bearing_cell_rad", 0.0);
   settings.anchor_bearing_cell_rho = declare_double("anchor_bearing_cell_rho", 1.0);
+  settings.anchor_bearing_max_condition =
+    declare_double("anchor_bearing_max_condition", 1e6);
   settings.anchor_link_adopter_writes =
     declare_bool("anchor_link_adopter_writes", false);
   settings.ground_plane_offset_m =

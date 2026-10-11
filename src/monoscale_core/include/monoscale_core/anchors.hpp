@@ -765,7 +765,11 @@ std::optional<AnchorAlignment> align_to_anchors(
   // How correlated two anchors in one cell actually are. 1 treats them as one
   // measurement; 0 disables the correction. Measured within-cell correlation is
   // 0.807 / 0.738 / 0.680 on straight_s8 / straight120_v2 / curve_s05.
-  double bearing_cell_rho = 1.0);
+  double bearing_cell_rho = 1.0,
+  // Largest condition number the five-unknown bearing fit may stand on. The
+  // direction the anchors do not span is the one the fit invents, and inventing
+  // it is how the tilt reference starts walking.
+  double bearing_max_condition = 1e6);
 
 struct CameraTranslation
 {

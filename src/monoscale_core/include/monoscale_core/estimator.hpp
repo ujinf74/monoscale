@@ -1178,6 +1178,10 @@ struct EstimatorSettings
   // See `align_to_anchors`. 0 is off; the physical value is the bearing noise.
   double anchor_bearing_cell_rad = 0.0;
   double anchor_bearing_cell_rho = 1.0;
+  // Largest condition number the bearing fit may stand on. 1e6 was hardcoded
+  // and lets through a fit that is effectively unconstrained in one direction,
+  // which is where an invented tilt comes from.
+  double anchor_bearing_max_condition = 1e6;
   bool anchor_link_adopter_writes = false;
   double ground_plane_offset_m = 0.0;
   // A common ratio applied to every camera's range after the plane offset.
