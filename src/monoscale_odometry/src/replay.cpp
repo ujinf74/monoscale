@@ -383,6 +383,13 @@ struct Outcome
   double radial_pitch_sum = 0.0;
   double radial_height_sum = 0.0;
   int64_t radial_pitch_n = 0;
+  // How long the pose goes without a vision translation. A coast carries the
+  // last filtered velocity through the gap, so what the gap costs depends on
+  // how long it is, not on how many there are.
+  std::vector<int> coast_runs;
+  std::vector<double> coast_spans;
+  int coast_run = 0;
+  double coast_began = 0.0;
 };
 
 void replay_into(
@@ -413,6 +420,19 @@ void replay_into(
       }
       if (update.hops_valid && update.previous_stamp > 0.0) {
         outcome.hops.push_back(update);
+      }
+      if (update.applied_valid || update.hops_valid) {
+        if (update.coasted) {
+          if (outcome.coast_run == 0) {
+            outcome.coast_began =
+              update.previous_stamp > 0.0 ? update.previous_stamp : update.stamp;
+          }
+          ++outcome.coast_run;
+        } else if (outcome.coast_run > 0) {
+          outcome.coast_runs.push_back(outcome.coast_run);
+          outcome.coast_spans.push_back(update.stamp - outcome.coast_began);
+          outcome.coast_run = 0;
+        }
       }
       if (!update.radial_pitch.empty() && std::isfinite(update.radial_pitch[0]) &&
         update.radial_pitch[0] != 0.0)
@@ -1645,6 +1665,21 @@ int main(int argc, char ** argv)
       diagnostics.photometric_mapless);
     std::printf("  pose graph: %ld revisit constraints, poses moved %.4f m on average\n",
       diagnostics.pose_graph_loops, diagnostics.pose_graph_shift_m);
+  }
+  if (!outcome.coast_runs.empty()) {
+    std::vector<int> r = outcome.coast_runs;
+    std::vector<double> t = outcome.coast_spans;
+    std::sort(r.begin(), r.end());
+    std::sort(t.begin(), t.end());
+    int64_t frames = 0;
+    for (int v : r) {
+      frames += v;
+    }
+    std::printf(
+      "coast runs: %zu, %ld frames  length median %d p95 %d max %d  "
+      "span median %.3f p95 %.3f max %.3f s\n",
+      r.size(), frames, r[r.size() / 2], r[r.size() * 19 / 20], r.back(),
+      t[t.size() / 2], t[t.size() * 19 / 20], t.back());
   }
   for (size_t i = 0; i < diagnostics.pair_radial_samples.size(); ++i) {
     if (diagnostics.pair_radial_samples[i] == 0) {
