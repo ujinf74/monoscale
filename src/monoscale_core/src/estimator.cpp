@@ -356,6 +356,11 @@ struct Estimator::Solved
   // across. See MotionEstimate::scatter.
   Eigen::Vector2d pair_scatter = Eigen::Vector2d::Constant(
     std::numeric_limits<double>::quiet_NaN());
+  // The tilt the ground projection actually used this solve, as roll and
+  // pitch. The hop is `prev - R(yaw) cur` across two projections, so what
+  // matters to it is not this angle but its change between them.
+  Eigen::Vector2d applied_tilt = Eigen::Vector2d::Constant(
+    std::numeric_limits<double>::quiet_NaN());
   Points2 current_pixels;
   Mask ground_valid;
   Mask motion_inliers;
@@ -1869,6 +1874,14 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     const Eigen::Matrix3d extra(
       Eigen::AngleAxisd(split_tilt_, Eigen::Vector3d::UnitY()));
     tilt = tilt.has_value() ? Eigen::Matrix3d(extra * tilt.value()) : extra;
+  }
+  if (tilt.has_value()) {
+    const Eigen::Matrix3d & m = tilt.value();
+    solved.applied_tilt = Eigen::Vector2d(
+      std::asin(std::max(-1.0, std::min(1.0, m(2, 1)))),
+      std::asin(std::max(-1.0, std::min(1.0, m(0, 2)))));
+  } else {
+    solved.applied_tilt = Eigen::Vector2d::Zero();
   }
   const Eigen::Matrix3d * tilt_ptr = tilt.has_value() ? &tilt.value() : nullptr;
   // A band or anchor tilt is the camera's angle against the road, not the
@@ -4393,6 +4406,8 @@ void Estimator::process_pair()
   last_point_count_.assign(solved.size(), 0.0);
   last_pair_scatter_.assign(
     solved.size(), Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN()));
+  last_applied_tilt_.assign(
+    solved.size(), Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN()));
   reach_target_ = std::numeric_limits<double>::quiet_NaN();
   for (size_t i = 0; i < solved.size(); ++i) {
     if (solved[i].has_value() && solved[i]->motion.has_value()) {
@@ -4406,6 +4421,7 @@ void Estimator::process_pair()
       last_pitch_gain_[i] = solved[i]->pitch_gain;
       last_mean_range_[i] = solved[i]->mean_range;
       last_pair_scatter_[i] = solved[i]->pair_scatter;
+      last_applied_tilt_[i] = solved[i]->applied_tilt;
       last_point_count_[i] = solved[i]->point_count;
       if (std::isfinite(solved[i]->mean_range)) {
         reach_target_ = std::isfinite(reach_target_)
@@ -4813,6 +4829,7 @@ void Estimator::process_pair()
   update.camera_from_map = last_from_map_;
   update.camera_condition = last_condition_;
   update.camera_pair_scatter = last_pair_scatter_;
+  update.camera_applied_tilt = last_applied_tilt_;
   update.camera_weak_bearing = last_weak_bearing_;
   update.camera_height_gain = last_height_gain_;
   update.camera_pitch_gain = last_pitch_gain_;

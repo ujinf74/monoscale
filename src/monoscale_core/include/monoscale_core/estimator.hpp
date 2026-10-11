@@ -1645,6 +1645,8 @@ struct Update
   // root of the inlier count; anything beyond that is common to the patch and
   // the fit cannot see it, because it went into the translation.
   std::vector<Eigen::Vector2d> camera_pair_scatter;
+  // Per camera, the roll and pitch the ground projection used this solve.
+  std::vector<Eigen::Vector2d> camera_applied_tilt;
   // Bearing of the weakest direction in the body frame, radians.
   std::vector<double> camera_weak_bearing;
   // What a common-mode error costs this camera: translation per metre of
@@ -2083,6 +2085,7 @@ private:
   std::vector<uint8_t> last_from_map_;
   std::vector<double> last_condition_;
   std::vector<Eigen::Vector2d> last_pair_scatter_;
+  std::vector<Eigen::Vector2d> last_applied_tilt_;
   std::vector<double> last_weak_bearing_;
   std::vector<Eigen::Vector2d> last_height_gain_;
   std::vector<Eigen::Vector2d> last_pitch_gain_;
