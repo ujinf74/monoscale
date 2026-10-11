@@ -178,6 +178,15 @@ struct MotionEstimate
   // lines of sight.
   Eigen::Matrix2d shape = Eigen::Matrix2d::Identity();
   bool shape_valid = false;
+  // Root mean square of the inlier votes about the fitted translation, along
+  // and across it. Each correspondence votes for one translation, so this is
+  // what the points disagree with each other by -- and it is deliberately not
+  // what they disagree with the truth by. A displacement common to the whole
+  // patch moves every vote together and is absorbed into the translation, so it
+  // leaves no trace here at all. That is the separation this is for: the
+  // independent part of the hop error is `scatter / sqrt(inliers)`, and
+  // whatever the hop is wrong by beyond that is common to the patch.
+  Eigen::Vector2d scatter = Eigen::Vector2d::Zero();
 };
 
 // Similarity fit through RANSAC, for the frames before the anchor map can

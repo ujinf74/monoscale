@@ -352,6 +352,10 @@ struct Estimator::Solved
 {
   Points2 previous_ground;
   Points2 current_ground;
+  // The pair solve's inlier scatter about its own translation, along and
+  // across. See MotionEstimate::scatter.
+  Eigen::Vector2d pair_scatter = Eigen::Vector2d::Constant(
+    std::numeric_limits<double>::quiet_NaN());
   Points2 current_pixels;
   Mask ground_valid;
   Mask motion_inliers;
@@ -2680,6 +2684,7 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
     solved.motion = estimate->motion;
     solved.motion_shape = estimate->shape;
     solved.motion_shape_valid = estimate->shape_valid;
+    solved.pair_scatter = estimate->scatter;
     // The road's own length for this interval, where the hop really is one.
     if (settings_.photometric_on_pairs && settings_.photometric_step_gain > 0.0 &&
       camera.photometric_valid && !camera.photometric_broken &&
@@ -4386,6 +4391,8 @@ void Estimator::process_pair()
   last_mean_range_.assign(
     solved.size(), std::numeric_limits<double>::quiet_NaN());
   last_point_count_.assign(solved.size(), 0.0);
+  last_pair_scatter_.assign(
+    solved.size(), Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN()));
   reach_target_ = std::numeric_limits<double>::quiet_NaN();
   for (size_t i = 0; i < solved.size(); ++i) {
     if (solved[i].has_value() && solved[i]->motion.has_value()) {
@@ -4398,6 +4405,7 @@ void Estimator::process_pair()
       last_height_gain_[i] = solved[i]->height_gain;
       last_pitch_gain_[i] = solved[i]->pitch_gain;
       last_mean_range_[i] = solved[i]->mean_range;
+      last_pair_scatter_[i] = solved[i]->pair_scatter;
       last_point_count_[i] = solved[i]->point_count;
       if (std::isfinite(solved[i]->mean_range)) {
         reach_target_ = std::isfinite(reach_target_)
@@ -4804,6 +4812,7 @@ void Estimator::process_pair()
   update.camera_hops = last_camera_hops_;
   update.camera_from_map = last_from_map_;
   update.camera_condition = last_condition_;
+  update.camera_pair_scatter = last_pair_scatter_;
   update.camera_weak_bearing = last_weak_bearing_;
   update.camera_height_gain = last_height_gain_;
   update.camera_pitch_gain = last_pitch_gain_;

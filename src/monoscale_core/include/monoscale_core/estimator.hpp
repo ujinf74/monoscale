@@ -1640,6 +1640,11 @@ struct Update
   // Recorded, not applied. This is the instrument that says whether the
   // solve's weak direction is where its error actually goes.
   std::vector<double> camera_condition;
+  // Per camera, the pair solve's inlier scatter about its own translation,
+  // along and across it. The hop error that averages is this over the square
+  // root of the inlier count; anything beyond that is common to the patch and
+  // the fit cannot see it, because it went into the translation.
+  std::vector<Eigen::Vector2d> camera_pair_scatter;
   // Bearing of the weakest direction in the body frame, radians.
   std::vector<double> camera_weak_bearing;
   // What a common-mode error costs this camera: translation per metre of
@@ -2077,6 +2082,7 @@ private:
   std::vector<Eigen::Vector2d> last_camera_hops_;
   std::vector<uint8_t> last_from_map_;
   std::vector<double> last_condition_;
+  std::vector<Eigen::Vector2d> last_pair_scatter_;
   std::vector<double> last_weak_bearing_;
   std::vector<Eigen::Vector2d> last_height_gain_;
   std::vector<Eigen::Vector2d> last_pitch_gain_;

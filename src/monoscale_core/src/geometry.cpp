@@ -488,6 +488,36 @@ std::optional<MotionEstimate> estimate_planar_motion_with_yaw(
       }
     }
   }
+  // What the inlier votes disagree with the fitted translation by, resolved
+  // along it and across it. See MotionEstimate::scatter: this is the part of
+  // the hop error that averages, and what it leaves out is the part that does
+  // not.
+  {
+    const double length = translation.norm();
+    const Eigen::Vector2d along =
+      length > 1e-9 ? Eigen::Vector2d(translation / length) : Eigen::Vector2d(1.0, 0.0);
+    const Eigen::Vector2d across(-along.y(), along.x());
+    double sum_along = 0.0;
+    double sum_across = 0.0;
+    double weight = 0.0;
+    for (Eigen::Index i = 0; i < count; ++i) {
+      if (!result.inliers(i)) {
+        continue;
+      }
+      const Eigen::Vector2d residual(
+        offsets(i, 0) - translation.x(), offsets(i, 1) - translation.y());
+      const double w = weighted ? std::max(weights(i), 0.0) : 1.0;
+      const double a = residual.dot(along);
+      const double b = residual.dot(across);
+      sum_along += w * a * a;
+      sum_across += w * b * b;
+      weight += w;
+    }
+    if (weight > 0.0) {
+      result.scatter = Eigen::Vector2d(
+        std::sqrt(sum_along / weight), std::sqrt(sum_across / weight));
+    }
+  }
   result.motion = PlanarMotion{
     translation.x(), translation.y(), yaw, inliers, 1.0};
   return result;
