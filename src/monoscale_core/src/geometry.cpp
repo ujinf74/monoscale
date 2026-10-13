@@ -239,32 +239,50 @@ void pixels_to_ground(
   // and 8.16, a ratio of 1.09, so here the omission is worth about one per cent
   // of a hop and cannot be what dominates it.
   //
-  // And the gain from a tilt to a hop is `2 R / z`, not `R / z`. The hop is one
-  // point's two ranges differenced, a tilt error moves both, and what is left
-  // is `delta/z (R1^2 - R2^2) = delta (R1 + R2) hop / z`. Checked numerically
-  // against the exact projection: at a 13 m mean range, 0.1 degrees gives
-  // -2.788 per cent of the hop where `2R/z` predicts -2.848 and `R/z` would say
-  // -1.424. Earlier commits here used the single-frame figure and so asked for
-  // twice the angle they should have.
+  // Two gains, not one, and they are what decide this. A tilt error enters both
+  // frames of a hop and partly cancels: the hop is one point's two ranges
+  // differenced, so what survives is `delta/z (R1^2 - R2^2) = delta (R1 + R2)
+  // hop / z`, a fractional gain of `2R/z` -- 0.285 per degree at the front's
+  // 13 m. Checked against the exact projection: 0.1 degrees costs 2.788 per
+  // cent of the hop where that predicts 2.848. A flow error enters one frame
+  // only and does not cancel, so its gain is the single-frame range
+  // sensitivity `(R^2 + z^2)/z`, 107.7 m per radian.
   //
-  // What the common part of Ford's hop error actually asks for is 0.564 degrees
-  // of plane tilt, and the road's own vertical curvature supplies it: fitting a
-  // plane across the 6-30 m band of a crest or sag of ordinary radius leaves
-  // 0.436 and 0.568 degrees rms of apparent tilt on the two drives, measured
-  // off the truth trajectory's elevation. Log6's is the required angle to three
-  // decimal places and Log5's is four fifths of it. The equivalent collective
-  // bearing shift is 9.3 pixels, which no tracker does, so the angle is the
-  // plane's and not the correspondences'.
+  // So the same 0.2957 m of displacement common to the patch -- 98 per cent of
+  // Ford's hop length error, 14.8 per cent of a hop -- is either 0.519 degrees
+  // of plane tilt or 2.59 pixels of collective flow bias. Those are very
+  // different asks, and the angle budget decides between them.
   //
-  // The correlation is the part that does not fit: regressed against that
-  // least-squares band slope the fractional hop error takes R2 of only 0.003
-  // and 0.055, with a coefficient a sixth to a twentieth of `2R/z`, and it
-  // follows neither the band's width nor the consensus threshold as a
-  // least-squares plane would. A robust fit does not take the least-squares
-  // slope -- it takes whichever subset agrees -- so the amplitude is set by the
-  // road's curvature while the realised angle is some other functional of the
-  // same shape. Which is as far as this can be taken without the per-point
-  // residuals of the chosen consensus.
+  // The budget is small, because the vehicle rides the road. Against the truth
+  // trajectory the body's pitch and the road's slope move together -- correlated
+  // at 0.96 and 0.92 on the two drives -- so the camera-to-road angle, which is
+  // the only angle this projection wants, varies by just 0.243 and 0.363
+  // degrees rms. At 0.285 per degree that is at most 6.9 and 10.3 per cent of a
+  // hop, against the 13 to 14 measured, and the applied tilt already follows
+  // part of it at 0.19 to 0.23 degrees rms of its own variation. Failing to
+  // follow that angle entirely would still leave half to a quarter of the error
+  // unexplained. The plane's normal cannot carry this, and a height error would
+  // need 23 cm.
+  //
+  // Which leaves the correspondences, where 2.59 pixels suffices and is
+  // ordinary -- low-texture asphalt with repetitive markings, motion blur at
+  // 14 m/s, and a pyramidal flow whose convergence on a translating plane is
+  // gradient-dependent. It is not the warm start: seeding from each point's
+  // previous velocity accounts for a twentieth of the amplitude. And it is
+  // consistent with the one thing every selection knob had in common, that
+  // none of them moved it -- `ground_motion_floor`, the consensus threshold,
+  // the lateral corridor and the band's two edges change *which* points are
+  // used and leave a collective bias on the patch untouched.
+  //
+  // This supersedes two earlier readings and both were mine. The first used
+  // `R/z` for the tilt and asked for twice the angle. The second corrected that
+  // and then applied the tilt gain to the flow figure as well, reporting 9.3
+  // pixels where 2.59 is right, and concluded from the road's curvature
+  // matching 0.519 degrees in amplitude that the road was the carrier. It is
+  // not: binned by the band's own tilt, the flattest fifth of Log5's hops
+  // carries 15.27 per cent of common displacement where curvature predicts
+  // 0.61, and the steepest fifth carries 12.53 where it predicts 21.23. The
+  // amplitude agreement was a coincidence of two root-mean-squares.
   //
   // What the argument above does imply, and it took a while to see, is that no
   // measurement of the body against gravity can test this path. The angle the
