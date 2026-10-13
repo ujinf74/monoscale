@@ -228,6 +228,29 @@ void pixels_to_ground(
   // the larger of the two ways the tilt reaches a range (-10.4 m/rad against
   // the normal's -7.9 on the front mount) and it is spurious for every bit of
   // the tilt that is road slope. Holding the height nominal drops it.
+  //
+  // That ratio is a property of the mount, and it is why this is a bigger
+  // question on the simulated rig than on Ford. The omitted lever is `x/z` per
+  // radian and range-independent; the normal's term is `R/z` and grows with the
+  // band. At 3.694 m of lever over 0.889 m of height against a 4.3 m band they
+  // are 4.16 and 4.84, a ratio of 1.86 -- which is the 1.05 against 1.93 the
+  // working notes record as an unexplained gap between this implementation and
+  // the analysis. At Ford's 1.186 over 1.593 against a 13 m band they are 0.74
+  // and 8.16, a ratio of 1.09, so here the omission is worth about one per cent
+  // of a hop and cannot be what dominates it.
+  //
+  // What the argument above does imply, and it took a while to see, is that no
+  // measurement of the body against gravity can test this path. The angle the
+  // projection wants is the camera against the road; the vehicle rides on the
+  // road, so the body's pitch very largely cancels, and a regression of the hop
+  // error on the truth attitude returning R2 0.006 is the expected result
+  // rather than evidence that tilt is not involved. The magnitude is on the
+  // other side of the question: 0.84 degrees rms of true pitch would be 11.96
+  // per cent of a Ford hop at `R/z` of 8.16, against 14.7 per cent measured for
+  // the part of the hop error common to the whole patch. What is left
+  // unobserved is the suspension's own pitch -- body against road -- and the
+  // apparent tilt a plane fitted across a 24 m band takes from the road's
+  // curvature. Neither is in Ford's data.
   const double height = tilt_moves_camera ? arm.dot(normal) + centre.z() : origin.z();
 
   for (Eigen::Index i = 0; i < count; ++i) {
