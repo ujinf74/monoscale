@@ -239,14 +239,41 @@ void pixels_to_ground(
   // and 8.16, a ratio of 1.09, so here the omission is worth about one per cent
   // of a hop and cannot be what dominates it.
   //
+  // And the gain from a tilt to a hop is `2 R / z`, not `R / z`. The hop is one
+  // point's two ranges differenced, a tilt error moves both, and what is left
+  // is `delta/z (R1^2 - R2^2) = delta (R1 + R2) hop / z`. Checked numerically
+  // against the exact projection: at a 13 m mean range, 0.1 degrees gives
+  // -2.788 per cent of the hop where `2R/z` predicts -2.848 and `R/z` would say
+  // -1.424. Earlier commits here used the single-frame figure and so asked for
+  // twice the angle they should have.
+  //
+  // What the common part of Ford's hop error actually asks for is 0.564 degrees
+  // of plane tilt, and the road's own vertical curvature supplies it: fitting a
+  // plane across the 6-30 m band of a crest or sag of ordinary radius leaves
+  // 0.436 and 0.568 degrees rms of apparent tilt on the two drives, measured
+  // off the truth trajectory's elevation. Log6's is the required angle to three
+  // decimal places and Log5's is four fifths of it. The equivalent collective
+  // bearing shift is 9.3 pixels, which no tracker does, so the angle is the
+  // plane's and not the correspondences'.
+  //
+  // The correlation is the part that does not fit: regressed against that
+  // least-squares band slope the fractional hop error takes R2 of only 0.003
+  // and 0.055, with a coefficient a sixth to a twentieth of `2R/z`, and it
+  // follows neither the band's width nor the consensus threshold as a
+  // least-squares plane would. A robust fit does not take the least-squares
+  // slope -- it takes whichever subset agrees -- so the amplitude is set by the
+  // road's curvature while the realised angle is some other functional of the
+  // same shape. Which is as far as this can be taken without the per-point
+  // residuals of the chosen consensus.
+  //
   // What the argument above does imply, and it took a while to see, is that no
   // measurement of the body against gravity can test this path. The angle the
   // projection wants is the camera against the road; the vehicle rides on the
   // road, so the body's pitch very largely cancels, and a regression of the hop
   // error on the truth attitude returning R2 0.006 is the expected result
   // rather than evidence that tilt is not involved. The magnitude is on the
-  // other side of the question: 0.84 degrees rms of true pitch would be 11.96
-  // per cent of a Ford hop at `R/z` of 8.16, against 14.7 per cent measured for
+  // other side of the question: 0.84 degrees rms of true pitch would be 23.9
+  // per cent of a Ford hop at `2R/z` of 16.3, against 14.3 per cent measured for
   // the part of the hop error common to the whole patch. What is left
   // unobserved is the suspension's own pitch -- body against road -- and the
   // apparent tilt a plane fitted across a 24 m band takes from the road's
