@@ -196,10 +196,18 @@ Configuration declare_and_read(rclcpp::Node & node)
       at < array_images.size() ? array_images[at] : composed_image);
     topics.camera_info_topics.push_back(
       at < array_infos.size() ? array_infos[at] : composed_info);
-    // How much further than the truth this camera measures the ground to have
-    // moved, as a factor to divide out. Not an extrinsic: the camera is where
-    // the kit says it is, and this is measured downstream of that.
-    camera.range_scale = node.declare_parameter<double>("ground_range_scale_" + name, 1.0);
+    // `ground_range_scale_<name>` stood here and did nothing. `range_scale` is
+    // derived from `ground_plane_offset_m` in the estimator's own setup --
+    // `height / (height - offset)`, which overwrites whatever was declared
+    // before anything reads it -- and the deployed offset is non-zero on every
+    // rig, so the declaration could never take effect. Verified rather than
+    // read off the code: 1.0, 1.5 and 3.0 give bit-identical trajectories.
+    //
+    // It is not a parameter that wants fixing. `vision_fisheye.param.yaml`
+    // records that the offset *replaced* the free pair, because the physics has
+    // one degree of freedom and not two: a road `d` above the datum leaves each
+    // camera at `h - d`. A knob that promises a second one is worse than no
+    // knob, so it is gone rather than wired up.
     // Whether this camera's mounting pitch is learned from the lean its
     // alignment residual leaves. Off unless the observable is there for it --
     // CameraSettings carries which cameras that was measured to be.
