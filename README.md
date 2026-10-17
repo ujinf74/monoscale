@@ -293,6 +293,7 @@ Everything that runs on the vehicle is C++. The stack was developed against a
 Python estimator, which was removed from the tree once the trajectories matched;
 what was carried across and what was not is in
 [`src/monoscale_core/README.md`](src/monoscale_core/README.md).
+
 ---
 
 ## Packages
@@ -305,6 +306,7 @@ what was carried across and what was not is in
 | `monoscale_occupancy_grid_map` | plane-sweeps the raw fisheye into an occupancy grid. CUDA for real time. |
 | `monoscale_evaluation` | scoring against truth. Not deployed. |
 | `monoscale_carla` | CARLA only: camera assembly, the truth tap, the drive scripts. |
+
 ---
 
 ## Topics
@@ -356,6 +358,7 @@ is no red at all** -- not one cell of a vehicle was called free -- with three
 yellow cells and a thin orange rim. Regenerate it with
 `monoscale_evaluation/render_map.py`; the truth archives it scores against are
 too large to ship, and `sim/` is what makes them.
+
 ---
 
 ## Building and running
@@ -385,6 +388,7 @@ unconditionally and defined only in the CUDA translation unit, so a machine
 without `nvcc` failed at the link rather than falling back. It went unseen
 because this machine's CMake finds `/usr/local/cuda` whether or not `nvcc` is
 on PATH; a build of a tree made only of the tracked files is what surfaced it.
+
 ---
 
 ## Tests
@@ -397,6 +401,7 @@ colcon test-result --all
 148 of them: the geometry, the anchor map, the filters, the inertial path, the
 attitude, the estimator end to end over a synthetic drive, and two that hold the
 vehicle's frame tree against the simulator's own calibration.
+
 ---
 
 ## Scoring against a recorded drive
@@ -410,6 +415,7 @@ ros2 run monoscale_odometry monoscale_replay <bag> \
 It reads the bag itself and drives the library in recording order. It reads no
 clock and no random source, so one bag gives one trajectory on a desktop and on
 an Orin alike -- which is why regressions are visible at all.
+
 ---
 
 ## Reproducing the recordings
