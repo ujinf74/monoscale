@@ -3,7 +3,6 @@
 [![License](https://img.shields.io/github/license/ujinf74/monoscale)](LICENSE)
 [![ROS 2](https://img.shields.io/badge/ROS%202-Humble-blue)](https://docs.ros.org/en/humble/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-blue)](src/monoscale_core)
-[![tests](https://img.shields.io/badge/tests-149%20passing-brightgreen)](#tests)
 
 **monoscale** turns ordinary monocular cameras into a **metric** odometry and
 occupancy stack, taking its scale from the one distance a road vehicle already
@@ -11,7 +10,8 @@ knows: **the height of the camera above the road**.
 
 No stereo pair, no lidar in the loop, no learned model, no prior map, no wheel
 encoder. One camera is enough, N is allowed, and they are free not to overlap --
-the two on this vehicle face opposite ways and share no field of view at all.
+the two on the rig it was developed against face opposite ways and share no
+field of view at all.
 
 ![Estimate against ground truth](media/trajectories.png)
 
@@ -71,7 +71,7 @@ here rather than reproducible from a clone.
 
 Monocular vision has no scale. Every source of it trades away something:
 
-| Scale source | No extra hardware | Works at a standstill | Metric from frame 1 | Unaffected by texture | Needs no prior map |
+| Scale source | No extra hardware | Needs no excitation | Metric without initialisation | Unaffected by texture | Needs no prior map |
 |---|:--:|:--:|:--:|:--:|:--:|
 | Stereo baseline | ✗ | ◎ | ◎ | ○ | ◎ |
 | Lidar | ✗ | ◎ | ◎ | ◎ | ◎ |
@@ -100,7 +100,8 @@ precision](#what-sets-the-precision).
 * Cameras need not overlap; on this rig they cannot (40.53 deg of gap per side)
 * One camera is a supported rig, not a degenerate case -- costs 2.6 to 6.2x
 * Any N cameras; each contributes its own ground observation and anchor map
-* Heading self-contained: gyro-integrated, its bias corrected by the road fit
+* Heading self-contained: integrated from the gyro, with no bias state --
+  estimating one was measured to cost 14 to 16 times the error
 * Dead reckoning through a failed solve follows the gyro's arc, not the tangent
 * An anchor map of ground sightings bounds the random walk over 1600 frames
 * Occupancy from the same images by plane sweep, CUDA for real time
@@ -122,8 +123,11 @@ precision](#what-sets-the-precision).
 5. Ground sightings are written into an anchor map in world coordinates; where
    it can answer, the hop becomes a pose correction against it rather than a
    two-frame increment, which is what bounds the random walk.
-6. The cameras' answers are combined, equalised, and filtered with the
-   accelerometer as a prediction.
+6. The cameras' answers are combined -- by inverse precision on the simulated
+   rig, by a fixed weight on Ford, where the rear band carries traffic and
+   precision becomes the wrong judge -- and the result goes through a filter
+   that takes the accelerometer's propagation as its prediction where that is
+   enabled.
 7. Separately, the raw frames are plane-swept into an occupancy grid using the
    attitude this odometry publishes.
 
@@ -131,21 +135,20 @@ precision](#what-sets-the-precision).
 
 ## What sets the precision
 
-This is the part worth reading before trusting a number, because the two
-columns above differ by 67x in `hop %` and the reason is almost entirely
-**geometry and registration, not code**.
+Worth reading before trusting a number: the two columns above differ by 67x in
+`hop %`, and the reason is **geometry and registration, not code**.
 
-The projection has exactly two parameters -- the camera's perpendicular
-distance to the road and the plane's normal -- so every range out of it is
+The projection has exactly two parameters -- the camera's perpendicular distance
+to the road and the plane's normal -- so every range out of it is
 `lambda = -h / (ray . n)`. A displacement common to the whole tracked patch is
 therefore indistinguishable from motion: the fit absorbs it into the
-translation, and no observable downstream can see it. Measured on Ford, that
-common part is **98 %** of the hop length error, and the hop length is **85 to
-89 %** of the segment error. The individual points agree with each other to 1.5
-to 2.0 pixels and averaging them would give 1.4 to 1.8 % of the hop -- the
-floor the scoring assumes. The hop is wrong by nine times that.
+translation, and nothing downstream can see it. On Ford that common part is
+**98 %** of the hop length error, and the hop length is **85 to 89 %** of the
+segment error. The points agree with each other to 1.5 to 2.0 pixels, so
+averaging them would give 1.4 to 1.8 % of the hop -- the floor the scoring
+assumes. The hop is wrong by nine times that.
 
-Decomposing it against the simulated rig, the arithmetic closes to one per cent:
+Decomposed against the simulated rig, the arithmetic closes to one per cent:
 
 | | CARLA | Ford | ratio |
 | --- | ---: | ---: | ---: |
@@ -153,35 +156,30 @@ Decomposing it against the simulated rig, the arithmetic closes to one per cent:
 | mean range of the band | 1.9 m | 13.0 m | |
 | **depression angle** | **25.1 deg** | **7.0 deg** | `R/h` 2.1 against 8.2 |
 | cost per pixel, `(R²+h²)/(h·f)` | 0.0047 m | 0.1140 m | **24.4x** |
-| implied collective registration bias | **0.059 px** | **2.578 px** | **43.8x** |
+| collective registration bias | **0.059 px** | **2.578 px** | **43.8x** |
 | common part, as a fraction of the hop | 0.22 % | 14.84 % | 67x |
 
 `24.4 x 43.8 / 16.0 = 66.6` against 67.5 measured.
 
-**The governing quantity is the depression angle at which the road is read**,
-because the per-pixel cost goes as `(R/h)²` and `R/h = 1/tan(theta)`. Precision
-therefore goes as `tan²(theta)`, and `(tan 25.1 / tan 7.0)² = 14.6` -- most of
-the 24.4x. The same angle degrades the other factor too: one metre of road
-along the line of sight is **212.5 pixels** at 25.1 deg and **8.8** at 7.0, so a
-10 cm road feature spans 0.88 of a pixel and the instrument is read at its
-sampling limit. Motion blur lands in the same place -- 0.6 to 1.2 px at 14 m/s
-for a 5 to 10 ms exposure, against the 2.58 px measured.
+**The governing quantity is the depression angle at which the road is read.**
+The per-pixel cost goes as `(R/h)²` and `R/h = 1/tan(theta)`, so precision goes
+as `tan²(theta)` -- `(tan 25.1 / tan 7.0)² = 14.6`, most of the 24.4x. The same
+angle spoils the other factor: a metre of road along the line of sight is 212.5
+pixels at 25.1 deg and 8.8 at 7.0, so a 10 cm feature spans 0.88 of a pixel and
+the instrument is read at its sampling limit. Motion blur lands there too, 0.6
+to 1.2 px at 14 m/s for a 5 to 10 ms exposure against the 2.58 measured.
 
-It is not the plane's attitude, and that is a budget argument rather than a
-guess. The vehicle rides the road, so the body's pitch and the road's slope move
-together (correlated 0.96 and 0.92 against truth); the camera-to-road angle,
-the only angle this projection wants, varies by just 0.243 and 0.363 deg rms.
-At the tilt-to-hop gain of `2R/h` that is at most 6.9 and 10.3 % of a hop
-against 13 to 14 measured, so failing to follow that angle completely would
-still leave most of the error. A height error would need 23 cm.
+It is not the plane's attitude, and that is a budget rather than a guess: the
+vehicle rides the road, so body pitch and road slope move together (correlated
+0.96 and 0.92 against truth) and the camera-to-road angle varies by only 0.243
+and 0.363 deg rms. At the tilt-to-hop gain of `2R/h` that is at most 6.9 and
+10.3 % of a hop against 13 to 14 measured. A height error would need 23 cm.
 
-So the lever is mounting. Pulling the near edge of the band in raises the
-depression angle, and on this vehicle it is where the bodywork is: the held-out
-drive reads 2.20 % at 6.0 m, 2.29 % at 5.5 and 3.19 % at 5.0, and the front's
-hop noise *rises* on the way in, which is the signature of new bad points rather
-than better geometry. Trimming the far edge instead trades amplification against
-conditioning and loses. **A camera that cannot read the road inside twenty
-degrees is short of geometry, not of tuning.**
+So the lever is mounting, and on this vehicle the near edge of the band is where
+the bodywork is -- the held-out drive reads 2.20 % at 6.0 m, 2.29 at 5.5 and
+3.19 at 5.0, with the front's hop noise *rising* on the way in, which is new bad
+points rather than better geometry. **A camera that cannot read the road inside
+twenty degrees is short of geometry, not of tuning.**
 
 ---
 
@@ -236,7 +234,9 @@ degrees is short of geometry, not of tuning.**
 
 * planar road only -- no vertical-curvature model, no camber estimate
 * scale is only as good as the mounting height, which is an input
-* precision goes as `tan²` of the depression angle, so a high mount is expensive
+* precision goes as `tan²` of the depression angle at which the road is read,
+  and a mount high enough for the vehicle's own body to push that read out is
+  expensive -- height itself helps, occlusion is what costs
 * texture-dependent -- smooth concrete and standing water are failure cases
 * calibration is fragile: perturbing the mount pitch by 0.004 degrees, a
   fortieth of the correction this vehicle needed, swings ATE by tens of per
@@ -321,6 +321,10 @@ images ─┬─→ monoscale_tracker  →  /vision/tracks/<camera>
 
 The two branches split at the image. Odometry sees only feature tracks; the grid
 looks at the raw frames again.
+
+---
+
+## Occupancy grid
 
 The grid is a **plane sweep**: world-horizontal planes are stacked from −0.15 m
 in 0.05 m steps, each pixel is scored by ZNCC for how well two views agree at
